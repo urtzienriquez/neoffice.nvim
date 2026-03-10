@@ -60,7 +60,8 @@ function M.write_entry(zip_path, entry, content)
     return false
   end
 
-  local cmd = "cd " .. sq(tmp_dir) .. " && zip -u " .. sq(abs_zip) .. " " .. sq(entry) .. " 2>&1"
+  -- local cmd = "cd " .. sq(tmp_dir) .. " && zip -u " .. sq(abs_zip) .. " " .. sq(entry) .. " 2>&1"
+  local cmd = string.format("cd %s && zip %s %s", sq(tmp_dir), sq(abs_zip), sq(entry))
   local out = vim.fn.system(cmd)
   local exit_code = vim.v.shell_error
 

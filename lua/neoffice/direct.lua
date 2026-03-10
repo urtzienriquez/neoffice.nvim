@@ -265,13 +265,13 @@ local function odt_to_text(zip_path)
       table.insert(lines, "")
       para_map[#lines] = para_idx
       pos = next_start + #self_closing
-      -- goto continue
+      goto continue
     end
 
     local open_tag, content, end_tag_match = raw:match(pattern, next_start)
     if not open_tag then
       pos = next_start + 1
-      -- goto continue
+      goto continue
     end
 
     -- For headings, extract the level
@@ -302,7 +302,7 @@ local function odt_to_text(zip_path)
     local close_pos = raw:find(close_tag, next_start, true)
     pos = close_pos and (close_pos + #close_tag) or (next_start + 1)
 
-    --::continue::
+    ::continue::
   end
 
   return table.concat(lines, "\n"), para_map, root
