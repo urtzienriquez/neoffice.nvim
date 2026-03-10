@@ -75,7 +75,7 @@ function M.open_proxy(orig_path, text_path, para_map, original_root)
 
   vim.notify(
     string.format(
-      "[neoffice] %s opened in DIRECT mode\nAll formatting preserved! Edit freely, :w to save.",
+      "[neoffice] %s opened",
       vim.fn.fnamemodify(orig_path, ":t")
     ),
     vim.log.levels.INFO

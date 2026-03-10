@@ -31,6 +31,8 @@ function M.setup_highlights()
   vim.api.nvim_set_hl(0, "NeofficeCommentResolved", { fg = "#9ece6a", default = true })
 end
 
+local NS_PANEL = vim.api.nvim_create_namespace("neoffice_panel_hls")
+
 -- ── Rendering ────────────────────────────────────────────────────────────────
 
 local function wrap(text, width, indent)
@@ -55,41 +57,102 @@ local function render()
 
   local lines = {}
   local line_map = {}
+  local hl_data = {}
   local W = 52
+
+  -- Helper to queue an extmark
+  local function add_extmark(group, line, start_col, end_col)
+    table.insert(hl_data, {
+      line = line,
+      s = start_col,
+      e = end_col,
+      hl = group,
+    })
+  end
 
   if #state.comments == 0 then
     lines = { "", "  (no comments)", "" }
   else
     for _, cm in ipairs(state.comments) do
-      local resolved_tag = cm.resolved and "  ✓" or ""
-      -- Header line – map this line to the comment id
       line_map[#lines] = cm.id
-      table.insert(lines, string.format("┌─ @%s  %s%s", cm.author, (cm.date or ""):sub(1, 10), resolved_tag))
 
-      -- Body
+      local author_str = "@" .. cm.author
+      local date_str = (cm.date or ""):sub(1, 10)
+      local resolved_tag = cm.resolved and "  ✓" or ""
+
+      local header_prefix = "┌─ "
+      local author_start = #header_prefix
+      local author_end = author_start + #author_str
+
+      local date_gap = "  "
+      local date_start = author_end + #date_gap
+      local date_end = date_start + #date_str
+
+      add_extmark("NeofficeCommentAuthor", #lines, author_start, author_end)
+      add_extmark("NeofficeCommentDate", #lines, date_start, date_end)
+
+      if cm.resolved then
+        add_extmark("NeofficeCommentResolved", #lines, date_end, date_end + #resolved_tag)
+      end
+
+      table.insert(lines, string.format("%s%s%s%s%s", header_prefix, author_str, date_gap, date_str, resolved_tag))
+
       for _, l in ipairs(wrap(cm.text or "", W, 3)) do
         table.insert(lines, "│" .. l)
       end
 
-      -- Replies
       for _, r in ipairs(cm.replies or {}) do
         table.insert(lines, "│")
-        table.insert(lines, string.format("│  ↩ @%s  %s", r.author or "?", (r.date or ""):sub(1, 10)))
+
+        local r_author = "@" .. (r.author or "?")
+        local r_date = (r.date or ""):sub(1, 10)
+        local reply_prefix = "│  ↩ " -- Correctly handles multi-byte UTF-8
+
+        local ra_start = #reply_prefix
+        local ra_end = ra_start + #r_author
+        local rd_gap = "  "
+        local rd_start = ra_end + #rd_gap
+        local rd_end = rd_start + #r_date
+
+        add_extmark("NeofficeCommentAuthor", #lines, ra_start, ra_end)
+        add_extmark("NeofficeCommentDate", #lines, rd_start, rd_end)
+
+        table.insert(lines, string.format("%s%s%s%s", reply_prefix, r_author, rd_gap, r_date))
+
         for _, l in ipairs(wrap(r.text or "", W - 4, 5)) do
           table.insert(lines, "│" .. l)
         end
       end
 
-      table.insert(lines, "└" .. string.rep("─", W + 2))
+      table.insert(lines, "└" .. string.rep("─", 10))
       table.insert(lines, "")
     end
 
-    -- Key hint footer
-    table.insert(lines, "  r=reply  <CR>=resolve  d=delete  q=close")
+    local footer_text = "  r=reply  <CR>=resolve  d=delete  q=close"
+    table.insert(lines, footer_text)
+    local footer_lnum = #lines - 1
+
+    add_extmark("NeofficeCommentDate", footer_lnum, 0, #footer_text)
+
+    for _, key in ipairs({ "r", "<CR>", "d", "q" }) do
+      local s, e = footer_text:find(key .. "=", 1, true)
+      if s and e then
+        add_extmark("NeofficeCommentResolved", footer_lnum, s - 1, e - 1)
+      end
+    end
   end
 
   vim.api.nvim_set_option_value("modifiable", true, { buf = state.panel_buf })
   vim.api.nvim_buf_set_lines(state.panel_buf, 0, -1, false, lines)
+
+  vim.api.nvim_buf_clear_namespace(state.panel_buf, NS_PANEL, 0, -1)
+  for _, mark in ipairs(hl_data) do
+    vim.api.nvim_buf_set_extmark(state.panel_buf, NS_PANEL, mark.line, mark.s, {
+      end_col = mark.e,
+      hl_group = mark.hl,
+    })
+  end
+
   vim.api.nvim_set_option_value("modifiable", false, { buf = state.panel_buf })
   state.comment_line_map = line_map
 end
