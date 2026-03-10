@@ -281,15 +281,9 @@ local function odt_to_text(zip_path)
       prefix = string.rep("#", tonumber(level)) .. " "
     end
 
-    -- Replace XML tags with spaces to preserve word boundaries
-    -- BUT: self-closing tags (like bookmarks) should not add spaces
-
-    -- First remove self-closing tags without adding space
-    local text = content:gsub("<[^>]+/>", "")
-
-    -- Then replace remaining tags (open/close pairs) with spaces
-    -- This prevents "word1</span><span>word2" from becoming "word1word2"
-    text = text:gsub("<[^>]+>", " ")
+    -- Remove all XML tags without inserting spaces.
+    -- Tags often split words due to formatting spans.    
+    local text = content:gsub("<[^>]+>", "")
 
     -- Decode XML entities
     text = text:gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&amp;", "&"):gsub("&quot;", '"'):gsub("&apos;", "'")
