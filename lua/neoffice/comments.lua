@@ -38,10 +38,14 @@ local NS_PANEL = vim.api.nvim_create_namespace("neoffice_panel_hls")
 local function wrap(text, width, indent)
   local out = {}
   local prefix = string.rep(" ", indent)
+  local wrap_width = width - indent
   for _, line in ipairs(vim.split(text, "\n", { plain = true })) do
-    while #line > width do
-      table.insert(out, prefix .. line:sub(1, width))
-      line = line:sub(width + 1)
+    while #line > wrap_width do
+      local segment = line:sub(1, wrap_width + 1)
+      local last_space = segment:find("%s[^%s]*$")
+      local split_at = last_space or (wrap_width + 1)
+      table.insert(out, prefix .. line:sub(1, split_at - 1))
+      line = line:sub(split_at + 1)
     end
     if line ~= "" then
       table.insert(out, prefix .. line)
@@ -199,7 +203,7 @@ function M.toggle(orig_path, main_buf)
 
   render()
 
-  local width = math.floor(vim.o.columns * 0.30)
+  local width = math.floor(vim.o.columns * 0.35)
   vim.cmd("botright " .. width .. "vsplit")
   state.panel_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(state.panel_win, state.panel_buf)
@@ -209,6 +213,7 @@ function M.toggle(orig_path, main_buf)
   vim.api.nvim_set_option_value("signcolumn", "no", { win = state.panel_win })
   vim.api.nvim_set_option_value("cursorline", true, { win = state.panel_win })
   vim.api.nvim_set_option_value("wrap", true, { win = state.panel_win })
+  vim.api.nvim_set_option_value("linebreak", true, { win = state.panel_win })
   vim.api.nvim_set_option_value(
     "winhighlight",
     "Normal:NeofficeCommentPanel,CursorLine:NeofficeCommentCursor",
