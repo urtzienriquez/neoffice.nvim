@@ -58,48 +58,85 @@ local function docx_to_text(zip_path)
     return nil, "Could not read document.xml"
   end
 
+  -- Remove comment range markers and other non-content elements
+  raw = raw:gsub("<w:commentRangeStart[^>]*/>", "")
+  raw = raw:gsub("<w:commentRangeEnd[^>]*/>", "")
+  raw = raw:gsub("<w:commentReference[^>]*/>", "")
+
+  -- Parse for structure (root return value)
   local root = xml.parse(raw)
-  local body = xml.find_first(root, "w:body")
-  if not body then
-    return nil, "No w:body found"
-  end
 
   local lines = {}
-  local para_map = {} -- Track paragraph index to XML node mapping
+  local para_map = {}
 
-  for idx, para in ipairs(xml.find_all(body, "w:p")) do
-    -- Extract all text from runs in this paragraph
-    local para_text = {}
-    for _, run in ipairs(xml.find_all(para, "w:r")) do
-      for _, t in ipairs(xml.find_all(run, "w:t")) do
-        local text = xml.inner_text(t)
-        if text ~= "" then
-          table.insert(para_text, text)
-        end
-      end
+  -- Process all w:p elements in document order from raw XML
+  local pos = 1
+  local para_idx = 0
+
+  while pos <= #raw do
+    -- Find next paragraph (including self-closing)
+    local p_start = raw:find("<w:p[%s>/]", pos)
+    if not p_start then
+      break
     end
 
-    -- Check if this is a heading or special paragraph
-    local pPr = xml.find_first(para, "w:pPr")
-    local pStyle = pPr and xml.find_first(pPr, "w:pStyle")
-    local style_val = pStyle and xml.attr(pStyle, "w:val")
+    para_idx = para_idx + 1
 
+    -- Check for self-closing paragraph (rare but possible)
+    local self_closing = raw:match("^<w:p[^>]*/>", p_start)
+    if self_closing then
+      table.insert(lines, "")
+      para_map[#lines] = para_idx
+      pos = p_start + #self_closing
+      goto continue
+    end
+
+    -- Extract paragraph content
+    local open_tag, content = raw:match("(<w:p[^>]*>)(.-)</w:p>", p_start)
+    if not open_tag then
+      pos = p_start + 1
+      goto continue
+    end
+
+    -- Check for heading style
     local prefix = ""
-    if style_val then
-      if style_val:match("Heading1") then
-        prefix = "# "
-      elseif style_val:match("Heading2") then
-        prefix = "## "
-      elseif style_val:match("Heading3") then
-        prefix = "### "
-      elseif style_val:match("Heading4") then
-        prefix = "#### "
-      end
+    if content:match('<w:pStyle[^>]*w:val="Heading1"') then
+      prefix = "# "
+    elseif content:match('<w:pStyle[^>]*w:val="Heading2"') then
+      prefix = "## "
+    elseif content:match('<w:pStyle[^>]*w:val="Heading3"') then
+      prefix = "### "
+    elseif content:match('<w:pStyle[^>]*w:val="Heading4"') then
+      prefix = "#### "
     end
 
-    local line = prefix .. table.concat(para_text, "")
-    table.insert(lines, line)
-    para_map[#lines] = idx -- Map line number to paragraph index
+    -- Replace XML tags with spaces to preserve word boundaries
+    -- BUT: self-closing tags (like bookmarks, breaks) should not add spaces
+
+    -- First remove self-closing tags without adding space
+    local text = content:gsub("<[^>]+/>", "")
+
+    -- Then replace remaining tags (open/close pairs) with spaces
+    -- This prevents "<w:t>word1</w:t><w:t>word2</w:t>" from becoming "word1word2"
+    text = text:gsub("<[^>]+>", " ")
+
+    -- Decode XML entities
+    text = text:gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&amp;", "&"):gsub("&quot;", '"'):gsub("&apos;", "'")
+
+    -- Normalize whitespace: collapse multiple spaces/newlines into single space
+    text = text:gsub("%s+", " ")
+
+    -- Trim leading/trailing whitespace
+    text = text:match("^%s*(.-)%s*$") or ""
+
+    table.insert(lines, prefix .. text)
+    para_map[#lines] = para_idx
+
+    -- Move past this paragraph
+    local close_pos = raw:find("</w:p>", p_start, true)
+    pos = close_pos and (close_pos + 6) or (p_start + 1)
+
+    ::continue::
   end
 
   return table.concat(lines, "\n"), para_map, root
@@ -175,30 +212,103 @@ local function odt_to_text(zip_path)
     return nil, "Could not read content.xml"
   end
 
+  -- First, remove all annotation blocks (comments) from raw XML
+  raw = raw:gsub("<office:annotation[^>]*>.-</office:annotation>", "")
+  raw = raw:gsub("<office:annotation%-end[^>]*/>", "")
+
+  -- Parse to get structure (for root return value)
   local root = xml.parse(raw)
-  local office_text = xml.find_first(root, "office:text") or xml.find_first(root, "office:body") or root
 
   local lines = {}
   local para_map = {}
 
-  for idx, para in ipairs(office_text.children or {}) do
-    if para.tag == "text:p" or para.tag == "text:h" then
-      local para_text = xml.inner_text(para)
+  -- Process all text:p and text:h elements in document order
+  local pos = 1
+  local para_idx = 0
 
-      -- Check heading level
-      local prefix = ""
-      if para.tag == "text:h" then
-        local level = xml.attr(para, "text:outline-level")
-        if level then
-          prefix = string.rep("#", tonumber(level)) .. " "
-        else
-          prefix = "# "
-        end
+  while pos <= #raw do
+    -- Look for next paragraph or heading (including self-closing)
+    local p_start = raw:find("<text:p[%s>/]", pos)
+    local h_start = raw:find("<text:h[%s>/]", pos)
+
+    local next_start, tag_type
+    if p_start and h_start then
+      if p_start < h_start then
+        next_start, tag_type = p_start, "p"
+      else
+        next_start, tag_type = h_start, "h"
       end
-
-      table.insert(lines, prefix .. para_text)
-      para_map[#lines] = idx
+    elseif p_start then
+      next_start, tag_type = p_start, "p"
+    elseif h_start then
+      next_start, tag_type = h_start, "h"
+    else
+      break -- No more paragraphs or headings
     end
+
+    para_idx = para_idx + 1
+
+    -- Extract the element (handle both regular and self-closing tags)
+    local pattern, close_tag
+    if tag_type == "p" then
+      pattern = "(<text:p[^>]*>)(.-)(</text:p>)"
+      close_tag = "</text:p>"
+    else
+      pattern = "(<text:h[^>]*>)(.-)(</text:h>)"
+      close_tag = "</text:h>"
+    end
+
+    -- First check for self-closing tag
+    local self_closing = raw:match("^<text:[ph][^>]*/>", next_start)
+    if self_closing then
+      -- Self-closing tag means empty paragraph
+      table.insert(lines, "")
+      para_map[#lines] = para_idx
+      pos = next_start + #self_closing
+      -- goto continue
+    end
+
+    local open_tag, content, end_tag_match = raw:match(pattern, next_start)
+    if not open_tag then
+      pos = next_start + 1
+      -- goto continue
+    end
+
+    -- For headings, extract the level
+    local prefix = ""
+    if tag_type == "h" then
+      local level = open_tag:match('text:outline%-level="(%d+)"') or "1"
+      prefix = string.rep("#", tonumber(level)) .. " "
+    end
+
+    -- Replace XML tags with spaces to preserve word boundaries
+    -- BUT: self-closing tags (like bookmarks) should not add spaces
+
+    -- First remove self-closing tags without adding space
+    local text = content:gsub("<[^>]+/>", "")
+
+    -- Then replace remaining tags (open/close pairs) with spaces
+    -- This prevents "word1</span><span>word2" from becoming "word1word2"
+    text = text:gsub("<[^>]+>", " ")
+
+    -- Decode XML entities
+    text = text:gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&amp;", "&"):gsub("&quot;", '"'):gsub("&apos;", "'")
+
+    -- Normalize whitespace: collapse multiple spaces/newlines/tabs into single space
+    text = text:gsub("%s+", " ")
+
+    -- Trim leading/trailing whitespace
+    text = text:match("^%s*(.-)%s*$") or ""
+
+    -- Always add the line (even if empty) to preserve blank lines
+    table.insert(lines, prefix .. text)
+    para_map[#lines] = para_idx
+
+    -- Move past this element
+    local close_pos = raw:find(close_tag, next_start, true)
+    pos = close_pos and (close_pos + #close_tag) or (next_start + 1)
+
+    --::continue::
   end
 
   return table.concat(lines, "\n"), para_map, root

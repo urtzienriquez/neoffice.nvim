@@ -346,18 +346,18 @@ end
 
 function M.draw_anchors(buf, text_lines)
   vim.api.nvim_buf_clear_namespace(buf, NS_ANCHORS, 0, -1)
-  for idx, cm in ipairs(state.comments) do
+  for _, cm in ipairs(state.comments) do
     if cm.anchor and cm.anchor ~= "" then
       local needle = cm.anchor:sub(1, 20)
       for lnum, line in ipairs(text_lines) do
         if line:find(needle, 1, true) then
           local total = 1 + #(cm.replies or {})
           vim.api.nvim_buf_set_extmark(buf, NS_ANCHORS, lnum - 1, 0, {
-            sign_text = "💬",
+            sign_text = "",
             sign_hl_group = "NeofficeCommentSign",
             virt_text = {
               {
-                string.format("  💬 %d comment%s", total, total > 1 and "s" or ""),
+                string.format("   %d comment%s", total, total > 1 and "s" or ""),
                 "NeofficeCommentVirt",
               },
             },
