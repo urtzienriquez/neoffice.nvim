@@ -612,36 +612,50 @@ end
 
 -- ── Anchor signs in main buffer ───────────────────────────────────────────────
 
-function M.draw_anchors(buf, text_lines)
+function M.draw_anchors(buf)
+  buf = buf or state.main_buf
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+
   vim.api.nvim_buf_clear_namespace(buf, NS_ANCHORS, 0, -1)
+  local all_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local full_text = table.concat(all_lines, "\n")
 
-  for _, cm in ipairs(state.comments) do
-    if not cm.id then
-      goto continue
-    end
-
-    local id_escaped = cm.id:gsub("([%-%.%+%[%]%(%)%$%^%%%?%*])", "%%%1")
-    local search_pattern = 'office:name="' .. id_escaped .. '"'
-
-    for lnum, line in ipairs(text_lines) do
-      if line:find(search_pattern, 1, true) then
-        local total = 1 + #(cm.replies or {})
-        vim.api.nvim_buf_set_extmark(buf, NS_ANCHORS, lnum - 1, 0, {
-          sign_text = "💬",
-          sign_hl_group = "NeofficeCommentSign",
-          virt_text = {
-            {
-              string.format("   %d comment%s", total, total > 1 and "s" or ""),
-              "NeofficeCommentVirt",
-            },
-          },
-          virt_text_pos = "eol",
-        })
-        break
+  -- Scan for ALL comment tags in buffer
+  for s, tag in full_text:gmatch('()(<office:annotation [^>]- office:name="([^"]+)"[^>]*>)') do
+    local s_idx, _, id = full_text:find('office:name="([^"]+)"', s)
+    if id then
+      -- Find matching comment in state
+      local cm = nil
+      for _, c in ipairs(state.comments) do
+        if c.id == id then
+          cm = c
+          break
+        end
       end
-    end
 
-    ::continue::
+      -- Calculate line from byte offset
+      local lnum = 0
+      local acc = 0
+      for i, line in ipairs(all_lines) do
+        if acc + #line + 1 > s - 1 then
+          lnum = i - 1
+          break
+        end
+        acc = acc + #line + 1
+      end
+
+      local total = cm and (1 + #(cm.replies or {})) or 1
+      vim.api.nvim_buf_set_extmark(buf, NS_ANCHORS, lnum, 0, {
+        sign_text = "💬",
+        sign_hl_group = "NeofficeCommentSign",
+        virt_text = {
+          { string.format("   %d comment%s", total, total > 1 and "s" or ""), "NeofficeCommentVirt" },
+        },
+        virt_text_pos = "eol",
+      })
+    end
   end
 end
 

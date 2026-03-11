@@ -25,36 +25,6 @@ end
 
 -- ── Load ─────────────────────────────────────────────────────────────────────
 
-function M.load(buf, orig_path, text_lines)
-  vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
-  _state[buf] = { changes = {}, orig_path = orig_path }
-
-  local data = extractor.extract(orig_path)
-  local changes = data.track_changes
-  _state[buf].changes = changes
-
-  for _, ch in ipairs(changes) do
-    local line = math.min(ch.para, math.max(#text_lines - 1, 0))
-    local hl = ch.type == "insert" and HL.insert or HL.delete
-    local icon = ch.type == "insert" and "▶ +" or "✕ -"
-    local vt = string.format("  %s%s  (@%s)", icon, ch.text:sub(1, 40):gsub("\n", " "), ch.author)
-
-    vim.api.nvim_buf_set_extmark(buf, NS, line, 0, {
-      virt_text = { { vt, hl } },
-      virt_text_pos = "eol",
-      sign_text = ch.type == "insert" and "▶" or "✕",
-      sign_hl_group = hl,
-      hl_mode = "combine",
-    })
-  end
-
-  if #changes > 0 then
-    vim.notify(string.format("[neoffice] %d track change(s) loaded", #changes), vim.log.levels.INFO)
-  end
-end
-
--- ── Navigation ───────────────────────────────────────────────────────────────
-
 -- Helper to convert byte offset to (line, col)
 local function byte_to_pos(all_lines, byte_offset)
   local accumulated = 0
@@ -67,6 +37,79 @@ local function byte_to_pos(all_lines, byte_offset)
   end
   return #all_lines - 1, #all_lines[#all_lines]
 end
+
+function M.refresh(buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  local state = _state[buf]
+  if not state or not state.changes then
+    return
+  end
+
+  vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
+
+  local all_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local full_text = table.concat(all_lines, "\n")
+
+  for s, tag in full_text:gmatch("()(<text:change[^>]-/>)") do
+    local id = tag:match('text:change%-id="([^"]+)"')
+    local is_primary = tag:find("change%-start") or not tag:find("change%-end")
+
+    if id and is_primary then
+      local ch = nil
+      for _, c in ipairs(state.changes) do
+        if c.id == id or c.id:match(id .. "$") then
+          ch = c
+          break
+        end
+      end
+
+      local line, _ = byte_to_pos(all_lines, s - 1)
+      local ch_type = (ch and ch.type) or (tag:find("change%-start") and "insert" or "delete")
+      local author = (ch and ch.author) or "?"
+
+      -- --- NEW: SANITIZE PREVIEW TEXT ---
+      local display_text = (ch and ch.text) or ""
+      if ch_type == "delete" then
+        -- 1. Strip Author Name if it matches the metadata
+        if ch and ch.author and ch.author ~= "?" then
+          display_text = display_text:gsub("^" .. vim.pesc(ch.author), "")
+        end
+        -- 2. Strip ISO Timestamp (YYYY-MM-DDTHH:MM:SS)
+        display_text = display_text:gsub("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.?%d*", "")
+      end
+
+      -- Clean up whitespace and limit length
+      display_text = display_text:gsub("^%s+", ""):sub(1, 40):gsub("\n", " ")
+      -- ----------------------------------
+
+      local hl = ch_type == "insert" and HL.insert or HL.delete
+      local icon = ch_type == "insert" and "▶" or "✕"
+      local vt = string.format("%s %s (@%s)", icon, display_text, author)
+
+      vim.api.nvim_buf_set_extmark(buf, NS, line, 0, {
+        virt_text = { { vt, hl } },
+        virt_text_pos = "eol",
+        sign_text = ch_type == "insert" and "▶" or "✕",
+        sign_hl_group = hl,
+      })
+    end
+  end
+end
+
+function M.load(buf, orig_path, text_lines)
+  _state[buf] = { changes = {}, orig_path = orig_path }
+  local data = extractor.extract(orig_path)
+  _state[buf].changes = data.track_changes or {}
+
+  M.setup_highlights() -- Ensure highlights are defined
+  M.refresh(buf)
+
+  if #_state[buf].changes > 0 then
+    vim.notify(string.format("[neoffice] %d track change(s) loaded", #_state[buf].changes))
+  end
+end
+
+-- ── Navigation ───────────────────────────────────────────────────────────────
 
 -- Helper to find every <text:change> occurrence in the buffer
 local function get_all_tag_positions(buf)
