@@ -53,23 +53,17 @@ function M.open(path)
     return
   end
 
-  -- Open proxy buffer
+  -- --- CLEANED UP OPEN LOGIC ---
+  -- All initial loading of markers and autocommands now happens inside open_proxy
   local proxy_buf = buf_mod().open_proxy(path, text_path, para_map, original_root)
-  local lines = vim.api.nvim_buf_get_lines(proxy_buf, 0, -1, false)
 
-  -- Load track changes
-  if cfg().get().show_track_changes then
-    tc().load(proxy_buf, path, lines)
-  end
-
-  -- Load and display comments
-  comments().load(path)
-  comments().draw_anchors(proxy_buf, lines)
-
+  -- Handle optional UI elements
   if cfg().get().auto_open_comments then
     local data = require("neoffice.extractor").extract(path)
     if #(data.comments or {}) > 0 then
-      comments().toggle(nil, proxy_buf)
+      vim.schedule(function()
+        comments().toggle(path, proxy_buf)
+      end)
     end
   end
 end
@@ -86,7 +80,7 @@ function M.save()
   -- Get live comments to re-inject
   local live_comments = comments().get_comments()
 
-  -- Save using direct XML mode (preserves all formatting)
+  -- Save using direct XML mode
   convert().from_text(meta.text_path, meta.orig_path, meta.para_map, meta.original_root, live_comments)
 end
 
@@ -101,12 +95,13 @@ function M.accept(args)
   if not meta then
     return
   end
+
   if args == "all" then
-    tc().accept_all(meta.orig_path)
+    tc().accept_all() -- No longer need to pass path, handled by current buffer
   else
     local ch = tc().change_at_cursor()
     if ch then
-      tc().accept(ch.id, meta.orig_path)
+      tc().accept(ch.id)
     end
   end
 end
@@ -116,12 +111,13 @@ function M.reject(args)
   if not meta then
     return
   end
+
   if args == "all" then
-    tc().reject_all(meta.orig_path)
+    tc().reject_all()
   else
     local ch = tc().change_at_cursor()
     if ch then
-      tc().reject(ch.id, meta.orig_path)
+      tc().reject(ch.id)
     end
   end
 end
