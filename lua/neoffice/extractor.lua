@@ -151,31 +151,19 @@ local function odt_comments(zip_path)
   local root = xml.parse(raw)
   local comments = {}
 
-  local function extract_replies(parent_node)
-    local replies = {}
-    for _, child in ipairs(parent_node.children or {}) do
-      if child.tag == "office:annotation" then
-        local reply_body = {}
-        for _, tp in ipairs(child.children or {}) do
-          if tp.tag == "text:p" then
-            local t = xml.inner_text(tp)
-            if t ~= "" then
-              table.insert(reply_body, t)
-            end
-          end
-        end
-        if #reply_body == 0 and child.text and child.text ~= "" then
-          table.insert(reply_body, child.text)
-        end
-
-        table.insert(replies, {
-          author = xml.inner_text(xml.find_first(child, "dc:creator") or {}) or "?",
-          date = xml.inner_text(xml.find_first(child, "dc:date") or {}) or "",
-          text = table.concat(reply_body, "\n"),
-        })
+  -- NEW: Recursive function to find all annotations in a node
+  local function find_annotations_in_node(node)
+    local found = {}
+    if node.tag == "office:annotation" then
+      table.insert(found, node)
+    end
+    for _, child in ipairs(node.children or {}) do
+      local nested = find_annotations_in_node(child)
+      for _, ann in ipairs(nested) do
+        table.insert(found, ann)
       end
     end
-    return replies
+    return found
   end
 
   local office_text = xml.find_first(root, "office:text") or xml.find_first(root, "office:body") or root
@@ -185,24 +173,27 @@ local function odt_comments(zip_path)
       goto continue
     end
 
-    local anchor_parts = {}
-    if para.text and para.text ~= "" then
-      table.insert(anchor_parts, para.text)
-    end
-    for _, child in ipairs(para.children or {}) do
-      if child.tag ~= "office:annotation" then
-        local t = xml.inner_text(child)
-        if t ~= "" then
-          table.insert(anchor_parts, t)
-        end
-      end
-    end
-    local anchor = table.concat(anchor_parts, ""):match("^%s*(.-)%s*$")
+    -- Extract XML anchor to match buffer content
+    local anchor = xml.serialize_inner(para):sub(1, 60)
 
-    for _, child in ipairs(para.children or {}) do
-      if child.tag == "office:annotation" then
+    -- Find all annotations in this paragraph
+    local all_annotations = find_annotations_in_node(para)
+
+    -- Separate into parents and replies
+    local parents = {}
+    local replies_map = {} -- parent_id -> list of replies
+
+    for _, ann in ipairs(all_annotations) do
+      local parent_name = xml.attr(ann, "loext:parent-name")
+
+      if parent_name then
+        -- This is a reply
+        if not replies_map[parent_name] then
+          replies_map[parent_name] = {}
+        end
+
         local body_parts = {}
-        for _, tp in ipairs(child.children or {}) do
+        for _, tp in ipairs(ann.children or {}) do
           if tp.tag == "text:p" then
             local t = xml.inner_text(tp)
             if t ~= "" then
@@ -210,22 +201,41 @@ local function odt_comments(zip_path)
             end
           end
         end
-        if #body_parts == 0 and child.text and child.text ~= "" then
-          table.insert(body_parts, child.text)
-        end
 
-        local replies = extract_replies(child)
-
-        table.insert(comments, {
-          id = xml.attr(child, "office:name") or tostring(#comments + 1),
-          author = xml.inner_text(xml.find_first(child, "dc:creator") or {}) or "?",
-          date = xml.inner_text(xml.find_first(child, "dc:date") or {}) or "",
+        table.insert(replies_map[parent_name], {
+          author = xml.inner_text(xml.find_first(ann, "dc:creator") or {}) or "?",
+          date = xml.inner_text(xml.find_first(ann, "dc:date") or {}) or "",
           text = table.concat(body_parts, "\n"),
-          replies = replies,
-          resolved = false,
-          anchor = anchor ~= "" and anchor or nil,
         })
+      else
+        -- This is a parent comment
+        table.insert(parents, ann)
       end
+    end
+
+    -- Build comment objects with their replies
+    for _, ann in ipairs(parents) do
+      local body_parts = {}
+      for _, tp in ipairs(ann.children or {}) do
+        if tp.tag == "text:p" then
+          local t = xml.inner_text(tp)
+          if t ~= "" then
+            table.insert(body_parts, t)
+          end
+        end
+      end
+
+      local comment_id = xml.attr(ann, "office:name") or tostring(#comments + 1)
+
+      table.insert(comments, {
+        id = comment_id,
+        author = xml.inner_text(xml.find_first(ann, "dc:creator") or {}) or "?",
+        date = xml.inner_text(xml.find_first(ann, "dc:date") or {}) or "",
+        text = table.concat(body_parts, "\n"),
+        replies = replies_map[comment_id] or {},
+        resolved = false,
+        anchor = anchor ~= "" and anchor or nil,
+      })
     end
 
     ::continue::
@@ -237,122 +247,79 @@ end
 -- ── ODT: inject annotations into content.xml string ──────────────────────────
 
 function M.inject_annotations_odt(content_xml, comments)
-  content_xml = content_xml:gsub("<office:annotation.-</office:annotation>", "")
+  -- Parse the XML properly
+  local root = xml.parse(content_xml)
 
-  local function ann_xml(cm)
-    local e = function(s)
-      return (tostring(s or ""):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
-    end
+  -- Find the office:text container
+  local office_text = xml.find_first(root, "office:text") or xml.find_first_local(root, "text") or root
 
-    local function get_initials(name)
-      local initials = ""
-      for word in (name or "U"):gmatch("%S+") do
-        initials = initials .. word:sub(1, 1):upper()
-      end
-      return (initials ~= "" and initials:sub(1, 2) or "U")
-    end
+  -- Helper to create annotation node
+  local function create_annotation(cm)
+    local ann = {
+      tag = "office:annotation",
+      attrs = { ["office:name"] = cm.id },
+      children = {},
+    }
 
-    local parts = {}
+    -- Add metadata
+    table.insert(ann.children, {
+      tag = "dc:creator",
+      attrs = {},
+      children = { { tag = "_TEXT", text = cm.author or "nvim" } },
+    })
 
-    table.insert(parts, string.format('<office:annotation office:name="%s">', e(cm.id)))
-    table.insert(parts, string.format("  <dc:creator>%s</dc:creator>", e(cm.author or "nvim")))
-    table.insert(
-      parts,
-      string.format("  <dc:date>%s</dc:date>", (cm.date ~= "" and cm.date) or os.date("!%Y-%m-%dT%H:%M:%S"))
-    )
-    table.insert(
-      parts,
-      string.format("  <meta:creator-initials>%s</meta:creator-initials>", e(get_initials(cm.author)))
-    )
+    table.insert(ann.children, {
+      tag = "dc:date",
+      attrs = {},
+      children = { { tag = "_TEXT", text = cm.date or os.date("!%Y-%m-%dT%H:%M:%SZ") } },
+    })
 
-    for _, body_line in ipairs(vim.split(cm.text or "", "\n", { plain = true })) do
-      table.insert(parts, string.format("  <text:p>%s</text:p>", e(body_line)))
-    end
-    table.insert(parts, "</office:annotation>")
+    -- Add comment text as paragraph
+    table.insert(ann.children, {
+      tag = "text:p",
+      attrs = {},
+      children = { { tag = "_TEXT", text = cm.text or "" } },
+    })
 
-    for _, reply in ipairs(cm.replies or {}) do
-      table.insert(parts, string.format('<office:annotation loext:parent-name="%s" loext:resolved="false">', e(cm.id)))
-      table.insert(parts, string.format("  <dc:creator>%s</dc:creator>", e(reply.author or "nvim")))
-      table.insert(parts, string.format("  <dc:date>%s</dc:date>", reply.date or os.date("!%Y-%m-%dT%H:%M:%S")))
-      table.insert(
-        parts,
-        string.format("  <meta:creator-initials>%s</meta:creator-initials>", e(get_initials(reply.author)))
-      )
-
-      table.insert(parts, "  <text:p>")
-      local short_date = (cm.date or ""):sub(1, 16)
-      table.insert(
-        parts,
-        string.format(
-          '    <text:span text:style-name="Quoted">Reply to %s (%s)</text:span>',
-          e(cm.author),
-          e(short_date)
-        )
-      )
-      table.insert(parts, "    <text:line-break/>")
-      table.insert(parts, "    " .. e(reply.text or ""))
-      table.insert(parts, "  </text:p>")
-      table.insert(parts, "</office:annotation>")
-    end
-
-    return table.concat(parts, "\n")
+    return ann
   end
 
-  local lines = vim.split(content_xml, "\n", { plain = true })
-  local injections = {}
-  local text_p_closes = {}
-  local buf = {}
-
-  for i, line in ipairs(lines) do
-    table.insert(buf, line)
-    if line:find("</text:p>", 1, true) then
-      table.insert(text_p_closes, { idx = i, text = table.concat(buf, " ") })
-      buf = {}
-    end
-  end
-
-  local last_close = text_p_closes[#text_p_closes]
-
+  -- Find paragraphs and inject comments
   for _, cm in ipairs(comments) do
-    local target_idx = last_close and last_close.idx or #lines
     local anchor = cm.anchor
     if anchor and anchor ~= "" then
       local needle = anchor:sub(1, 30)
-      for _, entry in ipairs(text_p_closes) do
-        if entry.text:find(needle, 1, true) then
-          target_idx = entry.idx
-          break
-        end
-      end
-    end
-    injections[target_idx] = injections[target_idx] or {}
-    table.insert(injections[target_idx], ann_xml(cm))
-  end
 
-  local result = {}
-  for i, line in ipairs(lines) do
-    local anns = injections[i]
-    if anns then
-      local close_pos = line:find("</text:p>", 1, true)
-      if close_pos then
-        local before_close = line:sub(1, close_pos - 1)
-        local after_close = line:sub(close_pos)
-        table.insert(result, before_close)
-        local indent = line:match("^(%s*)") or "      "
-        for _, a in ipairs(anns) do
-          for _, ann_line in ipairs(vim.split(a, "\n", { plain = true })) do
-            table.insert(result, indent .. ann_line)
+      -- Search through all paragraphs
+      for _, para in ipairs(office_text.children or {}) do
+        local tag_local = (para.tag or ""):match(":(.+)$") or para.tag
+        if tag_local == "p" or tag_local == "h" then
+          -- Check if this paragraph matches the anchor
+          local para_text = xml.serialize_inner(para)
+          if para_text:find(needle, 1, true) then
+            -- Insert annotation as a child of this paragraph
+            table.insert(para.children, create_annotation(cm))
+
+            -- Add replies if any
+            for _, reply in ipairs(cm.replies or {}) do
+              local reply_ann = create_annotation({
+                id = cm.id .. "_reply",
+                author = reply.author,
+                date = reply.date,
+                text = reply.text,
+              })
+              table.insert(para.children, reply_ann)
+            end
+
+            break -- Found the anchor, move to next comment
           end
         end
-        table.insert(result, indent:sub(1, -3) .. after_close)
-      else
-        table.insert(result, line)
       end
-    else
-      table.insert(result, line)
     end
   end
-  return table.concat(result, "\n")
+
+  -- Serialize back to XML
+  return xml.serialize(root)
 end
 
 -- ── DOCX: write comments.xml ──────────────────────────────────────────────────

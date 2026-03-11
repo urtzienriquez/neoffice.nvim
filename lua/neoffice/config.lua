@@ -13,6 +13,9 @@ M.defaults = {
   -- Open the comments panel automatically when comments are found
   auto_open_comments = false,
 
+  -- Auto-conceal tags when opening
+  conceal_tags_on_open = false,
+
   -- Temporary directory for proxy files (nil = vim.fn.tempname parent)
   tmp_dir = nil,
 
@@ -24,6 +27,7 @@ M.defaults = {
     show_changes = "<leader>dT",
     accept_change = "<leader>dy",
     reject_change = "<leader>dn",
+    toggle_tags = "<leader>dt",
 
     -- Inside the comments panel
     reply_comment = "r",

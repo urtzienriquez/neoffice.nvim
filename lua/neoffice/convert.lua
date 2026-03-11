@@ -36,24 +36,6 @@ function M.from_text(text_path, orig_path, para_map, original_root, comments)
     return
   end
 
-  -- Re-inject comments if needed
-  if comments and #comments > 0 then
-    local ext = (orig_path:match("%.(%w+)$") or ""):lower()
-    if ext == "odt" then
-      -- For ODT, inject comments into content.xml
-      local zip = require("neoffice.zip")
-      local extractor = require("neoffice.extractor")
-      local content = zip.read_entry(orig_path, "content.xml")
-      if content then
-        local merged = extractor.inject_annotations_odt(content, comments)
-        zip.write_entry(orig_path, "content.xml", merged)
-      end
-    else
-      -- For DOCX, write comments.xml
-      require("neoffice.extractor").write_comments_docx(orig_path, comments)
-    end
-  end
-
   vim.notify("[neoffice] Saved → " .. vim.fn.fnamemodify(orig_path, ":t"), vim.log.levels.INFO)
 end
 
