@@ -26,7 +26,13 @@ function M.open_proxy(orig_path, text_path, para_map, original_root)
   local lines = vim.fn.readfile(text_path)
   local buf = vim.api.nvim_create_buf(true, false)
 
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  -- Disable undo while setting initial content
+  vim.api.nvim_buf_call(buf, function()
+    local old_undolevels = vim.bo[buf].undolevels
+    vim.bo[buf].undolevels = -1
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].undolevels = old_undolevels
+  end)
 
   local ext = (orig_path:match("%.(%w+)$") or ""):lower()
   local display = string.format("[%s] %s", ext, vim.fn.fnamemodify(orig_path, ":t"))
