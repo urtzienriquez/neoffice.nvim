@@ -179,6 +179,10 @@ function M.get_meta_for(buf)
   return _meta[buf]
 end
 
+function M.get_all_meta()
+  return _meta
+end
+
 function M._setup_keymaps(buf, orig_path)
   local cfg = config.get()
   local o = { buffer = buf, silent = true, noremap = true }
@@ -214,20 +218,6 @@ function M._setup_keymaps(buf, orig_path)
 
   vim.keymap.set(
     "n",
-    cfg.mappings.accept_change,
-    "<cmd>DocAccept<CR>",
-    vim.tbl_extend("force", o, { desc = "Accept change at cursor" })
-  )
-
-  vim.keymap.set(
-    "n",
-    cfg.mappings.reject_change,
-    "<cmd>DocReject<CR>",
-    vim.tbl_extend("force", o, { desc = "Reject change at cursor" })
-  )
-
-  vim.keymap.set(
-    "n",
     "<leader>dt", -- or cfg.mappings.toggle_tags if you add it to config
     function()
       M.toggle_conceal()
@@ -243,6 +233,40 @@ function M._setup_keymaps(buf, orig_path)
     end,
     vim.tbl_extend("force", o, { desc = "Refresh comments from buffer" })
   )
+  vim.keymap.set("n", "]c", function()
+    require("neoffice.track_changes").next_change()
+  end, vim.tbl_extend("force", o, { desc = "Jump to next track change" }))
+
+  vim.keymap.set("n", "[c", function()
+    require("neoffice.track_changes").prev_change()
+  end, vim.tbl_extend("force", o, { desc = "Jump to previous track change" }))
+
+  vim.keymap.set("n", "<leader>dv", function()
+    require("neoffice.track_changes").select_change()
+  end, vim.tbl_extend("force", o, { desc = "Select current track change" }))
+
+  -- Visual mode accept/reject
+  vim.keymap.set("v", cfg.mappings.accept_change, function()
+    local tc = require("neoffice.track_changes")
+    local ch = tc.change_at_cursor()
+    if ch then
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "x", false)
+      tc.accept(ch.id)
+    else
+      vim.notify("[neoffice] No change found", vim.log.levels.WARN)
+    end
+  end, vim.tbl_extend("force", o, { desc = "Accept selected track change" }))
+
+  vim.keymap.set("v", cfg.mappings.reject_change, function()
+    local tc = require("neoffice.track_changes")
+    local ch = tc.change_at_cursor()
+    if ch then
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "x", false)
+      tc.reject(ch.id)
+    else
+      vim.notify("[neoffice] No change found", vim.log.levels.WARN)
+    end
+  end, vim.tbl_extend("force", o, { desc = "Reject selected track change" }))
 end
 
 return M
