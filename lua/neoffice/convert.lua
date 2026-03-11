@@ -16,7 +16,16 @@ function M.to_text(orig_path)
   end
 
   -- Write to temp file
-  local tmp = vim.fn.tempname() .. ".txt"
+  local tmp
+  if not config.options.tmp_dir then
+    tmp = vim.fn.tempname() .. ".txt"
+  else
+    local expanded_dir = vim.fn.expand(config.options.tmp_dir)
+    if vim.fn.isdirectory(expanded_dir) == 0 then
+      vim.fn.mkdir(expanded_dir, "p")
+    end
+    tmp = expanded_dir .. "/0.txt"
+  end
   vim.fn.writefile(vim.split(text, "\n", { plain = true }), tmp)
 
   return tmp, para_map, root
