@@ -4,8 +4,79 @@
 local config = require("neoffice.config")
 local M = {}
 
--- buf  →  { orig_path, text_path, para_map, original_root }
-local _meta = {}
+local _meta = {} -- buf  →  { orig_path, text_path, para_map, original_root }
+local _conceal_state = {} -- buf → { enabled = bool, wrap = bool }
+
+-- Add this function before M.open_proxy
+local function setup_conceal(buf)
+  -- Save original settings
+  if not _conceal_state[buf] then
+    _conceal_state[buf] = {
+      wrap = vim.api.nvim_get_option_value("wrap", { win = 0 }),
+      linebreak = vim.api.nvim_get_option_value("linebreak", { win = 0 }),
+    }
+  end
+
+  -- Clear any existing syntax
+  vim.api.nvim_buf_call(buf, function()
+    vim.cmd("syntax clear")
+  end)
+
+  -- Conceal entire comment blocks - just show marker
+  vim.api.nvim_buf_call(buf, function()
+    -- Conceal entire annotation block (from opening to closing tag)
+    -- NOTE: \\{-} is non-greedy match in Vim regex (backslash escaped for Lua)
+    vim.fn.matchadd("Conceal", "<office:annotation[^>]*>.\\{-}</office:annotation>", 10, -1, { conceal = "💬" })
+
+    -- Conceal annotation-end markers
+    vim.fn.matchadd("Conceal", "<office:annotation-end[^>]\\{-}/>", 10, -1, { conceal = "💬" })
+  end)
+
+  -- Enable concealing with wrapping
+  vim.api.nvim_set_option_value("conceallevel", 2, { win = 0 })
+  vim.api.nvim_set_option_value("concealcursor", "n", { win = 0 })
+  vim.api.nvim_set_option_value("wrap", true, { win = 0 })
+  vim.api.nvim_set_option_value("linebreak", true, { win = 0 })
+
+  _conceal_state[buf].enabled = true
+
+  vim.notify("[neoffice] Comments concealed as markers", vim.log.levels.INFO)
+end
+
+local function disable_conceal(buf)
+  -- Clear match highlighting
+  vim.api.nvim_buf_call(buf, function()
+    vim.fn.clearmatches()
+  end)
+
+  vim.api.nvim_set_option_value("conceallevel", 0, { win = 0 })
+  vim.api.nvim_set_option_value("concealcursor", "", { win = 0 })
+
+  -- Restore original settings
+  if _conceal_state[buf] then
+    vim.api.nvim_set_option_value("wrap", _conceal_state[buf].wrap, { win = 0 })
+    vim.api.nvim_set_option_value("linebreak", _conceal_state[buf].linebreak, { win = 0 })
+  end
+
+  _conceal_state[buf].enabled = false
+end
+
+function M.toggle_conceal()
+  local buf = vim.api.nvim_get_current_buf()
+
+  if not _meta[buf] then
+    vim.notify("[neoffice] Not a neoffice buffer", vim.log.levels.WARN)
+    return
+  end
+
+  if _conceal_state[buf] and _conceal_state[buf].enabled then
+    disable_conceal(buf)
+    vim.notify("[neoffice] XML tags visible", vim.log.levels.INFO)
+  else
+    setup_conceal(buf)
+    vim.notify("[neoffice] XML tags concealed (nowrap)", vim.log.levels.INFO)
+  end
+end
 
 ---Open (or reuse) a proxy buffer for direct XML editing
 ---@param orig_path      string
@@ -51,6 +122,10 @@ function M.open_proxy(orig_path, text_path, para_map, original_root)
 
   vim.api.nvim_set_current_buf(buf)
 
+  if cfg.conceal_tags_on_open then
+    setup_conceal(buf)
+  end
+
   -- :w  →  save back to document
   if cfg.auto_save then
     vim.api.nvim_create_autocmd("BufWriteCmd", {
@@ -79,6 +154,16 @@ function M.open_proxy(orig_path, text_path, para_map, original_root)
     desc = "neoffice: cleanup temp file on buffer close",
   })
 
+  -- After creating the buffer, add change tracking
+  vim.api.nvim_create_autocmd("BufWritePost", {
+    buffer = buf,
+    callback = function()
+      -- Refresh comments after save
+      require("neoffice.comments").refresh_from_buffer()
+    end,
+    desc = "neoffice: refresh comments after save",
+  })
+
   vim.notify(string.format("[neoffice] %s opened", vim.fn.fnamemodify(orig_path, ":t")), vim.log.levels.INFO)
 
   return buf
@@ -104,6 +189,13 @@ function M._setup_keymaps(buf, orig_path)
     "<cmd>DocSave<CR>",
     vim.tbl_extend("force", o, { desc = "Save back to document" })
   )
+
+  vim.keymap.set("n", "j", "gj", vim.tbl_extend("force", o, { desc = "Move down by visual line" }))
+  vim.keymap.set("n", "k", "gk", vim.tbl_extend("force", o, { desc = "Move up by visual line" }))
+  vim.keymap.set("v", "j", "gj", vim.tbl_extend("force", o, { desc = "Move down by visual line" }))
+  vim.keymap.set("v", "k", "gk", vim.tbl_extend("force", o, { desc = "Move up by visual line" }))
+  vim.keymap.set("n", "gj", "j", vim.tbl_extend("force", o, { desc = "Move down by logical line" }))
+  vim.keymap.set("n", "gk", "k", vim.tbl_extend("force", o, { desc = "Move up by logical line" }))
 
   vim.keymap.set("n", cfg.mappings.toggle_comments, function()
     require("neoffice.comments").toggle(orig_path, buf)
@@ -132,6 +224,24 @@ function M._setup_keymaps(buf, orig_path)
     cfg.mappings.reject_change,
     "<cmd>DocReject<CR>",
     vim.tbl_extend("force", o, { desc = "Reject change at cursor" })
+  )
+
+  vim.keymap.set(
+    "n",
+    "<leader>dt", -- or cfg.mappings.toggle_tags if you add it to config
+    function()
+      M.toggle_conceal()
+    end,
+    vim.tbl_extend("force", o, { desc = "Toggle XML tag concealing" })
+  )
+
+  vim.keymap.set(
+    "n",
+    "<leader>dr", -- or cfg.mappings.refresh_comments
+    function()
+      require("neoffice.comments").refresh_from_buffer()
+    end,
+    vim.tbl_extend("force", o, { desc = "Refresh comments from buffer" })
   )
 end
 

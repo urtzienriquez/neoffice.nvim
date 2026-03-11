@@ -151,32 +151,6 @@ local function odt_comments(zip_path)
   local root = xml.parse(raw)
   local comments = {}
 
-  local function extract_replies(parent_node)
-    local replies = {}
-    for _, child in ipairs(parent_node.children or {}) do
-      if child.tag == "office:annotation" then
-        local reply_body = {}
-        for _, tp in ipairs(child.children or {}) do
-          if tp.tag == "text:p" then
-            local t = xml.inner_text(tp)
-            if t ~= "" then
-              table.insert(reply_body, t)
-            end
-          end
-        end
-        if #reply_body == 0 and child.text and child.text ~= "" then
-          table.insert(reply_body, child.text)
-        end
-        table.insert(replies, {
-          author = xml.inner_text(xml.find_first(child, "dc:creator") or {}) or "?",
-          date = xml.inner_text(xml.find_first(child, "dc:date") or {}) or "",
-          text = table.concat(reply_body, "\n"),
-        })
-      end
-    end
-    return replies
-  end
-
   -- NEW: Recursive function to find all annotations in a node
   local function find_annotations_in_node(node)
     local found = {}
@@ -202,12 +176,47 @@ local function odt_comments(zip_path)
     -- Extract XML anchor to match buffer content
     local anchor = xml.serialize_inner(para):sub(1, 60)
 
-    -- NEW: Find all annotations recursively, not just direct children
-    local annotations = find_annotations_in_node(para)
+    -- Find all annotations in this paragraph
+    local all_annotations = find_annotations_in_node(para)
 
-    for _, child in ipairs(annotations) do
+    -- Separate into parents and replies
+    local parents = {}
+    local replies_map = {} -- parent_id -> list of replies
+
+    for _, ann in ipairs(all_annotations) do
+      local parent_name = xml.attr(ann, "loext:parent-name")
+
+      if parent_name then
+        -- This is a reply
+        if not replies_map[parent_name] then
+          replies_map[parent_name] = {}
+        end
+
+        local body_parts = {}
+        for _, tp in ipairs(ann.children or {}) do
+          if tp.tag == "text:p" then
+            local t = xml.inner_text(tp)
+            if t ~= "" then
+              table.insert(body_parts, t)
+            end
+          end
+        end
+
+        table.insert(replies_map[parent_name], {
+          author = xml.inner_text(xml.find_first(ann, "dc:creator") or {}) or "?",
+          date = xml.inner_text(xml.find_first(ann, "dc:date") or {}) or "",
+          text = table.concat(body_parts, "\n"),
+        })
+      else
+        -- This is a parent comment
+        table.insert(parents, ann)
+      end
+    end
+
+    -- Build comment objects with their replies
+    for _, ann in ipairs(parents) do
       local body_parts = {}
-      for _, tp in ipairs(child.children or {}) do
+      for _, tp in ipairs(ann.children or {}) do
         if tp.tag == "text:p" then
           local t = xml.inner_text(tp)
           if t ~= "" then
@@ -215,18 +224,15 @@ local function odt_comments(zip_path)
           end
         end
       end
-      if #body_parts == 0 and child.text and child.text ~= "" then
-        table.insert(body_parts, child.text)
-      end
 
-      local replies = extract_replies(child)
+      local comment_id = xml.attr(ann, "office:name") or tostring(#comments + 1)
 
       table.insert(comments, {
-        id = xml.attr(child, "office:name") or tostring(#comments + 1),
-        author = xml.inner_text(xml.find_first(child, "dc:creator") or {}) or "?",
-        date = xml.inner_text(xml.find_first(child, "dc:date") or {}) or "",
+        id = comment_id,
+        author = xml.inner_text(xml.find_first(ann, "dc:creator") or {}) or "?",
+        date = xml.inner_text(xml.find_first(ann, "dc:date") or {}) or "",
         text = table.concat(body_parts, "\n"),
-        replies = replies,
+        replies = replies_map[comment_id] or {},
         resolved = false,
         anchor = anchor ~= "" and anchor or nil,
       })
