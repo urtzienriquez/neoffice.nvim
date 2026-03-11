@@ -55,67 +55,67 @@ end
 
 -- ── Navigation ───────────────────────────────────────────────────────────────
 
----Find the next text:change* tag (any type)
----FIXED: Now correctly matches self-closing <text:change .../> tags
-local function find_next_change_tag(buf, start_line)
-  local total_lines = vim.api.nvim_buf_line_count(buf)
-
-  for line_num = start_line, total_lines - 1 do
-    local line = vim.api.nvim_buf_get_lines(buf, line_num, line_num + 1, false)[1]
-    if line then
-      -- Match any change tag: start, end, or point (self-closing)
-      -- FIXED: Use [%s>] to match "text:change" followed by space or >
-      -- This prevents matching "text:change-start" when looking for "text:change"
-      if line:match("<text:change%-start") or line:match("<text:change%-end") or line:match("<text:change[%s>]") then
-        return line_num, line
-      end
+-- Helper to convert byte offset to (line, col)
+local function byte_to_pos(all_lines, byte_offset)
+  local accumulated = 0
+  for i, line_text in ipairs(all_lines) do
+    local line_len = #line_text + 1 -- +1 for the \n
+    if accumulated + line_len > byte_offset then
+      return i - 1, byte_offset - accumulated
     end
+    accumulated = accumulated + line_len
   end
-
-  return nil, nil
+  return #all_lines - 1, #all_lines[#all_lines]
 end
 
-local function find_prev_change_tag(buf, start_line)
-  for line_num = start_line, 0, -1 do
-    local line = vim.api.nvim_buf_get_lines(buf, line_num, line_num + 1, false)[1]
-    if line then
-      if line:match("<text:change%-start") or line:match("<text:change%-end") or line:match("<text:change[%s>]") then
-        return line_num, line
-      end
-    end
+-- Helper to find every <text:change> occurrence in the buffer
+local function get_all_tag_positions(buf)
+  local all_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local full_text = table.concat(all_lines, "\n")
+  local positions = {}
+
+  -- Pattern: () captures start index, then we match the tag, then () captures end index
+  -- Variable 's' will receive the start position (number)
+  -- Variable '_' will receive the tag text (string) which we ignore
+  for s, _, _ in full_text:gmatch("()(<text:change[^>]->)()") do
+    local line, col = byte_to_pos(all_lines, s - 1)
+    table.insert(positions, { line = line, col = col })
   end
 
-  return nil, nil
+  return positions
 end
 
 function M.next_change()
   local buf = vim.api.nvim_get_current_buf()
-  local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local cursor = vim.api.nvim_win_get_cursor(0) -- {row, col} 1-indexed row
+  local positions = get_all_tag_positions(buf)
 
-  local line_num, line = find_next_change_tag(buf, cursor_line + 1)
-
-  if line_num then
-    local tag_start = line:find("<text:change")
-    vim.api.nvim_win_set_cursor(0, { line_num + 1, tag_start - 1 })
-    vim.notify("[neoffice] Next change", vim.log.levels.INFO)
-  else
-    vim.notify("[neoffice] No more changes", vim.log.levels.INFO)
+  -- Find the first tag that is strictly AFTER the current cursor position
+  for _, pos in ipairs(positions) do
+    if pos.line > cursor[1] - 1 or (pos.line == cursor[1] - 1 and pos.col > cursor[2]) then
+      vim.api.nvim_win_set_cursor(0, { pos.line + 1, pos.col })
+      vim.notify("[neoffice] Next change tag", vim.log.levels.INFO)
+      return
+    end
   end
+  vim.notify("[neoffice] No more changes", vim.log.levels.INFO)
 end
 
 function M.prev_change()
   local buf = vim.api.nvim_get_current_buf()
-  local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  local positions = get_all_tag_positions(buf)
 
-  local line_num, line = find_prev_change_tag(buf, cursor_line - 1)
-
-  if line_num then
-    local tag_start = line:find("<text:change")
-    vim.api.nvim_win_set_cursor(0, { line_num + 1, tag_start - 1 })
-    vim.notify("[neoffice] Previous change", vim.log.levels.INFO)
-  else
-    vim.notify("[neoffice] No previous changes", vim.log.levels.INFO)
+  -- Find the first tag that is strictly BEFORE the current cursor position
+  for i = #positions, 1, -1 do
+    local pos = positions[i]
+    if pos.line < cursor[1] - 1 or (pos.line == cursor[1] - 1 and pos.col < cursor[2]) then
+      vim.api.nvim_win_set_cursor(0, { pos.line + 1, pos.col })
+      vim.notify("[neoffice] Previous change tag", vim.log.levels.INFO)
+      return
+    end
   end
+  vim.notify("[neoffice] No previous changes", vim.log.levels.INFO)
 end
 
 -- ── Change Detection and Selection ───────────────────────────────────────────
