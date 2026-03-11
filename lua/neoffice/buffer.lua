@@ -32,7 +32,7 @@ function M.open_proxy(orig_path, text_path, para_map, original_root)
   local display = string.format("[%s] %s", ext, vim.fn.fnamemodify(orig_path, ":t"))
   vim.api.nvim_buf_set_name(buf, display)
 
-  vim.api.nvim_set_option_value("filetype", "text", { buf = buf })
+  vim.api.nvim_set_option_value("filetype", "xml", { buf = buf })
   vim.api.nvim_set_option_value("buftype", "acwrite", { buf = buf })
   vim.api.nvim_set_option_value("modified", false, { buf = buf })
 
