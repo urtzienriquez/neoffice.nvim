@@ -261,34 +261,92 @@ function M.add_comment(main_buf)
   end
 
   local win = vim.fn.bufwinid(main_buf)
-  local line_text = ""
-  if win ~= -1 then
-    local row = vim.api.nvim_win_get_cursor(win)[1]
-    line_text = vim.api.nvim_buf_get_lines(main_buf, row - 1, row, false)[1] or ""
+  if win == -1 then
+    vim.notify("[neoffice] Buffer not visible", vim.log.levels.WARN)
+    return
+  end
+
+  -- Check if we're in visual mode (range selected)
+  local mode = vim.api.nvim_get_mode().mode
+  local is_visual = mode == "v" or mode == "V" or mode == "\22"
+
+  local start_pos, end_pos
+  if is_visual then
+    -- Exit visual mode to capture marks
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "x", false)
+    start_pos = vim.api.nvim_buf_get_mark(main_buf, "<")
+    end_pos = vim.api.nvim_buf_get_mark(main_buf, ">")
   end
 
   vim.ui.input({ prompt = "New comment: " }, function(text)
     if not text or text == "" then
       return
     end
+
+    local comment_id =
+      string.format("__Annotation__%d_%d", math.random(10000, 99999), math.random(1000000000, 9999999999))
+
+    local author = vim.env.USER or "nvim-user"
+    local date = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    local initials = author:sub(1, 2):upper()
+
+    local annotation_start = string.format(
+      '<office:annotation office:name="%s" loext:resolved="false">'
+        .. "<dc:creator>%s</dc:creator>"
+        .. "<dc:date>%s</dc:date>"
+        .. "<meta:creator-initials>%s</meta:creator-initials>"
+        .. '<text:p text:style-name="Comment">%s</text:p>'
+        .. "</office:annotation>",
+      comment_id,
+      author,
+      date,
+      initials,
+      text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+    )
+
+    if is_visual and start_pos and end_pos then
+      local annotation_end = string.format('<office:annotation-end office:name="%s"/>', comment_id)
+
+      local start_row, start_col = start_pos[1] - 1, start_pos[2]
+      local end_row, end_col = end_pos[1] - 1, end_pos[2]
+
+      -- Get the line to find the next character boundary
+      local end_line = vim.api.nvim_buf_get_lines(main_buf, end_row, end_row + 1, false)[1]
+
+      -- Move to next UTF-8 character boundary (after the selected character)
+      local end_col_after = vim.str_byteindex(end_line, vim.str_utfindex(end_line, end_col) + 1)
+
+      -- Insert end marker first
+      vim.api.nvim_buf_set_text(main_buf, end_row, end_col_after, end_row, end_col_after, { annotation_end })
+
+      -- Insert start marker
+      vim.api.nvim_buf_set_text(main_buf, start_row, start_col, start_row, start_col, { annotation_start })
+
+      vim.notify("[neoffice] Range comment added (save to persist)", vim.log.levels.INFO)
+    else
+      local row, col = unpack(vim.api.nvim_win_get_cursor(win))
+      vim.api.nvim_buf_set_text(main_buf, row - 1, col, row - 1, col, { annotation_start })
+      vim.notify("[neoffice] Comment added (save to persist)", vim.log.levels.INFO)
+    end
+
+    local anchor_row = start_pos and (start_pos[1] - 1) or (vim.api.nvim_win_get_cursor(win)[1] - 1)
+    local anchor_line = vim.api.nvim_buf_get_lines(main_buf, anchor_row, anchor_row + 1, false)[1] or ""
     local cm = {
-      id = tostring(#state.comments + 1),
-      author = vim.env.USER or "nvim-user",
-      date = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      id = comment_id,
+      author = author,
+      date = date,
       text = text,
       replies = {},
       resolved = false,
-      anchor = line_text:sub(1, 60),
+      anchor = anchor_line:sub(1, 60),
     }
     table.insert(state.comments, cm)
+
     flush()
     render()
-    -- Refresh anchor signs in main buffer
-    if main_buf then
-      local lines = vim.api.nvim_buf_get_lines(main_buf, 0, -1, false)
-      M.draw_anchors(main_buf, lines)
-    end
-    vim.notify("[neoffice] Comment added", vim.log.levels.INFO)
+
+    local lines = vim.api.nvim_buf_get_lines(main_buf, 0, -1, false)
+    M.draw_anchors(main_buf, lines)
   end)
 end
 
@@ -298,18 +356,62 @@ function M.reply()
     vim.notify("[neoffice] No comment under cursor", vim.log.levels.WARN)
     return
   end
+
   vim.ui.input({ prompt = "Reply to @" .. cm.author .. ": " }, function(text)
     if not text or text == "" then
       return
     end
-    table.insert(cm.replies, {
+
+    -- Add to in-memory state
+    local reply = {
       author = vim.env.USER or "nvim-user",
       date = os.date("!%Y-%m-%dT%H:%M:%SZ"),
       text = text,
-    })
+    }
+    table.insert(cm.replies, reply)
+
+    -- Now update the XML in the buffer
+    if not state.main_buf or not vim.api.nvim_buf_is_valid(state.main_buf) then
+      vim.notify("[neoffice] Main buffer not available", vim.log.levels.WARN)
+      return
+    end
+
+    -- Find the annotation in the buffer by ID
+    local lines = vim.api.nvim_buf_get_lines(state.main_buf, 0, -1, false)
+    local id_pattern = 'office:name="' .. cm.id:gsub("([%-%.%+%[%]%(%)%$%^%%%?%*])", "%%%1") .. '"'
+
+    for lnum, line in ipairs(lines) do
+      if line:find(id_pattern, 1, true) then
+        -- Found the annotation - insert reply before closing tag
+        local initials = (reply.author or "U"):sub(1, 2):upper()
+        local reply_xml = string.format(
+          '<office:annotation loext:parent-name="%s" loext:resolved="false">'
+            .. "<dc:creator>%s</dc:creator>"
+            .. "<dc:date>%s</dc:date>"
+            .. "<meta:creator-initials>%s</meta:creator-initials>"
+            .. '<text:p text:style-name="Comment">%s</text:p>'
+            .. "</office:annotation>",
+          cm.id,
+          reply.author,
+          reply.date,
+          initials,
+          text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+        )
+
+        -- Insert reply annotation after parent closing tag
+        local close_tag = "</office:annotation>"
+        local insert_pos = line:find(close_tag, 1, true)
+        if insert_pos then
+          local new_line = line:sub(1, insert_pos + #close_tag - 1) .. reply_xml .. line:sub(insert_pos + #close_tag)
+          vim.api.nvim_buf_set_lines(state.main_buf, lnum - 1, lnum, false, { new_line })
+        end
+        break
+      end
+    end
+
     flush()
     render()
-    vim.notify("[neoffice] Reply added", vim.log.levels.INFO)
+    vim.notify("[neoffice] Reply added (save to persist)", vim.log.levels.INFO)
   end)
 end
 
@@ -346,30 +448,39 @@ end
 
 function M.draw_anchors(buf, text_lines)
   vim.api.nvim_buf_clear_namespace(buf, NS_ANCHORS, 0, -1)
+
   for _, cm in ipairs(state.comments) do
-    if cm.anchor and cm.anchor ~= "" then
-      local needle = cm.anchor:sub(1, 20)
-      for lnum, line in ipairs(text_lines) do
-        if line:find(needle, 1, true) then
-          local total = 1 + #(cm.replies or {})
-          vim.api.nvim_buf_set_extmark(buf, NS_ANCHORS, lnum - 1, 0, {
-            sign_text = "",
-            sign_hl_group = "NeofficeCommentSign",
-            virt_text = {
-              {
-                string.format("   %d comment%s", total, total > 1 and "s" or ""),
-                "NeofficeCommentVirt",
-              },
+    if not cm.id then
+      goto continue
+    end
+
+    -- Search for the annotation by its exact ID in the XML
+    -- Escape special pattern characters in the ID
+    local id_escaped = cm.id:gsub("([%-%.%+%[%]%(%)%$%^%%%?%*])", "%%%1")
+    local search_pattern = 'office:name="' .. id_escaped .. '"'
+
+    for lnum, line in ipairs(text_lines) do
+      -- Use plain text search (not pattern matching)
+      if line:find(search_pattern, 1, true) then
+        local total = 1 + #(cm.replies or {})
+        vim.api.nvim_buf_set_extmark(buf, NS_ANCHORS, lnum - 1, 0, {
+          sign_text = "💬",
+          sign_hl_group = "NeofficeCommentSign",
+          virt_text = {
+            {
+              string.format("   %d comment%s", total, total > 1 and "s" or ""),
+              "NeofficeCommentVirt",
             },
-            virt_text_pos = "eol",
-          })
-          break
-        end
+          },
+          virt_text_pos = "eol",
+        })
+        break -- Found it, move to next comment
       end
     end
+
+    ::continue::
   end
 end
-
 -- ── Panel keymaps ─────────────────────────────────────────────────────────────
 
 function M._setup_keymaps()

@@ -164,6 +164,41 @@ function M.serialize_inner(node)
   return table.concat(parts)
 end
 
+function M.inner_text(node)
+  if not node then
+    return ""
+  end
+  local parts = {}
+  if node.text and node.text ~= "" then
+    parts[#parts + 1] = node.text
+  end
+  for _, child in ipairs(node.children or {}) do
+    local t = M.inner_text(child)
+    if t ~= "" then
+      parts[#parts + 1] = t
+    end
+  end
+  return table.concat(parts, "")
+end
+
+function M.attr(node, key)
+  if not node or not node.attrs then
+    return nil
+  end
+  if node.attrs[key] then
+    return node.attrs[key]
+  end
+  -- Handle namespace matching: office:name matches both "office:name" and "name"
+  local local_key = key:match(":(.+)$") or key
+  for k, v in pairs(node.attrs) do
+    local lk = k:match(":(.+)$") or k
+    if lk == local_key then
+      return v
+    end
+  end
+  return nil
+end
+
 function M.find_all(node, tag, acc)
   acc = acc or {}
   if not node or type(node) ~= "table" then

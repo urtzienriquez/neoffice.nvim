@@ -73,13 +73,7 @@ function M.open_proxy(orig_path, text_path, para_map, original_root)
     desc = "neoffice: cleanup temp file on buffer close",
   })
 
-  vim.notify(
-    string.format(
-      "[neoffice] %s opened",
-      vim.fn.fnamemodify(orig_path, ":t")
-    ),
-    vim.log.levels.INFO
-  )
+  vim.notify(string.format("[neoffice] %s opened", vim.fn.fnamemodify(orig_path, ":t")), vim.log.levels.INFO)
 
   return buf
 end
@@ -109,7 +103,7 @@ function M._setup_keymaps(buf, orig_path)
     require("neoffice.comments").toggle(orig_path, buf)
   end, vim.tbl_extend("force", o, { desc = "Toggle comments panel" }))
 
-  vim.keymap.set("n", cfg.mappings.add_comment, function()
+  vim.keymap.set({ "n", "v" }, cfg.mappings.add_comment, function()
     require("neoffice.comments").add_comment(buf)
   end, vim.tbl_extend("force", o, { desc = "Add comment at cursor" }))
 
