@@ -9,53 +9,54 @@ local _conceal_state = {} -- buf → { enabled = bool, wrap = bool }
 
 -- Add this function before M.open_proxy
 local function setup_conceal(buf)
-  -- Save original settings
+  -- Save original settings if not already saved
   if not _conceal_state[buf] then
     _conceal_state[buf] = {
       wrap = vim.api.nvim_get_option_value("wrap", { win = 0 }),
       linebreak = vim.api.nvim_get_option_value("linebreak", { win = 0 }),
+      breakindent = vim.api.nvim_get_option_value("breakindent", { win = 0 }),
     }
   end
 
-  -- Clear any existing syntax
   vim.api.nvim_buf_call(buf, function()
     vim.cmd("syntax clear")
+    -- 1. High priority: Show a bubble for annotations/comments
+    vim.fn.matchadd("Conceal", "<office:annotation[^>]*>.\\{-}</office:annotation>", 11, -1, { conceal = "💬" })
+    vim.fn.matchadd("Conceal", "<office:annotation-end[^>]\\{-}/>", 11, -1, { conceal = "💬" })
+
+    -- 2. Lower priority: Completely hide ALL other XML tags
+    -- This matches any <...>, <.../>, or </...>
+    vim.fn.matchadd("Conceal", "<[^>]*>", 10, -1, { conceal = "" })
   end)
 
-  -- Conceal entire comment blocks - just show marker
-  vim.api.nvim_buf_call(buf, function()
-    -- Conceal entire annotation block (from opening to closing tag)
-    -- NOTE: \\{-} is non-greedy match in Vim regex (backslash escaped for Lua)
-    vim.fn.matchadd("Conceal", "<office:annotation[^>]*>.\\{-}</office:annotation>", 10, -1, { conceal = "💬" })
+  -- UI Settings to fix "strange line breaks"
+  local win = 0
+  vim.api.nvim_set_option_value("conceallevel", 2, { win = win })
+  vim.api.nvim_set_option_value("concealcursor", "nc", { win = win }) -- 'c' hides tags even in command mode
 
-    -- Conceal annotation-end markers
-    vim.fn.matchadd("Conceal", "<office:annotation-end[^>]\\{-}/>", 10, -1, { conceal = "💬" })
-  end)
-
-  -- Enable concealing with wrapping
-  vim.api.nvim_set_option_value("conceallevel", 2, { win = 0 })
-  vim.api.nvim_set_option_value("concealcursor", "n", { win = 0 })
-  vim.api.nvim_set_option_value("wrap", true, { win = 0 })
-  vim.api.nvim_set_option_value("linebreak", true, { win = 0 })
+  -- The "Magic" for clean wrapping:
+  vim.api.nvim_set_option_value("wrap", true, { win = win })
+  vim.api.nvim_set_option_value("linebreak", true, { win = win }) -- Don't break words
+  vim.api.nvim_set_option_value("breakindent", true, { win = win }) -- Maintain indent on wrap
 
   _conceal_state[buf].enabled = true
-
-  vim.notify("[neoffice] Comments concealed as markers", vim.log.levels.INFO)
+  vim.notify("[neoffice] All XML tags concealed", vim.log.levels.INFO)
 end
 
 local function disable_conceal(buf)
-  -- Clear match highlighting
   vim.api.nvim_buf_call(buf, function()
     vim.fn.clearmatches()
   end)
 
-  vim.api.nvim_set_option_value("conceallevel", 0, { win = 0 })
-  vim.api.nvim_set_option_value("concealcursor", "", { win = 0 })
+  local win = 0
+  vim.api.nvim_set_option_value("conceallevel", 0, { win = win })
+  vim.api.nvim_set_option_value("concealcursor", "", { win = win })
 
   -- Restore original settings
   if _conceal_state[buf] then
-    vim.api.nvim_set_option_value("wrap", _conceal_state[buf].wrap, { win = 0 })
-    vim.api.nvim_set_option_value("linebreak", _conceal_state[buf].linebreak, { win = 0 })
+    vim.api.nvim_set_option_value("wrap", _conceal_state[buf].wrap, { win = win })
+    vim.api.nvim_set_option_value("linebreak", _conceal_state[buf].linebreak, { win = win })
+    vim.api.nvim_set_option_value("breakindent", _conceal_state[buf].breakindent, { win = win })
   end
 
   _conceal_state[buf].enabled = false
