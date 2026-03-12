@@ -2,61 +2,58 @@
 -- Creates and manages the proxy buffer for direct XML editing
 
 local config = require("neoffice.config")
+local conceal = require("neoffice.conceal")
 local M = {}
 
 local _meta = {} -- buf  →  { orig_path, text_path, para_map, original_root }
-local _conceal_state = {} -- buf → { enabled = bool, wrap = bool }
+local _conceal_state = {} -- buf → { enabled = bool, original settings }
 
--- Add this function before M.open_proxy
+-- Setup concealment using extmark-based system
 local function setup_conceal(buf)
-  -- Save original settings if not already saved
+  -- Save original window settings
   if not _conceal_state[buf] then
-    _conceal_state[buf] = {
-      wrap = vim.api.nvim_get_option_value("wrap", { win = 0 }),
-      linebreak = vim.api.nvim_get_option_value("linebreak", { win = 0 }),
-      breakindent = vim.api.nvim_get_option_value("breakindent", { win = 0 }),
-    }
+    local wins = vim.fn.win_findbuf(buf)
+    if #wins > 0 then
+      local win = wins[1]
+      _conceal_state[buf] = {
+        wrap = vim.api.nvim_get_option_value("wrap", { win = win }),
+        linebreak = vim.api.nvim_get_option_value("linebreak", { win = win }),
+      }
+    end
   end
 
-  vim.api.nvim_buf_call(buf, function()
-    vim.cmd("syntax clear")
-    -- 1. High priority: Show a bubble for annotations/comments
-    vim.fn.matchadd("Conceal", "<office:annotation[^>]*>.\\{-}</office:annotation>", 11, -1, { conceal = "💬" })
-    vim.fn.matchadd("Conceal", "<office:annotation-end[^>]\\{-}/>", 11, -1, { conceal = "💬" })
+  -- Enable concealment
+  conceal.enable(buf)
 
-    -- 2. Lower priority: Completely hide ALL other XML tags
-    -- This matches any <...>, <.../>, or </...>
-    vim.fn.matchadd("Conceal", "<[^>]*>", 10, -1, { conceal = "" })
-  end)
-
-  -- UI Settings to fix "strange line breaks"
-  local win = 0
-  vim.api.nvim_set_option_value("conceallevel", 2, { win = win })
-  vim.api.nvim_set_option_value("concealcursor", "nc", { win = win }) -- 'c' hides tags even in command mode
-
-  -- The "Magic" for clean wrapping:
-  vim.api.nvim_set_option_value("wrap", true, { win = win })
-  vim.api.nvim_set_option_value("linebreak", true, { win = win }) -- Don't break words
-  vim.api.nvim_set_option_value("breakindent", true, { win = win }) -- Maintain indent on wrap
+  -- Set optimal window options for readability
+  local wins = vim.fn.win_findbuf(buf)
+  for _, win in ipairs(wins) do
+    vim.api.nvim_set_option_value("wrap", true, { win = win })
+    vim.api.nvim_set_option_value("linebreak", true, { win = win })
+  end
 
   _conceal_state[buf].enabled = true
-  vim.notify("[neoffice] All XML tags concealed", vim.log.levels.INFO)
+
+  local stats = conceal.stats(buf)
+  vim.notify(
+    string.format("[neoffice] Concealment enabled (%d tags concealed)", stats.total_extmarks),
+    vim.log.levels.INFO
+  )
 end
 
 local function disable_conceal(buf)
-  vim.api.nvim_buf_call(buf, function()
-    vim.fn.clearmatches()
-  end)
+  -- Disable concealment
+  conceal.disable(buf)
 
-  local win = 0
-  vim.api.nvim_set_option_value("conceallevel", 0, { win = win })
-  vim.api.nvim_set_option_value("concealcursor", "", { win = win })
-
-  -- Restore original settings
+  -- Restore original window settings
   if _conceal_state[buf] then
-    vim.api.nvim_set_option_value("wrap", _conceal_state[buf].wrap, { win = win })
-    vim.api.nvim_set_option_value("linebreak", _conceal_state[buf].linebreak, { win = win })
-    vim.api.nvim_set_option_value("breakindent", _conceal_state[buf].breakindent, { win = win })
+    local wins = vim.fn.win_findbuf(buf)
+    for _, win in ipairs(wins) do
+      if vim.api.nvim_win_is_valid(win) then
+        vim.api.nvim_set_option_value("wrap", _conceal_state[buf].wrap, { win = win })
+        vim.api.nvim_set_option_value("linebreak", _conceal_state[buf].linebreak, { win = win })
+      end
+    end
   end
 
   _conceal_state[buf].enabled = false
@@ -75,7 +72,6 @@ function M.toggle_conceal()
     vim.notify("[neoffice] XML tags visible", vim.log.levels.INFO)
   else
     setup_conceal(buf)
-    vim.notify("[neoffice] XML tags concealed (nowrap)", vim.log.levels.INFO)
   end
 end
 
@@ -134,7 +130,7 @@ function M.open_proxy(orig_path, text_path, para_map, original_root)
   -- 4. Setup Keymaps
   M._setup_keymaps(buf, orig_path)
 
-  -- 5. THE FIX: Reactive Refreshing
+  -- 5. Reactive Refreshing
   -- This ensures signs move when you type and update when you save
   local refresh_group = vim.api.nvim_create_augroup("NeofficeRefresh_" .. buf, { clear = true })
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "BufWritePost" }, {
@@ -145,6 +141,10 @@ function M.open_proxy(orig_path, text_path, para_map, original_root)
       tc.refresh(buf)
       -- Comments refresh (re-scanning the buffer for tags)
       comms.draw_anchors(buf)
+      -- Refresh concealment (re-scan for XML tags)
+      if _conceal_state[buf] and _conceal_state[buf].enabled then
+        conceal.refresh(buf)
+      end
     end,
   })
 
@@ -155,6 +155,8 @@ function M.open_proxy(orig_path, text_path, para_map, original_root)
     callback = function()
       _meta[buf] = nil
       _conceal_state[buf] = nil
+      -- Clean up concealment resources
+      conceal.cleanup(buf)
     end,
   })
 
@@ -210,7 +212,7 @@ function M._setup_keymaps(buf, orig_path)
 
   vim.keymap.set(
     "n",
-    "<leader>dt", -- or cfg.mappings.toggle_tags if you add it to config
+    "<leader>dt", -- toggle concealment
     function()
       M.toggle_conceal()
     end,
