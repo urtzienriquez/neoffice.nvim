@@ -125,6 +125,22 @@ local function draw(buf)
   end
   vim.schedule(function() -- (once the reserved lines are on screen)
     local old, new = shown[buf] or {}, {}
+    -- floating windows (pickers, hovers...): an image they cover is hidden while they are open, as
+    -- images are drawn on top of everything (a cell more around them, for their borders)
+    local floats = {}
+    for _, w in ipairs(api.nvim_tabpage_list_wins(0)) do
+      local config = api.nvim_win_get_config(w)
+      if config.relative ~= "" and not config.hide then
+        local top, left = unpack(vim.fn.win_screenpos(w))
+        floats[#floats + 1] = { win = w, top = top - 1, left = left - 1,
+          bottom = top + api.nvim_win_get_height(w), right = left + api.nvim_win_get_width(w) }
+      end
+    end
+    local function covered(win, top, left, rows, cols)
+      return vim.iter(floats):any(function(f)
+        return f.win ~= win and top <= f.bottom and top + rows - 1 >= f.top and left <= f.right and left + cols - 1 >= f.left
+      end)
+    end
     for _, win in ipairs(vim.fn.win_findbuf(buf)) do
       local info = vim.fn.getwininfo(win)[1]
       if info.tabnr == vim.fn.tabpagenr() then
@@ -132,9 +148,10 @@ local function draw(buf)
           local line = api.nvim_buf_get_lines(buf, image.row - 1, image.row, false)[1] or ""
           local pos = vim.fn.screenpos(win, image.row, math.max(#line, 1))
           local top = pos.row + 1 -- (the reserved lines start right under the line)
-          if pos.row > 0 and top + image.rows - 1 <= info.winrow + info.height - 1 then
+          local left = info.wincol + info.textoff
+          if pos.row > 0 and top + image.rows - 1 <= info.winrow + info.height - 1 and not covered(win, top, left, image.rows, image.cols) then
             local key = win .. ":" .. image.key
-            local opts = { row = top, col = info.wincol + info.textoff, width = image.cols, height = image.rows, zindex = 1 }
+            local opts = { row = top, col = left, width = image.cols, height = image.rows }
             new[key] = old[key] and vim.ui.img.set(old[key], opts) or vim.ui.img.set(image.data, opts)
             old[key] = nil
           end
@@ -162,7 +179,7 @@ end
 function M.attach(buf, group)
   local refresh = function() M.refresh(buf) end
   api.nvim_create_autocmd({ "BufWinEnter", "TextChanged", "InsertLeave", "BufWritePost" }, { group = group, buffer = buf, callback = refresh })
-  api.nvim_create_autocmd({ "WinScrolled", "WinResized", "VimResized", "TabEnter" }, { group = group, callback = refresh })
+  api.nvim_create_autocmd({ "WinScrolled", "WinResized", "VimResized", "TabEnter", "WinNew", "WinClosed", "WinEnter" }, { group = group, callback = refresh })
   api.nvim_create_autocmd({ "BufWinLeave", "BufHidden", "BufWipeout" }, {
     group = group,
     buffer = buf,
