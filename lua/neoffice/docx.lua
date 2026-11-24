@@ -324,13 +324,17 @@ local function read_para(ctx, p)
         local url = id and ctx.links[id] or "#" .. (xml.attr(el, "w:anchor") or "")
         ctx.link_attrs[url] = ctx.link_attrs[url] or el.attrs
         walk(el, url)
-      elseif tag == "w:ins" then
+      elseif tag == "w:ins" or tag == "w:moveTo" then -- (inserted, or moved here: a tracked move)
         local change = { type = "insert", node = el, author = xml.attr(el, "w:author") or "?", date = xml.attr(el, "w:date") or "" }
+        change.moved = tag == "w:moveTo" or nil
         add({ insert_start = change })
         walk(el, link)
         add({ insert_end = change })
-      elseif tag == "w:del" then
-        add({ deletion = { type = "delete", node = el, author = xml.attr(el, "w:author") or "?", date = xml.attr(el, "w:date") or "", text = xml.text(el) } })
+      elseif tag == "w:del" or tag == "w:moveFrom" then -- (deleted, or moved away)
+        add({ deletion = {
+          type = "delete", node = el, author = xml.attr(el, "w:author") or "?", date = xml.attr(el, "w:date") or "",
+          text = xml.text(el), moved = tag == "w:moveFrom" or nil,
+        } })
       elseif tag == "m:oMath" or tag == "m:oMathPara" then -- an equation (its LaTeX comes later)
         add({ object = el, visible = true, math = { display = tag == "m:oMathPara" } })
         table.insert(ctx.equations, spans[#spans])
@@ -1058,7 +1062,7 @@ function M.fill(ctx, p, block, pieces)
         cur.insert = ins
         if ins then
           ins.node = ins.node or revision(ctx, "w:ins", ins)
-          cur.ins = xml.append(cur.el, xml.elem("w:ins", vim.deepcopy(ins.node.attrs)))
+          cur.ins = xml.append(cur.el, xml.elem(ins.moved and "w:moveTo" or "w:ins", vim.deepcopy(ins.node.attrs)))
         else
           cur.ins = nil
         end
@@ -1069,7 +1073,7 @@ function M.fill(ctx, p, block, pieces)
       local del = piece.deletion
       if del and (not del.node or piece.deleted ~= del.text) then -- (new, or its text changed: split, edited)
         local attrs = revision(ctx, "w:del", del).attrs -- (a fresh id: a deletion may now be in several paragraphs)
-        del.node, del.text = xml.elem("w:del", attrs), piece.deleted
+        del.node, del.text = xml.elem(del.moved and "w:moveFrom" or "w:del", attrs), piece.deleted
         for _, seg in ipairs(piece.segs or { { text = piece.deleted } }) do -- (formatted as it was)
           local run = text_run(vim.tbl_extend("force", seg, { text = (seg.text:gsub("\n", " ")) }))
           for _, el in ipairs(run.children) do

@@ -608,6 +608,7 @@ function M.show_info(buf)
     local s, e = range(m)
     if ch and before(s, { row - 1, col }) and (before({ row - 1, col + 1 }, e) or same(s, e)) then
       local kind = ({ insert = "inserted", delete = "deleted", format = "formatting" })[ch.type]
+      kind = ch.moved and (ch.type == "insert" and "moved here" or "moved away") or kind
       local info = ("  %s · %s · %s"):format(ch.author, ch.date:sub(1, 10), kind)
       return api.nvim_buf_set_extmark(buf, NS_INFO, row - 1, 0, { virt_text = { { info, "NeofficeChangeInfo" } }, virt_text_pos = "eol" })
     end

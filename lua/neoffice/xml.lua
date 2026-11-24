@@ -17,9 +17,9 @@ end
 
 function M.escape(s, in_attr)
   s = s:gsub("[%z\1-\8\11\12\14-\31]", "") -- (control characters XML can't have at all)
-  s = s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub("\r", "&#13;")
+  s = s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
   if in_attr then -- (kept as they are: written plainly, a parser would read them as spaces)
-    s = s:gsub('"', "&quot;"):gsub("\n", "&#10;"):gsub("\t", "&#9;")
+    s = s:gsub('"', "&quot;"):gsub("\r", "&#13;"):gsub("\n", "&#10;"):gsub("\t", "&#9;")
   end
   return s
 end

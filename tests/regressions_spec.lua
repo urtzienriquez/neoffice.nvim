@@ -397,6 +397,49 @@ describe("the formats", function()
     assert.truthy(zip.read(path, "word/document.xml"):find("</w:sdt><w:p>.-Typed after it"))
   end)
 
+  it("write Word's XML declaration (with its carriage return) as it was", function()
+    local path = edit_xml("rich.docx", "%?>", "?>\r\n")
+    H.open(path)
+    H.replace(12, "Last", "Final")
+    H.save()
+    local main = zip.read(path, "word/document.xml")
+    assert.truthy(main:find("^<%?xml[^>]*%?>\r\n<w:document"))
+    assert.falsy(main:find("&#13;", 1, true))
+    if H.has_libreoffice then
+      assert.is_true((H.libreoffice_reads(path, "Final paragraph.")))
+    end
+  end)
+
+  it("read Word's tracked moves as changes, and write them back as moves", function()
+    local D = 'w:author="Fernando" w:date="2026-10-26T19:42:00Z"'
+    local path = H.copy("rich.docx", function(entry, text)
+      if entry ~= "word/document.xml" then
+        return text
+      end
+      text = text:gsub('<w:r><w:t xml:space="preserve">Last paragraph.</w:t></w:r>',
+        '<w:moveTo w:id="71" ' .. D .. '><w:r><w:t xml:space="preserve">Last paragraph.</w:t></w:r></w:moveTo>', 1)
+      local n
+      text, n = text:gsub('<w:r><w:t xml:space="preserve">and more.</w:t></w:r>',
+        '<w:moveFrom w:id="80" ' .. D .. '><w:r><w:t xml:space="preserve">and more.</w:t></w:r></w:moveFrom>', 1)
+      assert(n == 1 and text:find("w:moveTo", 1, true), "fixture edit didn't apply")
+      return text
+    end)
+    H.open(path)
+    assert.falsy(table.concat(H.lines(), "\n"):find("⟦", 1, true))
+    local moved = vim.tbl_filter(function(ch) return ch.moved end, H.changes("Fernando"))
+    assert.same({ "delete", "insert" }, vim.fn.sort(vim.tbl_map(function(ch) return ch.type end, moved)))
+    H.replace(12, "Last", "Last edited")
+    H.replace(3, "Commented", "Commented!")
+    H.save()
+    local main = zip.read(path, "word/document.xml")
+    assert.truthy(main:find('<w:moveTo w:id="71"', 1, true))
+    assert.truthy(main:find('<w:moveFrom w:id="80"', 1, true))
+    changes.resolve("accept", true)
+    H.reopen()
+    assert.equals("Last edited paragraph.", H.paras()[12])
+    assert.equals("Commented! text ", H.paras()[3]) -- ("and more." moved away: gone once accepted)
+  end)
+
   it("save an alt text change of an image that isn't PNG, JPEG or GIF", function()
     local path = H.copy("rich.docx")
     zip.write(path, { ["word/media/rId21.png"] = "\1\0\0\0" .. ("\0"):rep(60) })
