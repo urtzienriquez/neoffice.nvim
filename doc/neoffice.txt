@@ -83,9 +83,12 @@ of its paragraph.
 
 Escapes ~
                                                             *neoffice-escapes*
-A `\` makes the next character plain text: `\*`, `\[`, `\#`, `\$`, `\_{`,
-`\-`, `\>`, `\|`, ... Text that would read as a mark is written escaped, so
-what you see is always what the document has.
+A `\` makes the next character plain text when it could be read as a mark:
+`\*`, `\[`, `\#`, `\$`, `\_{`, `\-`, `\>`, `\|`, `\=`, `\~`, `\\`, ...
+Before any other character it is just a backslash (`C:\Users` stays as it
+is), and a mark that is never closed is just text (`if a == b`). Text that
+would read as something else is written escaped, so what you see is always
+what the document has.
 
 Objects ~
 Elements that can't be edited as text show as `￼`: delete that character to
@@ -195,7 +198,8 @@ back: inserted text goes, deleted text stays. Either acts on
 
 - the change at the cursor (or the nearest one on the line),
 - with a visual selection, the selected part of every change it touches (the
-  rest of a change stays a change),
+  rest of a change stays a change); with a block selection (|CTRL-V|), the
+  part of each line in the block,
 - or all of them (`all`), or all of someone's (`all Bob`).
 
 |u| and |CTRL-R| undo and redo reviews and tracked edits, with their changes.
@@ -219,6 +223,10 @@ only affects your session (the document's own setting is not changed).
   deleted again (it stays deleted by whoever deleted it).
 - With tracking off, what you type is plain text, also inside or next to
   someone's changes (they are split around it).
+- Deleted text stays exactly as it was, with its formatting (written so in
+  the file), and with what is anchored in it (comments, images, others'
+  changes): rejecting the deletion brings it all back. (In .odt files the
+  deleted text is written without formatting.)
 - Images, equations, footnotes, fields and breaks can't be deleted while
   tracking (they are put back, and you are told so): turn tracking off to
   delete them. Editing an image's alt text, path or width, an equation or a
@@ -339,7 +347,9 @@ WHAT IS (AND ISN'T) CHANGED                                  *neoffice-safety*
   stops; |:w!| writes over it.
 - A document that can't be read opens read-only and empty, so it can't be
   written over.
-- `:w other.docx` writes a copy and leaves the original alone.
+- `:w other.docx` writes a copy and leaves the original alone; |:saveas|
+  makes the new file the document's. A document can't be written in another
+  format (`:w copy.odt` from a .docx is refused).
 - In paragraphs you edit, Word's spell-check marks (`w:proofErr`) are dropped
   (Word recreates them).
 - .doc files go through LibreOffice's converter, so what it can't convert is

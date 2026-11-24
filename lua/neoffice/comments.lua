@@ -18,7 +18,7 @@ function M.style(c)
     hl_group = c.resolved and "NeofficeCommentResolved" or "NeofficeComment",
     sign_text = "",
     sign_hl_group = "NeofficeCommentSign",
-    virt_text = { { ("  %s: %s%s"):format(c.author, (c.text:gsub("\n", " ")):sub(1, 50), more), "NeofficeCommentVirt" } },
+    virt_text = { { ("  %s: %s%s"):format(c.author, vim.fn.strcharpart((c.text:gsub("\n", " ")), 0, 50), more), "NeofficeCommentVirt" } },
   }
 end
 
@@ -157,7 +157,8 @@ function M.jump()
   local win = m and vim.fn.bufwinid(m.buf)
   if win and win ~= -1 then
     api.nvim_set_current_win(win)
-    api.nvim_win_set_cursor(win, { m.row + 1, m.col })
+    local pos = api.nvim_buf_get_extmark_by_id(m.buf, neo().ns.comment, m.id, {}) -- (where it is now)
+    api.nvim_win_set_cursor(win, { (pos[1] or m.row) + 1, pos[2] or m.col })
   end
 end
 

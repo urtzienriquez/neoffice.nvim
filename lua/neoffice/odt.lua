@@ -87,7 +87,7 @@ local function image_of(frame)
   if path and not path:match("^%a+:") and not path:match("^%.%./") then
     local alt = xml.child(frame, "svg:desc") or xml.child(frame, "svg:title")
     local cm = markup.cm(xml.attr(frame, "svg:width"))
-    return { path = path, alt = alt and xml.text(alt) or "", width = cm and markup.width(cm) or nil }
+    return { path = path, alt = alt and vim.trim(xml.text(alt):gsub("%s+", " ")) or "", width = cm and markup.width(cm) or nil }
   end
 end
 
@@ -191,7 +191,9 @@ local function read_para(ctx, p)
   if select(2, layout(ctx, p)) then -- (it starts on a new page)
     add({ page_break = true })
   end
-  -- f = { style, link, b, i, u } inherited from the enclosing spans/links
+  local after_space = true -- (whitespace at the start of a paragraph is ignored, and after a space)
+  -- f = { style, link, b, i, u } inherited from the enclosing spans/links; style: the span's style,
+  -- or the styles of the spans it is in, outermost first, when they are nested
   local function walk(node, f)
     local function text(s)
       if s ~= "" then
@@ -215,23 +217,32 @@ local function read_para(ctx, p)
           end
         end
         add({ object = group, visible = true, field = { text = plain(group) } })
-      elseif el.text then
-        text((el.text:gsub("%s+", " "))) -- ODF collapses whitespace; real spaces are <text:s/>
+        after_space = false
+      elseif el.text then -- ODF collapses whitespace, also across elements; real spaces are <text:s/>
+        local s = el.text:gsub("%s+", " ")
+        text(after_space and s:gsub("^ ", "") or s)
+        after_space = s:sub(-1) == " " or (after_space and s == "")
       elseif tag == "text:span" then
         local style = xml.attr(el, "text:style-name")
-        walk(el, vim.tbl_extend("force", flags(ctx, style, f), { style = style or f.style, link = f.link }))
+        local outer = type(f.style) == "table" and f.style or { f.style }
+        local chain = style and vim.list_extend(vim.list_slice(outer), { style }) or outer
+        walk(el, vim.tbl_extend("force", flags(ctx, style, f), { style = #chain > 1 and chain or chain[1], link = f.link }))
       elseif tag == "text:a" then
         local url = xml.attr(el, "xlink:href")
         ctx.link_attrs[url] = ctx.link_attrs[url] or el.attrs
         walk(el, vim.tbl_extend("force", f, { link = url }))
       elseif tag == "text:s" then
         text((" "):rep(tonumber(xml.attr(el, "text:c")) or 1))
+        spans[#spans].explicit, after_space = true, false -- (a real space: kept)
       elseif tag == "text:tab" then
         text("\t")
+        after_space = false
       elseif tag == "text:line-break" then
         add({ line_break = true })
+        after_space = false
       elseif tag == "text:note" and xml.attr(el, "text:note-class") ~= "endnote" then
         add({ object = el, visible = true, footnote = { text = plain(xml.child(el, "text:note-body") or el) } })
+        after_space = false
       elseif tag == "text:change-start" then
         add({ insert_start = change(el) })
       elseif tag == "text:change-end" then
@@ -259,11 +270,23 @@ local function read_para(ctx, p)
         local image = tag == "draw:frame" and image_of(el) or nil
         local text = not tag:match("^draw:") and plain(el) or ""
         add({ object = el, visible = VISIBLE[tag] or xml.text(el) ~= "", image = image, field = text ~= "" and { text = text } or nil })
+        after_space = after_space and not spans[#spans].visible
       end
     end
   end
 
   walk(p, flags(ctx, nil, {}))
+  for k = #spans, 1, -1 do -- (and at its end)
+    local sp = spans[k]
+    if sp.text and not sp.explicit then
+      sp.text = sp.text:gsub(" $", "")
+      if sp.text ~= "" then
+        break
+      end
+    elseif sp.object and sp.visible then
+      break
+    end
+  end
   return spans, block_of(ctx, p)
 end
 
@@ -347,11 +370,18 @@ end
 
 -- ── Writing ─────────────────────────────────────────────────────────────────
 
-function M.new_para(template)
+function M.new_para(template, ctx)
   local attrs = vim.tbl_filter(function(kv)
     return kv[1] ~= "xml:id" and kv[1] ~= "text:id"
   end, vim.deepcopy(template.attrs))
-  return xml.elem(template.tag, attrs)
+  local p = xml.elem(template.tag, attrs)
+  -- not a style that starts a new page (or page style): the paragraph it comes after has it
+  local auto = ctx and ctx.auto_paras[xml.attr(p, "text:style-name") or ""]
+  local props = auto and xml.child(auto, "style:paragraph-properties")
+  if auto and (xml.attr(auto, "style:master-page-name") or props and xml.attr(props, "fo:break-before")) then
+    xml.set_attr(p, "text:style-name", xml.attr(auto, "style:parent-style-name"))
+  end
+  return p
 end
 
 function M.first_para(ctx)
@@ -488,21 +518,28 @@ function M.number_headings(ctx, on)
 end
 
 -- The style to use for a piece: its original one, or a copy with bold/italic/underline changed.
+-- The styles of the spans for a piece (nested, outermost first): its original ones, or with the
+-- innermost a copy with bold/italic/... changed.
 local function style_for(ctx, piece)
-  local have = flags(ctx, piece.props, {})
-  if vim.iter(FLAGS):all(function(k) return have[k] == piece[k] end) then
-    return piece.props
+  local chain = type(piece.props) == "table" and piece.props or { piece.props }
+  local outer, inner, inherited = vim.list_slice(chain, 1, #chain - 1), chain[#chain], {}
+  for _, name in ipairs(outer) do
+    inherited = flags(ctx, name, inherited)
   end
-  local key = table.concat(vim.tbl_map(function(k) return tostring(piece[k]) end, FLAGS), "|") .. "|" .. (piece.props or "")
+  local have = flags(ctx, inner, inherited)
+  if vim.iter(FLAGS):all(function(k) return have[k] == piece[k] end) then
+    return chain
+  end
+  local key = table.concat(vim.tbl_map(function(k) return tostring(piece[k]) end, FLAGS), "|") .. "|" .. (inner or "")
   if not ctx.made[key] then
     automatic(ctx)
-    local base = piece.props and ctx.styles[piece.props]
+    local base = inner and ctx.styles[inner]
     local style
     if base and base.parent == ctx.auto then -- automatic styles can't be inherited: copy it
       style = xml.copy(base)
     else
       style = xml.elem("style:style", { { "style:family", "text" } })
-      xml.set_attr(style, "style:parent-style-name", piece.props)
+      xml.set_attr(style, "style:parent-style-name", inner)
     end
     local name, n = nil, 1
     repeat
@@ -524,7 +561,7 @@ local function style_for(ctx, piece)
     xml.append(ctx.auto, style)
     ctx.styles[name], ctx.made[key] = style, name
   end
-  return ctx.made[key]
+  return vim.list_extend(outer, { ctx.made[key] })
 end
 
 -- Append text, turning tabs into <text:tab/> and repeated or leading spaces into <text:s/>.
@@ -787,7 +824,7 @@ function M.fill(ctx, p, block, pieces)
     xml.set_attr(p, "text:outline-level", level and tostring(level))
     xml.set_attr(p, "text:style-name", level and (ctx.headings[level] or "Heading_20_" .. level))
   end
-  if block.title ~= is_title(ctx, p) and not level then
+  if (block.title or false) ~= is_title(ctx, p) and not level then
     xml.set_attr(p, "text:style-name", block.title and "Title" or nil)
   end
   if not not block.quote ~= based_on(ctx, p, QUOTES) and not (level or block.title) then
@@ -806,8 +843,10 @@ function M.fill(ctx, p, block, pieces)
         local a = piece.link and xml.elem("text:a", vim.deepcopy(attrs))
         cur = { link = piece.link, el = a and xml.append(p, a) or p }
       end
-      local style = style_for(ctx, piece)
-      local target = style and xml.append(cur.el, xml.elem("text:span", { { "text:style-name", style } })) or cur.el
+      local target = cur.el
+      for _, style in ipairs(style_for(ctx, piece)) do -- (nested spans, outermost first)
+        target = xml.append(target, xml.elem("text:span", { { "text:style-name", style } }))
+      end
       after_space = put_text(target, piece.text, after_space)
     else
       cur = { el = p }

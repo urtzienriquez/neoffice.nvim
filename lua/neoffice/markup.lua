@@ -29,10 +29,14 @@ local MARK = {
   sub = { "_{", "}" },
 }
 
-local function escape(s, braced, cell) -- (braced: inside ^{...} or _{...}, where "}" closes)
-  s = s:gsub("[\\*%[%]$]", "\\%0"):gsub("<(/?u>)", "\\<%1"):gsub("([%^_]){", "\\%1{")
-  s = s:gsub("~~+", function(r) return (r:gsub("~", "\\~")) end):gsub("==+", function(r) return (r:gsub("=", "\\=")) end)
-  s = s:gsub("⟦", "\\⟦"):gsub("⟧", "\\⟧")
+-- (braced: inside ^{...} or _{...}, where "}" closes; strict: every character that could start a
+-- mark, for text next to marks: see M.render)
+local function escape(s, braced, cell, strict)
+  if strict then -- (a "\" too; otherwise one is written as it is, as it escapes nothing)
+    s = s:gsub("[\\~=<^_!]", "\\%0")
+  end
+  s = s:gsub("[*%[%]$]", "\\%0"):gsub("<(/?u>)", "\\<%1"):gsub("([%^_]){", "\\%1{")
+  s = s:gsub("⟦", "\\⟦"):gsub("⟧", "\\⟧"):gsub("¶", "\\¶")
   if cell then -- (in a table cell, "|" and "<br>" separate)
     s = s:gsub("|", "\\|"):gsub("<br>", "\\<br>")
   end
@@ -96,10 +100,31 @@ local function kind(block)
   return block.heading or block.title or block.quote or block.list or block.row
 end
 
+local math_at, enclosed, link_at -- (below)
+
+-- Where the image, equation, footnote, field or link at `p` ends (its "|" don't separate cells).
+local function skip(line, p)
+  local c = line:sub(p, p)
+  local after
+  if c == "$" then
+    after = select(3, math_at(line, p))
+  elseif line:sub(p, p + 1) == "^[" then
+    after = select(2, enclosed(line, p + 2, "]"))
+  elseif line:sub(p, p + 2) == "⟦" then
+    after = select(2, enclosed(line, p + 3, "⟧"))
+  elseif c == "!" then
+    after = select(3, M.image_at(line, p))
+  elseif c == "[" then
+    after = link_at(line, p)
+  end
+  return after
+end
+
 -- The cells of a table row line: for each, { col = where its text starts (0-based), text }, with
--- the paragraphs of the cell, split at "<br>". nil for the line of dashes under the first row.
-function M.cells(line)
-  if line:match("^|[%s:|%-]*%-[%s:|%-]*$") then
+-- the paragraphs of the cell, split at "<br>". nil for the line of dashes (`dashes`: this line may
+-- be it, being the one under a table's first row).
+function M.cells(line, dashes)
+  if dashes and line:match("^|[%s:|%-]*%-[%s:|%-]*$") then
     return nil
   end
   local cells, start, p = {}, 2, 2
@@ -111,7 +136,10 @@ function M.cells(line)
       paras[#paras + 1] = { col = from - 1 + lead, text = text:sub(lead + 1):gsub("%s+$", "") }
     end
     while q < stop do
-      if line:sub(q, q) == "\\" then
+      local after = skip(line, q)
+      if after then
+        q = after
+      elseif line:sub(q, q) == "\\" then
         q = q + 2
       elseif line:sub(q, q + 3) == "<br>" then
         para(q)
@@ -126,7 +154,10 @@ function M.cells(line)
   end
   while p <= #line do
     local c = line:sub(p, p)
-    if c == "\\" then
+    local after = skip(line, p)
+    if after then
+      p = after
+    elseif c == "\\" then
       p = p + 2
     elseif c == "|" and not (line:sub(p - 1, p - 1) == "<" and line:sub(p + 1, p + 1) == ">") then -- (not "<|>")
       cell(p)
@@ -143,7 +174,7 @@ function M.cells(line)
 end
 
 -- Returns the line and, for every span, the { start, end } byte columns of its text.
-function M.render(spans, block)
+function M.render(spans, block, strict)
   local parts, cols, len, cur = {}, {}, 0, {}
   local function put(s)
     parts[#parts + 1] = s
@@ -177,14 +208,15 @@ function M.render(spans, block)
   for k, s in ipairs(spans) do
     local token -- (images, equations, footnotes, fields and breaks: written as they are)
     if s.image then
-      token = "![" .. escape(s.image.alt) .. "](" .. s.image.path:gsub("%)", "%%29") .. ")"
+      token = "![" .. escape(s.image.alt, false, block.cell) .. "](" .. s.image.path:gsub("%)", "%%29") .. ")"
         .. (s.image.width and "{width=" .. s.image.width .. "}" or "")
-    elseif s.math then
-      token = (s.math.display and "$$" or "$") .. s.math.tex .. (s.math.display and "$$" or "$")
+    elseif s.math then -- (on one line)
+      local tex = s.math.tex:gsub("%s*\n%s*", " ")
+      token = (s.math.display and "$$" or "$") .. tex .. (s.math.display and "$$" or "$")
     elseif s.footnote then
-      token = "^[" .. escape(s.footnote.text) .. "]"
+      token = "^[" .. escape(s.footnote.text:gsub("\n", " "), false, block.cell) .. "]"
     elseif s.field then
-      token = "⟦" .. escape(s.field.text) .. "⟧"
+      token = "⟦" .. escape(s.field.text:gsub("\n", " "), false, block.cell) .. "⟧"
     elseif s.line_break then
       token = "\\\n"
     elseif s.page_break then
@@ -195,7 +227,7 @@ function M.render(spans, block)
     end
     if s.text and s.text ~= "" then
       switch(token and {} or s)
-      local text = s.raw and s.text or escape(s.text, s.sup or s.sub, block.cell)
+      local text = s.raw and s.text or escape(s.text, s.sup or s.sub, block.cell, strict)
       cols[k] = { len, len + #text }
       put(text)
     end
@@ -203,24 +235,82 @@ function M.render(spans, block)
   end
   switch({})
   local line = table.concat(parts)
-  -- a paragraph whose text would read as another kind or alignment (or as a blank line) gets a "\"
-  for _ = 1, 3 do
-    local parsed, _, kind_at, align_at = M.block(line)
-    local at = line:match("^%s+$") and 1
-    if not at and not kind(block) and kind(parsed) and not (block.cell and parsed.row) then
-      at = kind_at
-    elseif not at and not block.align and parsed.align then
-      at = align_at
+  if line:sub(-2) == "\\\n" then -- (a line break ending the paragraph: a "\" ending its last line)
+    line = line:sub(1, -2)
+  end
+  -- a paragraph whose text would read as another kind or alignment (or as a blank line) gets a
+  -- "\"; so does each line after a line break that would read as the start of a paragraph
+  local start = 1
+  while start do
+    for _ = 1, 3 do
+      local text = line:sub(start, (line:find("\n", start, true) or #line + 1) - 1)
+      local parsed, _, kind_at, align_at = M.block(text)
+      local at = text:match("^%s+$") and 1
+      if not at and (start > 1 or not kind(block)) and kind(parsed) and not (block.cell and parsed.row) then
+        at = kind_at
+      elseif not at and (start > 1 or not block.align) and parsed.align then
+        at = align_at
+      end
+      if not at then
+        break
+      end
+      at = start + at - 1
+      line = line:sub(1, at - 1) .. "\\" .. line:sub(at)
+      for _, c in ipairs(cols) do
+        c[1], c[2] = c[1] + (c[1] >= at - 1 and 1 or 0), c[2] + (c[2] >= at - 1 and 1 or 0)
+      end
     end
-    if not at then
-      break
-    end
-    line = line:sub(1, at - 1) .. "\\" .. line:sub(at)
-    for _, c in ipairs(cols) do
-      c[1], c[2] = c[1] + (c[1] >= at - 1 and 1 or 0), c[2] + (c[2] >= at - 1 and 1 or 0)
-    end
+    start = line:find("\n", start, true)
+    start = start and start + 1
+  end
+  -- what is written must read back as the same text: if not (marks next to text that looks like
+  -- marks), it is written again escaping every character that could start a mark
+  -- (only text with characters that could be read as marks can read back otherwise)
+  if not strict and line:find("[=~_^<\\!]") and not M.same(line, spans) then
+    return M.render(spans, block, true)
   end
   return line, cols
+end
+
+-- Whether a line reads back as these spans: the same characters, formatting and objects.
+local function signature(entry, token)
+  if token then
+    return "\0" .. token
+  end
+  local flags = {}
+  for _, k in ipairs(M.FLAGS) do
+    flags[#flags + 1] = entry[k] and k or ""
+  end
+  return table.concat(flags, ",") .. "|" .. (entry.link or "") .. "|" .. entry.ch
+end
+function M.same(line, spans)
+  local want = {}
+  for _, s in ipairs(spans) do
+    local token = s.image and "image" or s.math and "math" or s.footnote and "footnote" or s.field and "field"
+      or s.page_break and "page_break"
+    if token then
+      want[#want + 1] = signature(nil, token)
+    elseif s.line_break then
+      want[#want + 1] = signature({ ch = "\n" })
+    elseif s.text then
+      local fmt = s.raw and {} or s
+      for ch in s.text:gmatch("[^\128-\191][\128-\191]*") do
+        want[#want + 1] = signature({ ch = ch, link = fmt.link, b = fmt.b, i = fmt.i, u = fmt.u, s = fmt.s, h = fmt.h, sup = fmt.sup, sub = fmt.sub })
+      end
+    end
+  end
+  local _, chars = M.parse(line)
+  if #chars ~= #want then
+    return false
+  end
+  for k, c in ipairs(chars) do
+    local token = c.image and "image" or c.math and "math" or c.footnote and "footnote" or c.field and "field"
+      or c.page_break and "page_break"
+    if signature(c, token) ~= want[k] then
+      return false
+    end
+  end
+  return true
 end
 
 -- An image "![alt](path)" or "![alt](path){width=12cm}" at `pos`: alt, path, position after it,
@@ -250,7 +340,7 @@ end
 -- An equation "$tex$" or "$$tex$$" at `pos`: tex, display, position after it. As in pandoc, an
 -- inline equation's "$" must touch its content, and the closing one can't be followed by a digit
 -- (so "$5 and $10" stays text).
-local function math_at(line, pos)
+function math_at(line, pos)
   if line:sub(pos, pos + 1) == "$$" then
     local stop = line:find("$$", pos + 2, true)
     return stop and stop > pos + 2 and line:sub(pos + 2, stop - 1), true, stop and stop + 2
@@ -269,7 +359,7 @@ end
 
 -- Text up to an unescaped `close` from `pos` (after an opening mark): its content (unescaped)
 -- and the position after `close`.
-local function enclosed(line, pos, close)
+function enclosed(line, pos, close)
   local p = pos
   while p <= #line do
     if line:sub(p, p) == "\\" then
@@ -282,6 +372,35 @@ local function enclosed(line, pos, close)
   end
 end
 
+-- A link "[text](url)" at `pos`: the position after it.
+function link_at(line, pos)
+  local p = pos + 1
+  while p <= #line do
+    local c = line:sub(p, p)
+    if c == "\\" then
+      p = p + 2
+    elseif c == "]" then
+      local after = line:match("^%([^)]*%)()", p + 1)
+      return after
+    else
+      p = p + 1
+    end
+  end
+end
+
+-- What a "\\" escapes (the characters escape() and render() escape); before anything else, it is
+-- just a backslash. (A "\\" ending the text is a line break; "\\ " starting a line, a space.)
+local ESCAPED = {}
+for c in ("\\*[]$<>^_~=|#%-.!{}\n" .. "⟦⟧¶"):gmatch("[^\128-\191][\128-\191]*") do
+  ESCAPED[c] = true
+end
+
+-- The first bytes of everything that isn't plain text (marks, escapes, images, equations...).
+local MARKS = {}
+for c in ("\\!$^_*~=<}[" .. "\226"):gmatch(".") do -- (\226: the first byte of ⟦)
+  MARKS[c:byte()] = true
+end
+
 -- Returns the block (see M.prefix: list numbers aren't read) and a list of characters:
 -- { col = byte column in the line (0-based), ch = "x", b, i, u, s, h, sup, sub = bool, link = url|nil }
 -- A line break is the character "\n" (from "\" at the end of a line). An image, equation,
@@ -289,20 +408,33 @@ end
 -- page_break = ... }.
 function M.parse(line)
   local block, pos = M.block(line)
+  local text_start = pos
 
   local chars, cur, link_close, braces = {}, {}, nil, {} -- braces: the open ^{ and _{
   local function emit(at)
     local ch = line:match("^.[\128-\191]*", at)
-    local entry = { col = at - 1, ch = ch, link = cur.link }
-    for _, k in ipairs(M.FLAGS) do
-      entry[k] = not not cur[k]
-    end
-    chars[#chars + 1] = entry
+    chars[#chars + 1] = { -- (the flags of M.FLAGS)
+      col = at - 1, ch = ch, link = cur.link, b = cur.b == true, i = cur.i == true, u = cur.u == true,
+      s = cur.s == true, h = cur.h == true, sup = cur.sup == true, sub = cur.sub == true,
+    }
     return at + #ch
   end
   local function token(key, value, after)
     chars[#chars + 1] = { col = pos - 1, ch = "", len = after - pos, [key] = value }
     return after
+  end
+  local function later(mark, from) -- (an unescaped `mark` after `from`: a mark only opens if it closes)
+    local p = from
+    while p <= #line do
+      if line:sub(p, p) == "\\" then
+        p = p + 2
+      elseif line:sub(p, p + #mark - 1) == mark then
+        return true
+      else
+        p = p + 1
+      end
+    end
+    return false
   end
   -- "[" starts a link only if a matching "](url)" follows
   local function find_link(at)
@@ -321,6 +453,10 @@ function M.parse(line)
   end
 
   while pos <= #line do
+    if not MARKS[line:byte(pos)] and pos ~= link_close then -- (most characters: just text)
+      pos = emit(pos)
+      goto continue
+    end
     local c = line:sub(pos, pos)
     local two = line:sub(pos, pos + 1)
     local note, after_note
@@ -335,8 +471,13 @@ function M.parse(line)
       cur.link, link_close, pos = nil, nil, line:find(")", pos, true) + 1
     elseif line:sub(pos, pos + 7) == "\\newpage" then
       pos = token("page_break", true, pos + 8)
-    elseif c == "\\" and pos < #line then
+    elseif c == "\\" and pos == #line and pos > text_start then -- (a line break ending the text)
+      pos = emit(pos)
+      chars[#chars].ch = "\n"
+    elseif c == "\\" and (ESCAPED[line:match("^.[\128-\191]*", pos + 1) or ""]
+      or line:sub(pos + 1, pos + 1) == " " and (pos == text_start or line:sub(pos - 1, pos - 1) == "\n")) then
       pos = emit(pos + 1)
+      chars[#chars].esc = true -- (escaped: a "¶" is just a ¶)
     elseif c == "!" and M.image_at(line, pos) then
       local alt, path, after, width = M.image_at(line, pos)
       pos = token("image", { alt = alt, path = path, width = width }, after)
@@ -347,17 +488,17 @@ function M.parse(line)
       pos = token("footnote", { text = note }, after_note)
     elseif field then
       pos = token("field", { text = field }, after_field)
-    elseif two == "**" then
+    elseif two == "**" and (cur.b or later("**", pos + 2)) then
       cur.b, pos = not cur.b, pos + 2
-    elseif c == "*" then
+    elseif c == "*" and two ~= "**" and (cur.i or later("*", pos + 1)) then
       cur.i, pos = not cur.i, pos + 1
-    elseif two == "~~" then
+    elseif two == "~~" and (cur.s or later("~~", pos + 2)) then
       cur.s, pos = not cur.s, pos + 2
-    elseif two == "==" then
+    elseif two == "==" and (cur.h or later("==", pos + 2)) then
       cur.h, pos = not cur.h, pos + 2
-    elseif line:find("^<u>", pos) then
+    elseif line:find("^<u>", pos) and not cur.u and later("</u>", pos + 3) then
       cur.u, pos = true, pos + 3
-    elseif line:find("^</u>", pos) then
+    elseif line:find("^</u>", pos) and cur.u then
       cur.u, pos = false, pos + 4
     elseif two == "^{" or two == "_{" then
       local flag = two == "^{" and "sup" or "sub"
@@ -371,6 +512,7 @@ function M.parse(line)
     else
       pos = emit(pos)
     end
+    ::continue::
   end
   return block, chars
 end

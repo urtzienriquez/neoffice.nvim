@@ -75,11 +75,14 @@ function M.paragraphs(lines, alone)
   end
   for row, line in ipairs(lines) do
     local prev = out[#out]
-    local cells = line:match("^|") and markup.cells(line)
     table_start = line:match("^|") and (#blanks == 0 and table_start or row) or nil
+    local cells = table_start and markup.cells(line, row == table_start + 1) -- (dashes: under the first row)
+    if cells and #cells == 0 then -- (a "|" alone: text)
+      cells, table_start = false, nil
+    end
     if line:match("^%s*$") then
       blanks[#blanks + 1] = row
-    elseif line:match("^|") then -- a table row (or the line of dashes under its first row)
+    elseif cells ~= false and table_start then -- a table row (or the line of dashes under its first row)
       empty_paragraphs(prev and 2 or 1)
       for c, cell in ipairs(cells or {}) do
         for _, para in ipairs(cell) do
@@ -124,8 +127,6 @@ local function covers(mark, row, col)
   return (mark[2] < row or mark[2] == row and mark[3] <= col) and (d.end_row > row or d.end_row == row and d.end_col > col)
 end
 
-local SAME = { "props", "link", "insert", unpack(markup.FLAGS) } -- (what makes characters one piece)
-
 -- Cut a paragraph into pieces: text with uniform formatting, objects, images, and comment/change
 -- markers. Reads the buffer and its marks only.
 local function pieces(buf, para)
@@ -134,8 +135,18 @@ local function pieces(buf, para)
   block.cell = para.cell and true or nil
   -- where each character is in the buffer (the paragraph's lines were joined with spaces)
   local lines = api.nvim_buf_get_lines(buf, para.first - 1, para.last, true)
+  local function position(offset) -- (of a byte of the paragraph's text: row, column)
+    local row, start = 1, -(para.col or 0)
+    while row < #lines and offset > start + #lines[row] do
+      start, row = start + #lines[row] + 1, row + 1
+    end
+    return para.first - 2 + row, offset - start
+  end
   local row, start = 1, -(para.col or 0)
   for _, ch in ipairs(chars) do
+    if ch.len then -- (an image, equation... may go on in the next line)
+      ch.end_row, ch.end_col = position(ch.col + ch.len)
+    end
     while row < #lines and ch.col > start + #lines[row] do
       start, row = start + #lines[row] + 1, row + 1
     end
@@ -156,14 +167,17 @@ local function pieces(buf, para)
   local events = {}
   local function event(r, c, rank, piece)
     if r >= para.first - 1 and r <= para.owns - 1 and inside(r, c) then
-      local at = #chars + 1
-      for k, ch in ipairs(chars) do
+      local lo, hi = 1, #chars + 1 -- (the first character at or after r, c)
+      while lo < hi do
+        local mid = math.floor((lo + hi) / 2)
+        local ch = chars[mid]
         if ch.row > r or ch.row == r and ch.col >= c then
-          at = k
-          break
+          hi = mid
+        else
+          lo = mid + 1
         end
       end
-      events[#events + 1] = { at, rank, #events, piece }
+      events[#events + 1] = { lo, rank, #events, piece }
     end
   end
   for _, m in ipairs(marks("comment")) do
@@ -176,12 +190,38 @@ local function pieces(buf, para)
   end
   -- a deletion is the text it covers (shown struck through; ¶ for a paragraph break)
   -- (images, equations and other objects in deleted text stay in the document until it is accepted)
-  local deletions = vim.tbl_filter(function(m) return m[5].type == "delete" end, changes)
-  local function deleted_by(ch)
-    return not (ch.image or ch.math or ch.footnote or ch.field or ch.ch == "￼") and vim.iter(deletions):find(function(m) return covers(m, ch.row, ch.col) end)
+  -- (characters come in order, and so do marks (by their start): the first mark that covers a
+  -- character is found by stepping past those that ended before it)
+  local function walker(list)
+    local first = 1
+    return function(ch)
+      while list[first] and not (list[first][4].end_row > ch.row or list[first][4].end_row == ch.row and list[first][4].end_col > ch.col) do
+        first = first + 1
+      end
+      for k = first, #list do
+        local m = list[k]
+        if m[2] > ch.row or m[2] == ch.row and m[3] > ch.col then
+          return nil
+        elseif covers(m, ch.row, ch.col) then
+          return m
+        end
+      end
+    end
   end
+  local deletions = {}
   for _, m in ipairs(changes) do
     if m[5].type == "delete" then
+      deletions[#deletions + 1] = m
+    end
+  end
+  local deletion_at, run_at = walker(deletions), walker(runs)
+  local function deleted_by(ch)
+    return #deletions > 0 and not (ch.image or ch.math or ch.footnote or ch.field or ch.ch == "￼") and deletion_at(ch)
+  end
+  for _, m in ipairs(changes) do
+    if m[5].type == "delete" and m[5].no_text then
+      event(m[2], m[3], 2, { deletion = m[5], deleted = "", part = 0 })
+    elseif m[5].type == "delete" then
       -- (written with the text, below)
     else
       event(m[2], m[3], 3, { insert_start = m[5] })
@@ -209,33 +249,56 @@ local function pieces(buf, para)
     end
     local deletion = deleted_by(ch)
     if deletion then -- deleted text: the deletion's part here (continuing, unless something came between)
-      local last = out[#out]
-      if last and last.deletion == deletion[5] then
-        last.deleted = last.deleted .. (ch.ch == "¶" and "\n" or ch.ch)
-      else
+      local last, char = out[#out], ch.ch == "¶" and not ch.esc and "\n" or ch.ch
+      if not (last and last.deletion == deletion[5]) then
         parts[deletion[5]] = (parts[deletion[5]] or (deletion[2] < para.first - 1 and 1 or 0)) + 1
-        out[#out + 1] = { deletion = deletion[5], deleted = ch.ch == "¶" and "\n" or ch.ch, part = parts[deletion[5]] - 1 }
+        last = { deletion = deletion[5], deleted = "", part = parts[deletion[5]] - 1, segs = {} }
+        out[#out + 1] = last
+      end
+      last.deleted = last.deleted .. char
+      -- (its formatting: the deleted text is written formatted, to come back as it was)
+      local run = run_at(ch)
+      local seg, fmt = last.segs[#last.segs], { props = run and doc.run[run[1]] or nil }
+      for _, flag in ipairs(markup.FLAGS) do
+        fmt[flag] = ch[flag]
+      end
+      local same = seg and seg.props == fmt.props
+      for _, flag in ipairs(markup.FLAGS) do
+        same = same and seg[flag] == fmt[flag]
+      end
+      if same then
+        seg.text = seg.text .. char
+      else
+        fmt.text = char
+        last.segs[#last.segs + 1] = fmt
       end
       goto next_char
     end
-    local mark = (ch.ch == "￼" or ch.image or ch.math or ch.footnote or ch.field) and vim.iter(objects):find(function(m)
-      return doc.object[m[1]].visible and m[2] == ch.row and m[3] == ch.col
-    end)
+    local mark
+    if ch.ch == "￼" or ch.image or ch.math or ch.footnote or ch.field then
+      for _, m in ipairs(objects) do
+        if m[2] == ch.row and m[3] == ch.col and doc.object[m[1]].visible then
+          mark = m
+          break
+        end
+      end
+    end
     local object = mark and doc.object[mark[1]]
     if ch.image then -- unchanged, edited (another path or alt text) or new
       local same = object and object.image and object.image.path == ch.image.path and object.image.alt == ch.image.alt
         and object.image.width == ch.image.width
       assert(not ch.image.width or markup.cm(ch.image.width, 1), "image width: write it in cm, mm, in or % (of the text's width), as in {width=12cm} or {width=50%}")
-      local where = { mark = mark and mark[1], row = ch.row, col = ch.col, end_col = ch.col + ch.len }
+      local where = { mark = mark and mark[1], row = ch.row, col = ch.col, end_row = ch.end_row, end_col = ch.end_col }
       out[#out + 1] = same and { object = object.node } or { image = vim.tbl_extend("force", ch.image, where, { original = object }) }
     elseif ch.math then -- an equation: unchanged, or (re)written from its LaTeX
       local same = object and object.math and object.math.tex == ch.math.tex and object.math.display == ch.math.display
-      local where = { mark = mark and mark[1], row = ch.row, col = ch.col, end_col = ch.col + ch.len }
+      local where = { mark = mark and mark[1], row = ch.row, col = ch.col, end_row = ch.end_row, end_col = ch.end_col }
       out[#out + 1] = same and { object = object.node } or { math = vim.tbl_extend("force", ch.math, where) }
     elseif ch.footnote then -- a footnote: unchanged, edited or new
       local same = object and object.footnote and object.footnote.text == ch.footnote.text
-      local where = { mark = mark and mark[1], row = ch.row, col = ch.col, end_col = ch.col + ch.len }
-      out[#out + 1] = same and { object = object.node } or { footnote = vim.tbl_extend("force", ch.footnote, where, { original = object }) }
+      local where = { mark = mark and mark[1], row = ch.row, col = ch.col, end_row = ch.end_row, end_col = ch.end_col }
+      out[#out + 1] = same and { object = object.node, note = object.footnote } -- (note: in case it must be written again)
+        or { footnote = vim.tbl_extend("force", ch.footnote, where, { original = object }) }
     elseif ch.field then -- a field (citation, date...): kept as it is; its text can't be edited
       if object and object.field then
         out[#out + 1] = { object = object.node, kept = object.field.text ~= ch.field.text and ch.field.text or nil }
@@ -251,27 +314,39 @@ local function pieces(buf, para)
     else
       -- the first run covering this character (text typed between two runs belongs to the first);
       -- text outside any run keeps the properties of the character before it
-      local run = vim.iter(runs):find(function(m) return covers(m, ch.row, ch.col) end)
+      local run = run_at(ch)
       if run then
         props = doc.run[run[1]]
       end
-      local piece = { text = ch.ch, props = props or nil, link = ch.link }
-      for _, flag in ipairs(markup.FLAGS) do
-        piece[flag] = ch[flag]
-      end
+      local insert
       for _, m in ipairs(changes) do
         if m[5].type == "insert" and covers(m, ch.row, ch.col) then
-          piece.insert = m[5]
+          insert = m[5]
         end
       end
+      -- the same formatting as the text before it: one piece (its text is collected, joined below)
       local last = out[#out]
-      if last and last.text and vim.iter(SAME):all(function(key) return last[key] == piece[key] end) then
-        last.text = last.text .. ch.ch
+      local same = last and type(last.text) == "table" and last.props == (props or nil) and last.link == ch.link
+        and last.insert == insert
+      for _, flag in ipairs(markup.FLAGS) do
+        same = same and last[flag] == ch[flag]
+      end
+      if same then
+        last.text[#last.text + 1] = ch.ch
       else
+        local piece = { text = { ch.ch }, props = props or nil, link = ch.link, insert = insert }
+        for _, flag in ipairs(markup.FLAGS) do
+          piece[flag] = ch[flag]
+        end
         out[#out + 1] = piece
       end
     end
     ::next_char::
+  end
+  for _, piece in ipairs(out) do
+    if type(piece.text) == "table" then
+      piece.text = table.concat(piece.text)
+    end
   end
   -- an insertion (deletion) running past the end of the paragraph inserted (deleted) its break too
   local stop = { para.last - 1, para.stop or #lines[#lines] }
@@ -287,13 +362,19 @@ end
 
 -- A fingerprint of a paragraph's pieces: equal fingerprints mean the paragraph's XML is still right.
 local function signature(block, list)
-  local out = { vim.inspect(block, { newline = "", indent = "" }) }
+  local l = block.list
+  local out = { table.concat({ tostring(block.heading), tostring(block.title), tostring(block.quote), tostring(block.align),
+    tostring(block.cell), l and table.concat({ l.kind, l.level, tostring(l.n), tostring(l.id) }, ",") or "" }, "|") }
   for _, piece in ipairs(list) do
     local keys = vim.tbl_keys(piece)
     table.sort(keys)
     for _, key in ipairs(keys) do
       local v = piece[key]
-      if type(v) == "table" then -- (identity, plus what can change inside comments, changes, images)
+      if key == "segs" then -- (the deleted text's formatting)
+        v = table.concat(vim.tbl_map(function(seg)
+          return tostring(seg.props) .. table.concat(vim.tbl_map(function(f) return tostring(seg[f]) end, markup.FLAGS)) .. seg.text
+        end, v), "/")
+      elseif type(v) == "table" then -- (identity, plus what can change inside comments, changes, images)
         local replies = table.concat(vim.tbl_map(tostring, v.replies or {}), ",")
         v = table.concat({ tostring(v), replies, tostring(v.resolved), v.text or "", v.path or "", v.alt or "", v.width or "", v.tex or "", tostring(v.display) }, "/")
       end
@@ -324,7 +405,7 @@ local function setup_buffer(buf)
     buffer = buf,
     callback = function()
       require("neoffice.changes").after_edit(buf)
-      M.decorate(buf)
+      M.decorate_soon(buf)
     end,
   })
   api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI", "TextChanged" }, {
@@ -426,6 +507,21 @@ local function open(buf, path)
   for k, para in ipairs(paras) do
     cells[k] = M.cell_of(para.node)
     para.block.cell = cells[k] and true or nil
+    if cells[k] then -- (spaces at the edges of a cell's text: not shown, as the table can't show them)
+      local text = vim.tbl_filter(function(sp) return sp.text and not sp.deletion and not sp.object end, para.spans)
+      for _, sp in ipairs(text) do
+        sp.text = sp.text:gsub("^%s+", "")
+        if sp.text ~= "" then
+          break
+        end
+      end
+      for k2 = #text, 1, -1 do
+        text[k2].text = text[k2].text:gsub("%s+$", "")
+        if text[k2].text ~= "" then
+          break
+        end
+      end
+    end
     for _, s in ipairs(para.spans) do
       if cells[k] and (s.line_break or s.page_break) then -- (in a table cell: kept, as ￼)
         s.line_break, s.page_break, s.visible = nil, nil, true
@@ -434,6 +530,7 @@ local function open(buf, path)
       end
       if s.deletion then -- (shown in the text, struck through; a paragraph break as ¶¶)
         s.text = s.deletion.text:gsub("\n", "¶¶")
+        s.deletion.no_text = s.text == "" or nil -- (a deleted image, tab...: a point, kept as it is)
       elseif s.text then
         s.text = s.text:gsub("\n", " ")
       elseif s.object and s.visible and not (s.image or s.math or s.footnote or s.field) then
@@ -590,11 +687,25 @@ function M.selection(use_marks)
   if not use_marks then
     api.nvim_feedkeys(vim.keycode("<Esc>"), "nx", false)
   end
-  return { { s[2] - 1, first_col }, stop }
+  local block = mode == "\22" and { math.min(s[3], e[3]) - 1, math.max(s[3], e[3]) } or nil -- (its columns)
+  return { { s[2] - 1, first_col }, stop, block = block }
 end
 
 -- Decorations that follow the text: titles highlighted (NeofficeTitle, above tree-sitter) and,
 -- when the document numbers its headings, their numbers (1, 1.1, ...) shown before them.
+local decorating = {}
+function M.decorate_soon(buf) -- (once typing pauses: decorations are for the whole buffer)
+  if not decorating[buf] then
+    decorating[buf] = true
+    vim.defer_fn(function()
+      decorating[buf] = nil
+      if api.nvim_buf_is_valid(buf) then
+        M.decorate(buf)
+      end
+    end, 50)
+  end
+end
+
 function M.decorate(buf)
   local doc = M.docs[buf]
   if not doc then
@@ -700,6 +811,52 @@ function M.diff(old, new)
 end
 
 -- Map each current paragraph to the one it continues (or nil for new ones) with a diff of their texts.
+-- Pair changed paragraphs (old[sa..], new[sb..]) with the old ones they most look like, in order
+-- (so an edited paragraph keeps its own properties when the one before it was deleted). Returns
+-- new index -> old index.
+local function pair(old, new, sa, ca, sb, cb)
+  local out = {}
+  if ca == cb or ca == 0 or cb == 0 or ca * cb > 2500 then -- (as many, or too many: in order)
+    for k = 0, math.min(ca, cb) - 1 do
+      out[sb + k] = sa + k
+    end
+    return out
+  end
+  local function like(x, y) -- (how many characters they share at their start and end)
+    local n, m = 0, 0
+    while n < #x and n < #y and x:byte(n + 1) == y:byte(n + 1) do
+      n = n + 1
+    end
+    while m < #x - n and m < #y - n and x:byte(#x - m) == y:byte(#y - m) do
+      m = m + 1
+    end
+    return n + m
+  end
+  local best = {} -- best[i][j]: the best pairing of the first i old and j new paragraphs
+  for i = 0, ca do
+    best[i] = { [0] = 0 }
+  end
+  for j = 1, cb do
+    best[0][j] = 0
+  end
+  for i = 1, ca do
+    for j = 1, cb do
+      best[i][j] = math.max(best[i - 1][j], best[i][j - 1], best[i - 1][j - 1] + 1 + like(old[sa + i - 1], new[sb + j - 1]))
+    end
+  end
+  local i, j = ca, cb
+  while i > 0 and j > 0 do
+    if best[i][j] == best[i - 1][j] then
+      i = i - 1
+    elseif best[i][j] == best[i][j - 1] then
+      j = j - 1
+    else
+      out[sb + j - 1], i, j = sa + i - 1, i - 1, j - 1
+    end
+  end
+  return out
+end
+
 local function match_lines(old, new)
   local old_of, deleted, a, b = {}, {}, 1, 1
   local hunks = M.diff(old, new)
@@ -709,11 +866,16 @@ local function match_lines(old, new)
     while b < sb do -- unchanged lines
       old_of[b], a, b = a, a + 1, b + 1
     end
-    for k = 0, math.max(ca, cb) - 1 do -- changed lines pair up in order
-      if k < cb then
-        old_of[sb + k] = k < ca and sa + k or nil
-      else
-        deleted[#deleted + 1] = sa + k
+    for j, i in pairs(pair(old, new, sa, ca, sb, cb)) do
+      old_of[j] = i
+    end
+    local used = {}
+    for j = sb, sb + cb - 1 do
+      used[old_of[j] or 0] = true
+    end
+    for i = sa, sa + ca - 1 do
+      if not used[i] then
+        deleted[#deleted + 1] = i
       end
     end
     a, b = sa + ca, sb + cb
@@ -734,6 +896,23 @@ local function remove_paragraphs(fmt, nodes)
   local cells = {}
   for _, node in ipairs(nodes) do
     local parent = node.parent
+    -- a section break (Word's: in the paragraph's properties) isn't shown, so it isn't deleted with
+    -- its paragraph: the paragraph before it ends the section instead (unless it ends one already)
+    local section = node.parent and xml.child(xml.child(node, "w:pPr") or {}, "w:sectPr")
+    if section then
+      local k, before = xml.index(node) - 1, nil
+      while k > 0 and not before do
+        local c = node.parent.children[k]
+        before = c.tag == "w:p" and not vim.tbl_contains(nodes, c) and c or nil
+        k = k - 1
+      end
+      local ppr = before and (xml.child(before, "w:pPr") or xml.append(before, xml.elem("w:pPr"), 1))
+      if ppr and not xml.child(ppr, "w:sectPr") then
+        xml.remove(section)
+        local after = xml.child(ppr, "w:pPrChange") -- (sectPr comes last in pPr, but for this)
+        xml.append(ppr, section, after and xml.index(after) or nil)
+      end
+    end
     if parent then -- (unless it went with its list or table already)
       xml.remove(node)
       while parent.parent and (parent.tag == "text:list-item" or parent.tag == "text:list") and empty(parent) do
@@ -754,7 +933,7 @@ local function remove_paragraphs(fmt, nodes)
     if tbl and tbl.parent and #xml.collect(tbl, PARAGRAPHS) == 0 then
       xml.remove(tbl)
     elseif empty(cell) and (not tbl or tbl.parent) then
-      xml.append(cell, fmt.new_para(template))
+      xml.append(cell, fmt.new_para(template, ctx))
     end
   end
 end
@@ -781,6 +960,75 @@ local function read_image(doc, path)
   return data
 end
 
+-- Everything a save may change in a document's XML, and in what neoffice notes about it (ctx, and
+-- the comments and changes: `notes`), to put back if the save fails: each node's children and
+-- attributes, and the fields of ctx (one level deep) and of the notes.
+local function checkpoint(ctx, notes)
+  local nodes, seen = {}, {}
+  local function walk(n)
+    if seen[n] then
+      return
+    end
+    seen[n] = true
+    local attrs = {}
+    for k, kv in ipairs(n.attrs or {}) do
+      attrs[k] = { kv[1], kv[2] }
+    end
+    local children = {}
+    for k, c in ipairs(n.children) do
+      children[k] = c
+    end
+    nodes[#nodes + 1] = { n, children, n.attrs and attrs }
+    for _, c in ipairs(n.children) do
+      if c.children then
+        walk(c)
+      end
+    end
+  end
+  local fields = {}
+  for key, value in pairs(ctx) do
+    if type(value) == "table" and value.children then -- (an XML tree)
+      walk(value)
+    elseif type(value) == "table" then -- (a map of parts, styles, ids...)
+      fields[key] = {}
+      for k, v in pairs(value) do
+        fields[key][k] = v
+        if type(v) == "table" and v.children and not v.parent then
+          walk(v)
+        end
+      end
+    end
+  end
+  local scalars = vim.tbl_extend("force", {}, ctx)
+  local saved = {}
+  for _, t in ipairs(notes) do
+    saved[t] = vim.tbl_extend("force", {}, t)
+  end
+  return function()
+    for t, copy in pairs(saved) do
+      for key in pairs(t) do
+        t[key] = nil
+      end
+      for key, value in pairs(copy) do
+        t[key] = value
+      end
+    end
+    for _, entry in ipairs(nodes) do
+      local n = entry[1]
+      n.children, n.attrs = entry[2], entry[3]
+      for _, c in ipairs(n.children) do
+        c.parent = n
+      end
+    end
+    for key in pairs(ctx) do
+      ctx[key] = nil
+    end
+    for key, value in pairs(scalars) do
+      ctx[key] = fields[key] or value
+    end
+  end
+end
+
 function M.save(buf, target)
   local doc = M.docs[buf]
   if not doc then
@@ -788,6 +1036,13 @@ function M.save(buf, target)
   end
   target = vim.fn.fnamemodify(target or doc.path, ":p")
   local ok, err = pcall(function()
+    local ext = function(path) return (path:match("%.(%w+)$") or ""):lower() end
+    if ext(target) ~= ext(doc.path) then
+      error(("a .%s document can't be written as .%s (another format)"):format(ext(doc.path), ext(target)))
+    end
+    if target ~= doc.path and vim.fn.fnamemodify(api.nvim_buf_get_name(buf), ":p") == target then
+      doc.path, doc.stamp, doc.synced = target, stamp(target), false -- (:saveas: the document's file now)
+    end
     local now = stamp(doc.path)
     if target == doc.path and now and doc.stamp and now ~= doc.stamp and vim.v.cmdbang ~= 1 then
       error("the file was changed by another program since it was read or written (:w! writes over it)")
@@ -805,7 +1060,8 @@ function M.save(buf, target)
     for k, block in ipairs(blocks) do
       local kind, list = pieces(buf, block)
       for _, piece in ipairs(list) do
-        if piece.image then
+        local original = piece.image and piece.image.original and piece.image.original.image
+        if piece.image and not (original and original.path == piece.image.path) then -- (a new file)
           piece.image.bytes = read_image(doc, piece.image.path)
         end
       end
@@ -825,14 +1081,30 @@ function M.save(buf, target)
       end
     end
 
-    -- 2. Rewrite only the paragraphs that changed.
-    local ctx, paras, prev, plain, kept = doc.ctx, {}, nil, nil, {}
+    -- 2. Rewrite only the paragraphs that changed. (If anything fails before the file is written,
+    -- the document's XML is put back as it was: see checkpoint.)
+    local ctx, paras, prev, plain, kept, placements = doc.ctx, {}, nil, nil, {}, {}
+    local notes = vim.list_extend(vim.tbl_values(doc.change), vim.tbl_values(doc.comment))
+    for _, c in pairs(doc.comment) do
+      vim.list_extend(notes, c.replies)
+    end
+    local restore = checkpoint(ctx, notes)
+    local written, failure = pcall(function()
     local layout = require("neoffice.tables").start(doc.fmt, ctx, vim.tbl_map(function(plan)
       return { cell = plan.cell, node = plan.old and doc.paras[plan.old] }
     end, plans), M.cell_of)
-    local function outside(node) -- (the outermost table it is in, or itself)
+    local function outside(node) -- (the outermost table it is in, or itself; or a block content
+      -- control (a table of contents...) it ends: what comes after it goes after it)
       local cell = M.cell_of(node)
-      return cell and outside(cell.tbl) or node
+      if cell then
+        return outside(cell.tbl)
+      end
+      local content = node.parent
+      local last = content and vim.iter(content.children):rev():find(function(c) return c.tag end)
+      if content and content.tag == "w:sdtContent" and last == node and content.parent then
+        return outside(content.parent)
+      end
+      return node
     end
     for k, plan in ipairs(plans) do
       local node = plan.old and doc.paras[plan.old]
@@ -845,11 +1117,12 @@ function M.save(buf, target)
       if not node and not anchor then -- the document had no paragraph at all
         node = doc.fmt.first_para(ctx)
       elseif not node then -- a new paragraph, formatted like the one before it
-        node = doc.fmt.new_para(plain or prev or doc.paras[1])
+        node = doc.fmt.new_para(plain or prev or doc.paras[1], ctx)
         xml.append(anchor.parent, node, xml.index(anchor) + (prev and 1 or 0))
       end
       plain = not plan.cell and node or plain
       if not plan.old or plan.sig ~= doc.sigs[plan.old] then
+        plan.written = true
         doc.fmt.fill(ctx, node, plan.block, plan.pieces)
         ctx.dirty[doc.fmt.MAIN] = true
         for _, piece in ipairs(plan.pieces) do -- images written now: they are the document's from now on
@@ -857,16 +1130,12 @@ function M.save(buf, target)
           if piece.kept then
             kept[#kept + 1] = piece.kept
           end
-          if new then
-            if new.mark then
-              api.nvim_buf_del_extmark(buf, M.ns.object, new.mark)
-              doc.object[new.mark] = nil
-            end
+          if new then -- (its mark, once the file is written)
             local data = { node = new.node, visible = true }
             data.image = piece.image and { path = new.path, alt = new.alt, width = new.width }
             data.math = piece.math and { tex = new.tex, display = new.display }
             data.footnote = piece.footnote and { text = new.text, id = new.id }
-            M.place(buf, "object", data, new.row, new.col, new.row, new.end_col)
+            placements[#placements + 1] = { new = new, data = data }
           end
         end
       end
@@ -876,10 +1145,6 @@ function M.save(buf, target)
     if #deleted > 0 then
       remove_paragraphs(doc.fmt, vim.tbl_map(function(old) return doc.paras[old] end, deleted))
       ctx.dirty[doc.fmt.MAIN] = true
-    end
-    doc.paras, doc.texts, doc.sigs = paras, texts, {}
-    for k, block in ipairs(blocks) do
-      doc.sigs[k] = signature(pieces(buf, block))
     end
 
     -- 3. Write the parts that changed (nothing at all if nothing did).
@@ -892,7 +1157,33 @@ function M.save(buf, target)
       zip.write(doc.base, entries)
       doc.synced = false
     end
+    end)
+    if not written then
+      restore()
+      error(failure, 0)
+    end
     ctx.dirty, ctx.files, ctx.comments_dirty = {}, {}, false
+    -- (the document has them now: what neoffice remembers of it follows)
+    for _, p in ipairs(placements) do
+      if p.new.mark then
+        api.nvim_buf_del_extmark(buf, M.ns.object, p.new.mark)
+        doc.object[p.new.mark] = nil
+      end
+      M.place(buf, "object", p.data, p.new.row, p.new.col, p.new.end_row, p.new.end_col)
+    end
+    doc.paras, doc.texts, doc.sigs = paras, texts, {}
+    for k, block in ipairs(blocks) do -- (those written may have new marks: new images, equations...)
+      doc.sigs[k] = plans[k].written and signature(pieces(buf, block)) or plans[k].sig
+    end
+    local alone = {} -- (empty paragraphs are paragraphs of their own, as when opened: see M.blocks)
+    for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.empty, 0, -1, {})) do
+      alone[m[2]] = true
+    end
+    for _, block in ipairs(blocks) do
+      if block.text == "" and not block.cell and not alone[block.first - 1] then
+        api.nvim_buf_set_extmark(buf, M.ns.empty, block.first - 1, 0, { invalidate = true, right_gravity = false })
+      end
+    end
     if target ~= doc.path or not doc.synced or not vim.uv.fs_stat(target) then -- ...and goes to the file
       local file = doc.is_doc and convert(doc.base, "doc:MS Word 97", vim.fn.tempname()) or doc.base
       assert(vim.uv.fs_copyfile(file, target .. ".neoffice~"))

@@ -42,7 +42,7 @@ end
 
 local function is_on(el) -- <w:b/> is on; <w:b w:val="0"/> and <w:u w:val="none"/> are off
   local v = el and xml.attr(el, "w:val")
-  return el ~= nil and v ~= "0" and v ~= "false" and v ~= "none"
+  return el ~= nil and v ~= "0" and v ~= "false" and v ~= "off" and v ~= "none"
 end
 
 -- The formatting of run properties: { b, i, u, sup, sub } (see markup.FLAGS).
@@ -244,7 +244,7 @@ local function read_para(ctx, p)
     local target = blip and ctx.images[xml.attr(blip, "r:embed") or ""]
     local cx = tonumber(xml.attr(xml.find(el, "wp:extent") or {}, "cx") or "")
     return target and {
-      path = "word/" .. target, alt = doc_pr and xml.attr(doc_pr, "descr") or "",
+      path = "word/" .. target, alt = doc_pr and vim.trim((xml.attr(doc_pr, "descr") or ""):gsub("%s+", " ")) or "",
       width = cx and markup.width(cx / 360000) or nil,
     }
   end
@@ -261,7 +261,11 @@ local function read_para(ctx, p)
     for _, el in ipairs(r.children) do
       local br = (el.tag == "w:br" or el.tag == "w:cr") and (xml.attr(el, "w:type") or "textWrapping")
       if el.tag == "w:t" or el.tag == "w:tab" then
-        add(vim.tbl_extend("force", { text = el.tag == "w:t" and xml.text(el) or "\t", props = r, link = link }, f))
+        local text = el.tag == "w:t" and xml.text(el) or "\t"
+        if el.tag == "w:t" and xml.attr(el, "xml:space") ~= "preserve" then -- (as Word reads it)
+          text = vim.trim(text)
+        end
+        add(vim.tbl_extend("force", { text = text, props = r, link = link }, f))
       elseif br == "textWrapping" or br == "page" then
         add({ [br == "page" and "page_break" or "line_break"] = true })
       elseif el.tag == "w:commentReference" then -- a comment on a single point
@@ -500,7 +504,23 @@ end
 
 function M.new_para(template)
   local ppr = xml.child(template, "w:pPr")
-  return xml.elem("w:p", {}, { ppr and xml.copy(ppr) })
+  ppr = ppr and xml.copy(ppr)
+  -- (not what belongs to the paragraph it comes after: a section break, a page break before it,
+  -- a tracked change of its properties or of its paragraph mark)
+  for _, tag in ipairs({ "w:sectPr", "w:pageBreakBefore", "w:pPrChange" }) do
+    local el = ppr and xml.child(ppr, tag)
+    if el then
+      xml.remove(el)
+    end
+  end
+  local mark = ppr and xml.child(ppr, "w:rPr")
+  for _, tag in ipairs({ "w:ins", "w:del", "w:moveFrom", "w:moveTo", "w:rPrChange" }) do
+    local el = mark and xml.child(mark, tag)
+    if el then
+      xml.remove(el)
+    end
+  end
+  return xml.elem("w:p", {}, { ppr })
 end
 
 function M.first_para(ctx) -- at the end of the body, before its section properties
@@ -646,7 +666,10 @@ local function new_list(ctx, kind)
   end
   local first_num = xml.child(root, "w:num") -- (all abstractNum come before the num)
   xml.append(root, abstract, first_num and xml.index(first_num) or nil)
-  xml.append(root, xml.elem("w:num", { { "w:numId", num_id } }, { xml.elem("w:abstractNumId", { { "w:val", abstract_id } }) }))
+  local nums = xml.collect(root, { ["w:num"] = true }) -- (after the last w:num, as the schema wants)
+  local last = nums[#nums] or xml.collect(root, { ["w:abstractNum"] = true })[1] and abstract
+  xml.append(root, xml.elem("w:num", { { "w:numId", num_id } }, { xml.elem("w:abstractNumId", { { "w:val", abstract_id } }) }),
+    last and last.parent == root and xml.index(last) + 1 or nil)
   ctx.dirty[NUMBERING] = true
   return num_id
 end
@@ -838,8 +861,11 @@ function M.fix_grid(_, tbl)
   while #cols > math.max(n, 1) do
     xml.remove(table.remove(cols))
   end
+end
+
+function M.after_table(tbl) -- (Word wants a paragraph after a table: once all paragraphs are in place)
   local after = tbl.parent and tbl.parent.children[xml.index(tbl) + 1]
-  if tbl.parent and (not after or after.tag == "w:sectPr") then -- (Word wants a paragraph after a table)
+  if tbl.parent and (not after or after.tag == "w:sectPr") then
     xml.append(tbl.parent, xml.elem("w:p"), xml.index(tbl) + 1)
   end
 end
@@ -1011,7 +1037,7 @@ function M.fill(ctx, p, block, pieces)
       local after = xml.child(ppr, "w:sectPr") or xml.child(ppr, "w:pPrChange")
       mark_rpr = xml.append(ppr, xml.elem("w:rPr"), after and xml.index(after) or nil)
     end
-    xml.append(mark_rpr, xml.elem(tag, vim.deepcopy(ch.mark.attrs)))
+    xml.append(mark_rpr, xml.elem(tag, vim.deepcopy(ch.mark.attrs)), 1) -- (first, as the schema wants)
   end
   if block.align or (ppr and xml.child(ppr, "w:jc")) then
     ppr = ppr or xml.elem("w:pPr")
@@ -1042,15 +1068,30 @@ function M.fill(ctx, p, block, pieces)
       cur = { el = p }
       local del = piece.deletion
       if del and (not del.node or piece.deleted ~= del.text) then -- (new, or its text changed: split, edited)
-        local text = xml.elem("w:delText", { { "xml:space", "preserve" } }, { { text = (piece.deleted:gsub("\n", " ")) } })
         local attrs = revision(ctx, "w:del", del).attrs -- (a fresh id: a deletion may now be in several paragraphs)
-        del.node, del.text = xml.elem("w:del", attrs, { xml.elem("w:r", {}, { text }) }), piece.deleted
+        del.node, del.text = xml.elem("w:del", attrs), piece.deleted
+        for _, seg in ipairs(piece.segs or { { text = piece.deleted } }) do -- (formatted as it was)
+          local run = text_run(vim.tbl_extend("force", seg, { text = (seg.text:gsub("\n", " ")) }))
+          for _, el in ipairs(run.children) do
+            el.tag = el.tag == "w:t" and "w:delText" or el.tag
+          end
+          xml.append(del.node, run)
+        end
       end
       if piece.object and not piece.object.tag then -- (a field: its runs)
         for _, el in ipairs(piece.object.children) do
           xml.append(p, xml.copy(el))
         end
       elseif piece.object or del then
+        if piece.note and not has(part(ctx, FOOTNOTES) or {}, "w:footnote", "w:id", piece.note.id) then
+          -- (a footnote deleted by a save and brought back by undo: written again)
+          local notes = xml.find(part(ctx, FOOTNOTES, FOOTNOTES_XML), "w:footnotes")
+          local model = vim.iter(xml.collect(notes, { ["w:footnote"] = true })):find(function(el)
+            return (tonumber(xml.attr(el, "w:id")) or 0) > 0
+          end)
+          footnote_body(xml.append(notes, xml.elem("w:footnote", { { "w:id", piece.note.id } })), piece.note.text, model)
+          ctx.footnote_ids[piece.note.id], ctx.dirty[FOOTNOTES] = true, true
+        end
         xml.append(p, piece.object or del.node)
       elseif piece.line_break or piece.page_break then
         xml.append(p, xml.elem("w:r", {}, { xml.elem("w:br", piece.page_break and { { "w:type", "page" } } or nil) }))
@@ -1091,7 +1132,7 @@ end
 
 local function comment_el(x)
   local el = xml.elem("w:comment", {
-    { "w:id", x.id }, { "w:author", x.author }, { "w:date", x.date }, { "w:initials", x.author:sub(1, 2) },
+    { "w:id", x.id }, { "w:author", x.author }, { "w:date", x.date }, { "w:initials", vim.fn.strcharpart(x.author, 0, 2) },
   })
   local lines = vim.split(x.text, "\n")
   for k, line in ipairs(lines) do

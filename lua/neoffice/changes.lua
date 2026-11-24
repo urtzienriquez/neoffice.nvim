@@ -64,7 +64,10 @@ local function range(m) -- start and end of a mark
   return { m[2], m[3] }, { m[4].end_row, m[4].end_col }
 end
 
-local function text(buf, s, e)
+local function text(buf, s, e) -- ("" for a mark left past the end of the buffer)
+  if s[1] >= api.nvim_buf_line_count(buf) then
+    return ""
+  end
   return table.concat(api.nvim_buf_get_text(buf, s[1], s[2], e[1], e[2], {}), "\n")
 end
 
@@ -95,15 +98,16 @@ end
 -- Deleted text: what is shown is what is deleted. If text was typed right before it (it would
 -- start the deletion), the deletion starts after that text; if all of it was deleted, so is the change.
 -- Your own insertions deleted entirely go, and your own deletions next to each other become one.
-local function tidy(buf)
+local function tidy(buf, rows) -- (rows: only the changes on these rows, { first, last }, 0-based)
   local doc = neo().docs[buf]
   local own_deletion
-  for _, m in ipairs(marks(buf, 0, -1)) do
+  local list = rows and marks(buf, { rows[1], 0 }, { rows[2], -1 }, { overlap = true }) or marks(buf, 0, -1)
+  for _, m in ipairs(list) do
     local ch = doc.change[m[1]]
     local s, e = range(m)
     local shown = text(buf, s, e)
     local typed = ch.shown and #shown > #ch.shown and shown:sub(-#ch.shown) == ch.shown
-    if (ch.type == "delete" or mine(ch) and ch.type == "insert") and shown == "" then
+    if (ch.type == "delete" and not ch.no_text or ch.type == "insert" and ch.author == neo().config.author) and shown == "" then
       api.nvim_buf_del_extmark(buf, neo().ns.change, m[1])
       doc.change[m[1]] = nil
     elseif ch.type == "delete" and typed then -- (where its text starts: as many lines up from its end)
@@ -131,12 +135,29 @@ end
 
 -- Remember the text and the changes, to tell what the next edit did (with tracking off too: what
 -- you type is then kept out of the changes around it).
-function M.snapshot(buf)
+-- Also, with tracking on, the marks near the cursor (formatting runs, objects, comments): to put
+-- them back with text you delete (see deleted()).
+local NEAR = 150
+local function near_marks(buf, shadow)
+  local win = vim.fn.bufwinid(buf)
+  local row = win ~= -1 and api.nvim_win_get_cursor(win)[1] - 1 or 0
+  shadow.cursor = win ~= -1 and { row, api.nvim_win_get_cursor(win)[2] } or nil
+  shadow.near, shadow.marks = { math.max(row - NEAR, 0), row + NEAR }, {}
+  for _, kind in ipairs({ "run", "object", "comment" }) do
+    shadow.marks[kind] = api.nvim_buf_get_extmarks(buf, neo().ns[kind], { shadow.near[1], 0 }, { shadow.near[2], -1 }, { details = true, overlap = true })
+  end
+end
+
+function M.snapshot(buf, state) -- (state: the changes, as capture() gives them, if at hand)
   local doc = neo().docs[buf]
   doc.window = nil
   local shadow = { lines = api.nvim_buf_get_lines(buf, 0, -1, false), inserted = {}, deletions = {} }
-  for _, m in ipairs(marks(buf, 0, -1)) do
-    local ch, s, e = doc.change[m[1]], range(m)
+  shadow.state, shadow.tick = state or capture(buf), api.nvim_buf_get_changedtick(buf)
+  if doc.tracking then
+    near_marks(buf, shadow)
+  end
+  for _, entry in ipairs(shadow.state) do
+    local ch, s, e = entry[5], { entry[1], entry[2] }, { entry[3], entry[4] }
     if ch.type == "insert" and ch.author == neo().config.author then
       table.insert(shadow.inserted, { s, e })
     elseif ch.type == "delete" then
@@ -153,12 +174,8 @@ local function characters(lines, first, last)
   for row = first, last do
     local _, chars = markup.parse(lines[row])
     for _, c in ipairs(chars) do
-      local token = c.len and lines[row]:sub(c.col + 1, c.col + c.len)
-      out[#out + 1] = { row - 1, c.col, token or c.ch, token and true }
-    end
-    local final = out[#out]
-    if final and #(lines[row]:match("\\*$")) % 2 == 1 and final[2] == #lines[row] - 1 then
-      final[4] = true -- (a "\" ending a line is a line break: a token too)
+      local token = c.len and lines[row]:sub(c.col + 1, c.col + c.len) or c.ch == "\n" and "\\" -- (a line break: its "\")
+      out[#out + 1] = { row - 1, c.col, token or c.ch, token and true, c.esc } -- (esc: written "\x")
     end
     if row < last then
       out[#out + 1] = { row - 1, #lines[row], "\n" }
@@ -189,78 +206,150 @@ local function window(lines, lo, suffix)
     local offset = starts[c[1] + 1] + c[2]
     return offset < hi and offset + #c[3] > lo
   end, characters(lines, first[1] + 1, math.min(last[1] + 2, #lines))) -- (+1: its line break)
-  return chars, position(hi)
+  return chars, position(hi), first
 end
 
 local function after(c) -- the position right after character c
   return c[3] == "\n" and { c[1] + 1, 0 } or { c[1], c[2] + #c[3] }
 end
 
-local function within(r, c) -- character c inside range r = { start, end }
-  return before(r[1], c) and not before(r[2], c)
+-- The text of `lines` (0-based rows) between positions a and b, and the position after `text`
+-- written at `pos`.
+local function slice(lines, a, b)
+  local out = {}
+  for row = a[1], b[1] do
+    local line = lines[row + 1] or ""
+    out[#out + 1] = line:sub(row == a[1] and a[2] + 1 or 1, row == b[1] and b[2] or #line)
+  end
+  return table.concat(out, "\n")
+end
+local function advance(pos, text)
+  local rows = vim.split(text, "\n", { plain = true })
+  return { pos[1] + #rows - 1, (#rows == 1 and pos[2] or 0) + #rows[#rows] }
+end
+local function start_of(c) -- (a character's first byte: its "\" when escaped)
+  return { c[1], c[2] - (c[5] and 1 or 0) }
+end
+local function end_of(c)
+  return c[3] == "\n" and not c[4] and { c[1] + 1, 0 } or { c[1], c[2] + #c[3] }
 end
 
--- You deleted old characters [i, j], which were at `at`: text you had inserted yourself just goes;
--- the rest is put back where it was (line breaks too), struck through: deleted by you, or still
--- deleted by whoever deleted it. Deleting only line breaks (blank lines) isn't recorded.
--- Returns the position right after what was put back.
-local function deleted(buf, old, chars, i, j, at)
-  local doc = neo().docs[buf]
-  local parts = {} -- { who = change (or "new"), text = ... }
-  for k = i, j do
-    local c, who = chars[k], "new"
-    if c[4] then -- an image, equation, footnote, field or break: put back (they aren't tracked as deleted)
-      who = "keep"
-      vim.schedule(function()
-        vim.notify("[neoffice] With tracking on, images, equations, footnotes, fields and breaks can't be"
-          .. " deleted (they are put back): turn tracking off to delete them", vim.log.levels.WARN)
-      end)
-    elseif vim.iter(old.inserted):any(function(r) return within(r, c) end) then
-      who = nil
-    else
-      local d = vim.iter(old.deletions):find(function(r) return within(r, c) end)
-      who = d and d.ch or "new"
+-- You deleted old characters chars[i..j], the text old.lines had in `span` (positions before the
+-- edit), now gone from `at`. It is put back, struck through, exactly as it was: its marks too
+-- (formatting, comments, images, others' changes), less the text you had inserted yourself, which
+-- just goes. Images, equations... in it aren't struck (they aren't tracked as deleted), nor is text
+-- deleted already (it stays deleted by whoever deleted it). Deleting only line breaks (blank lines)
+-- isn't recorded. Returns the position right after what was put back.
+local function deleted(buf, old, chars, i, j, at, span)
+  local doc, me = neo().docs[buf], neo().config.author
+  local function inside(r, p) -- (p in [r[1], r[2]))
+    return before(r[1], p) and not (before(r[2], p))
+  end
+  -- the parts of the span that come back: all but your own insertions
+  local parts, from, cuts = {}, span[1], {}
+  for _, r in ipairs(old.inserted) do
+    if before(span[1], r[2]) and before(r[1], span[2]) and not same(r[2], span[1]) and not same(r[1], span[2]) then
+      cuts[#cuts + 1] = r
     end
-    if who then -- (as it was written: escaped again, except images and equations)
-      local last = parts[#parts]
-      local piece = c[4] and c[3] or c[3] == "\n" and "\n" or markup.escape(c[3])
-      if last and last.who == who then
-        last.text = last.text .. piece
-      else
-        parts[#parts + 1] = { who = who, text = piece }
+  end
+  table.sort(cuts, function(x, y) return before(x[1], y[1]) and not same(x[1], y[1]) end)
+  for _, r in ipairs(cuts) do
+    if before(from, r[1]) and not same(from, r[1]) then
+      parts[#parts + 1] = { from, r[1] }
+    end
+    from = before(from, r[2]) and r[2] or from
+  end
+  if before(from, span[2]) and not same(from, span[2]) then
+    parts[#parts + 1] = { from, span[2] }
+  end
+  local texts = vim.tbl_map(function(part) return slice(old.lines, part[1], part[2]) end, parts)
+  local all = table.concat(texts)
+  if not all:find("[^\n]") then
+    return at
+  end
+  local pos = at
+  for k, part in ipairs(parts) do
+    part.new = pos
+    pos = advance(pos, texts[k])
+  end
+  local function map(q) -- (where a position of the span is now)
+    for _, part in ipairs(parts) do
+      if before(q, part[2]) then
+        return before(part[1], q) and advance(part.new, slice(old.lines, part[1], q)) or part.new
+      end
+    end
+    return pos
+  end
+  pcall(vim.cmd, "undojoin") -- (one undo step with your edit)
+  api.nvim_buf_set_text(buf, at[1], at[2], at[1], at[2], vim.split(all, "\n"))
+
+  -- the marks that started or ended in the span go back where they were
+  local KEEP = { "hl_group", "priority", "right_gravity", "end_right_gravity", "sign_text", "sign_hl_group", "virt_text", "virt_text_pos", "invalidate" }
+  local function put_back(ns, id, s0, e0)
+    local in_s, in_e = before(span[1], s0) and before(s0, span[2]), before(span[1], e0) and before(e0, span[2])
+    local live = (in_s or in_e) and api.nvim_buf_get_extmark_by_id(buf, ns, id, { details = true })
+    if not (live and live[1]) then
+      return
+    end
+    local s, e = in_s and map(s0) or { live[1], live[2] }, in_e and map(e0) or { live[3].end_row, live[3].end_col }
+    local opts = { id = id, end_row = e[1], end_col = e[2] }
+    for _, key in ipairs(KEEP) do
+      opts[key] = live[3][key]
+    end
+    api.nvim_buf_set_extmark(buf, ns, s[1], s[2], opts)
+  end
+  local id_of = {}
+  for id, ch in pairs(doc.change) do
+    id_of[ch] = id
+  end
+  for _, entry in ipairs(old.state) do -- (changes: all of them are remembered)
+    if id_of[entry[5]] then
+      put_back(neo().ns.change, id_of[entry[5]], { entry[1], entry[2] }, { entry[3], entry[4] })
+    end
+  end
+  if old.near and old.near[1] <= span[1][1] and span[2][1] <= old.near[2] then -- (others: near the cursor)
+    for kind, list in pairs(old.marks) do
+      for _, m in ipairs(list) do
+        put_back(neo().ns[kind], m[1], { m[2], m[3] }, { m[4].end_row, m[4].end_col })
       end
     end
   end
-  if not vim.iter(parts):any(function(part) return part.text:find("[^\n]") end) then
-    return at
-  end
-  for _, m in ipairs(marks(buf, at, at)) do -- (deletions emptied by this edit: they come back below)
-    local ch = doc.change[m[1]]
-    if ch.type == "delete" and same({ m[2], m[3] }, { m[4].end_row, m[4].end_col }) then
-      api.nvim_buf_del_extmark(buf, neo().ns.change, m[1])
-      doc.change[m[1]] = nil
+
+  -- what you deleted now (not images..., not what was deleted or inserted by you already) is struck
+  local runs, kept = {}, false
+  for k = i, j do
+    local c = chars[k]
+    local p = start_of(c)
+    local fresh = not c[4] and not vim.iter(old.deletions):any(function(r) return inside(r, p) end)
+      and not vim.iter(old.inserted):any(function(r) return inside(r, p) end)
+    kept = kept or (c[4] and c[3] ~= "\\")
+    if fresh then
+      local last = runs[#runs]
+      if last and last.k == k - 1 then
+        last[2], last.k = end_of(c), k
+      else
+        runs[#runs + 1] = { p, end_of(c), k = k }
+      end
     end
   end
-  local all = {}
-  for _, part in ipairs(parts) do
-    all[#all + 1] = part.text
+  for _, run in ipairs(runs) do
+    local s, e = map(run[1]), map(run[2])
+    local ch = { type = "delete", author = me, date = now() }
+    neo().place(buf, "change", ch, s[1], s[2], e[1], e[2])
+    ch.shown = text(buf, s, e)
   end
-  pcall(vim.cmd, "undojoin") -- (one undo step with your edit)
-  api.nvim_buf_set_text(buf, at[1], at[2], at[1], at[2], vim.split(table.concat(all), "\n"))
-  local pos = at
-  for _, part in ipairs(parts) do
-    local lines = vim.split(part.text, "\n")
-    local stop = { pos[1] + #lines - 1, (#lines == 1 and pos[2] or 0) + #lines[#lines] }
-    if part.who ~= "keep" then
-      local ch = part.who == "new" and { type = "delete", author = neo().config.author, date = now() } or part.who
-      neo().place(buf, "change", ch, pos[1], pos[2], stop[1], stop[2])
-      ch.shown = part.text
-    end
-    pos = stop
+  if kept then
+    vim.schedule(function()
+      vim.notify("[neoffice] With tracking on, images, equations, footnotes, fields and breaks can't be"
+        .. " deleted (they are put back): turn tracking off to delete them", vim.log.levels.WARN)
+    end)
   end
+  -- the cursor: past what was put back (x goes on), or before it if you deleted leftwards (X)
   if api.nvim_get_current_buf() == buf and not api.nvim_get_mode().mode:match("^i") then
-    local line = api.nvim_buf_get_lines(buf, pos[1], pos[1] + 1, true)[1]
-    api.nvim_win_set_cursor(0, { pos[1] + 1, math.min(pos[2], math.max(#line - 1, 0)) }) -- (past it: x goes on)
+    local back = old.cursor and before(span[2], old.cursor)
+    local to = back and at or pos
+    local line = api.nvim_buf_get_lines(buf, to[1], to[1] + 1, true)[1]
+    api.nvim_win_set_cursor(0, { to[1] + 1, math.min(to[2], math.max(#line - 1, 0)) })
   end
   return pos
 end
@@ -308,10 +397,10 @@ function M.record(buf)
     return
   end
   local new = api.nvim_buf_get_lines(buf, 0, -1, false)
-  local edits = {}
+  local edits, area = {}, nil -- (area: the rows edited, when Neovim told where)
   -- Compare the characters before and after the edit (A, B), and record what changed; `stop` is
   -- where the end of B is, for what was deleted after its last character.
-  local function compare(A, B, stop, whole)
+  local function compare(A, B, stop, whole, window_span)
     -- an image, equation, footnote... edited inside (alt text, width, LaTeX, note) is the same
     -- object, edited: not a deletion and an insertion (they aren't tracked: see deleted())
     local function same_object(a, b)
@@ -321,10 +410,12 @@ function M.record(buf)
     if same_object(A[1], B[1]) and A[1][1] == B[1][1] and A[1][2] == B[1][2] then
       table.remove(A, 1)
       table.remove(B, 1)
+      window_span = nil
     end
     if same_object(A[#A], B[#B]) then
       table.remove(A)
       table.remove(B)
+      window_span = nil
     end
     local function join(chars, from, to)
       return table.concat(vim.tbl_map(function(c) return c[3] end, vim.list_slice(chars, from, to)))
@@ -350,7 +441,10 @@ function M.record(buf)
         hunks[#hunks + 1] = d
       end
     end
-    for k, d in ipairs(whole and {} or hunks) do -- (to the ends of its words: letters both share)
+    for k, d in ipairs(whole and {} or hunks) do -- (a replacement, to the ends of its words: letters both share)
+      if d[2] == 0 or d[4] == 0 then
+        goto next_hunk
+      end
       local floor = k > 1 and hunks[k - 1][1] + hunks[k - 1][2] or 1
       while d[1] > floor and letter(A[d[1] - 1]) and letter(B[d[3] - 1]) and A[d[1] - 1][3] == B[d[3] - 1][3]
         and (letter(A[d[1]]) or letter(B[d[3]])) do
@@ -361,22 +455,27 @@ function M.record(buf)
         and (letter(A[d[1] + d[2] - 1]) or letter(B[d[3] + d[4] - 1])) do
         d[2], d[4] = d[2] + 1, d[4] + 1
       end
+      ::next_hunk::
     end
     for _, d in ipairs(hunks) do
       local i, ci, j, cj = unpack(d)
       local at = B[j] and { B[j][1], B[j][2] } or stop
       -- (only line breaks inserted, a blank line or a split paragraph: not recorded, as for deleting them)
       local typed = cj > 0 and join(B, j, j + cj - 1):find("[^\n]")
-      table.insert(edits, { A = A, i = i, ci = ci, at = at, s = typed and at, e = typed and after(B[j + cj - 1]) })
+      -- what was there: all of the span Neovim told (its marks too), or from the first character
+      -- changed to the last
+      local span = ci > 0 and (whole and window_span or { start_of(A[i]), end_of(A[i + ci - 1]) })
+      table.insert(edits, { A = A, i = i, ci = ci, at = at, s = typed and at, e = typed and after(B[j + cj - 1]), span = span })
     end
   end
   -- exactly where Neovim says the text changed (see M.start): nothing else. (Not for lines added or
   -- removed at the very end: Neovim counts a line break after the last line, the characters don't.)
   if doc.window and doc.window[2] > 0 then
     local lo, suffix = unpack(doc.window)
-    local A = window(old.lines, lo, suffix)
-    local B, new_end = window(new, lo, suffix)
-    compare(A, B, new_end, doc.window[3])
+    local A, old_end, old_first = window(old.lines, lo, suffix)
+    local B, new_end, first = window(new, lo, suffix)
+    compare(A, B, new_end, doc.window[3], { old_first, old_end })
+    area = { first[1], new_end[1] }
   else -- (or else, where a comparison of the lines finds it)
     for _, h in ipairs(neo().diff(old.lines, new)) do
       -- the characters of the changed lines, plus one unchanged line around them
@@ -388,7 +487,10 @@ function M.record(buf)
   for k = #edits, 1, -1 do -- (back to front: putting deleted text back moves what follows)
     local edit = edits[k] -- (a replacement: the deleted text comes first, then the inserted)
     local put_back = doc.tracking and edit.ci > 0 -- (with tracking off, deleted text just goes)
-    local stop = put_back and deleted(buf, old, edit.A, edit.i, edit.i + edit.ci - 1, edit.at) or edit.at
+    local stop = put_back and deleted(buf, old, edit.A, edit.i, edit.i + edit.ci - 1, edit.at, edit.span) or edit.at
+    if area then
+      area[2] = area[2] + stop[1] - edit.at[1] -- (deleted lines put back)
+    end
     if edit.s then -- (moved by what was put back before it)
       local rows, cols = stop[1] - edit.at[1], stop[2] - edit.at[2]
       local function shift(p)
@@ -397,6 +499,7 @@ function M.record(buf)
       inserted(buf, shift(edit.s), shift(edit.e))
     end
   end
+  return area and { math.max(area[1] - 1, 0), area[2] + 1 }
 end
 
 -- After every edit: back at an earlier state (undo, redo)? Its changes as they were then.
@@ -410,12 +513,12 @@ function M.after_edit(buf)
   if doc.states[seq] and seq ~= doc.seq then
     restore(buf, doc.states[seq])
   else
-    M.record(buf)
-    tidy(buf)
+    tidy(buf, M.record(buf))
     seq = vim.fn.undotree(buf).seq_cur
   end
-  doc.seq, doc.states[seq] = seq, capture(buf)
-  M.snapshot(buf)
+  local state = capture(buf)
+  doc.seq, doc.states[seq] = seq, state
+  M.snapshot(buf, state)
   M.show_info(buf)
 end
 
@@ -484,6 +587,16 @@ function M.show_info(buf)
   if not doc or api.nvim_get_current_buf() ~= buf then
     return
   end
+  -- (the cursor moved, with no edit since the snapshot: where an edit starts from; and the marks
+  -- near it, if it went far)
+  local shadow = doc.shadow
+  if shadow and shadow.near and shadow.tick == api.nvim_buf_get_changedtick(buf) then
+    local cursor = api.nvim_win_get_cursor(0)
+    if cursor[1] - 1 < shadow.near[1] + NEAR / 2 and shadow.near[1] > 0 or cursor[1] - 1 > shadow.near[2] - NEAR / 2 then
+      near_marks(buf, shadow)
+    end
+    shadow.cursor = { cursor[1] - 1, cursor[2] }
+  end
   local row, col = unpack(api.nvim_win_get_cursor(0))
   local mode = api.nvim_get_mode().mode
   if (mode:match("^i") or mode:match("^R")) and col > 0 then -- (typing: the character just typed)
@@ -520,6 +633,10 @@ end
 local function apply(buf, m, action, a, b)
   local doc, ch = neo().docs[buf], neo().docs[buf].change[m[1]]
   local s, e = range(m)
+  if ch.no_text and action == "reject" then -- (what it deleted isn't text: an image, a tab...)
+    vim.notify("[neoffice] This deletion (of an image, a tab...) can't be rejected here: reject it in Word or LibreOffice", vim.log.levels.WARN)
+    return false
+  end
   if ch.type == "format" then
     a, b = s, e
   end
@@ -556,8 +673,9 @@ local function apply(buf, m, action, a, b)
     return not same(a, b)
   elseif ch.type == "delete" then -- a rejected deletion: its text stays, with its paragraph breaks
     local shown = text(buf, a, b)
-    if shown:find("¶") then
-      api.nvim_buf_set_text(buf, a[1], a[2], b[1], b[2], vim.split(shown:gsub("¶", "\n"), "\n"))
+    local restored = shown:gsub("(\\?)¶", function(escaped) return escaped == "" and "\n" or nil end)
+    if restored ~= shown then -- (a ¶ that isn't escaped: a paragraph break)
+      api.nvim_buf_set_text(buf, a[1], a[2], b[1], b[2], vim.split(restored, "\n"))
       return true
     end
   end
@@ -573,29 +691,43 @@ function M.resolve(action, all, use_marks, author)
     return vim.notify("[neoffice] Not a document buffer", vim.log.levels.WARN)
   end
   local selection = not all and neo().selection(use_marks)
-  local list = {}
-  if all or selection then
-    for _, m in ipairs(marks(buf, 0, -1)) do
-      local s, e = range(m)
-      if all then
-        if not author or neo().docs[buf].change[m[1]].author == author then
-          list[#list + 1] = { m, s, e }
-        end
-      elseif before(selection[1], e) and before(s, selection[2]) and (not same(selection[2], s) or same(s, e)) then
-        list[#list + 1] = { m, before(selection[1], s) and s or selection[1], before(e, selection[2]) and e or selection[2] }
-      end
+  -- what to review: all, the selection (a block: each line's part of it), or what is at the cursor
+  local areas = { selection or false } -- (false: no selection, so all, or what is at the cursor)
+  if selection and selection.block then
+    areas = {}
+    for row = selection[1][1], selection[2][1] do
+      areas[#areas + 1] = { { row, selection.block[1] }, { row, selection.block[2] } }
     end
-  else
-    local m = at_cursor(buf)
-    list = m and { { m, range(m) } } or {}
   end
-  if #list == 0 then
+  local function changes_in(area)
+    local list = {}
+    if all or area then
+      for _, m in ipairs(marks(buf, 0, -1)) do
+        local s, e = range(m)
+        if all then
+          if not author or neo().docs[buf].change[m[1]].author == author then
+            list[#list + 1] = { m, s, e }
+          end
+        elseif before(area[1], e) and before(s, area[2]) and (not same(area[2], s) or same(s, e)) then
+          list[#list + 1] = { m, before(area[1], s) and s or area[1], before(e, area[2]) and e or area[2] }
+        end
+      end
+    else
+      local m = at_cursor(buf)
+      list = m and { { m, range(m) } } or {}
+    end
+    return list
+  end
+  if not vim.iter(areas):any(function(area) return #changes_in(area) > 0 end) then
     return vim.notify("[neoffice] No tracked change here")
   end
   vim.o.undolevels = vim.o.undolevels -- (each review is an undo step of its own)
   local changed = false
-  for k = #list, 1, -1 do -- back to front, so edits don't move the changes still to do
-    changed = apply(buf, list[k][1], action, list[k][2], list[k][3]) or changed
+  for a = #areas, 1, -1 do -- (back to front, so edits don't move what is still to do)
+    local list = changes_in(areas[a])
+    for k = #list, 1, -1 do
+      changed = apply(buf, list[k][1], action, list[k][2], list[k][3]) or changed
+    end
   end
   if not changed then -- (still a step of its own, so that u undoes it)
     api.nvim_buf_set_text(buf, 0, 0, 0, 0, { " " })

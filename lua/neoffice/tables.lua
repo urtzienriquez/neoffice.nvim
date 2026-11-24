@@ -50,7 +50,7 @@ function M.start(fmt, ctx, plans, cell_of)
     end
   end
 
-  local self, state, fresh = {}, {}, {} -- fresh: the empty paragraph of a cell made here
+  local self, state, fresh, changed_tables = {}, {}, {}, {} -- fresh: the empty paragraph of a cell made here
   local function changed()
     ctx.dirty[fmt.MAIN], state.changed = true, true
   end
@@ -63,7 +63,7 @@ function M.start(fmt, ctx, plans, cell_of)
       for _, merge in ipairs(xml.collect(cell, { ["w:vMerge"] = true })) do -- (not merged with the row above)
         xml.remove(merge)
       end
-      fresh[cell] = xml.append(cell, fmt.new_para(first))
+      fresh[cell] = xml.append(cell, fmt.new_para(first, ctx))
     end
     return copy
   end
@@ -76,7 +76,7 @@ function M.start(fmt, ctx, plans, cell_of)
         end
       end
     end
-    state.tr, state.tc, state.cells = nil, nil, {}
+    state.tr, state.tc, state.col, state.cells = nil, nil, nil, {}
   end
   local function end_table()
     end_row()
@@ -89,6 +89,7 @@ function M.start(fmt, ctx, plans, cell_of)
       end
       if state.changed then -- (the columns the table declares)
         fmt.fix_grid(ctx, state.tbl)
+        changed_tables[#changed_tables + 1] = state.tbl
       end
     end
     state = {}
@@ -157,7 +158,7 @@ function M.start(fmt, ctx, plans, cell_of)
       fresh[state.tc] = nil
       if not node then
         local first = xml.collect(state.tc, PARAGRAPHS)[1]
-        node = insert_after(fmt.new_para(state.prev or first), state.prev, state.tc, not state.prev and first or nil)
+        node = insert_after(fmt.new_para(state.prev or first, ctx), state.prev, state.tc, not state.prev and first or nil)
       end
     elseif fresh[state.tc] then -- (not needed after all)
       xml.remove(fresh[state.tc])
@@ -167,7 +168,14 @@ function M.start(fmt, ctx, plans, cell_of)
     return node
   end
 
-  self.finish = end_table
+  function self:finish()
+    end_table()
+    for _, tbl in ipairs(changed_tables) do
+      if fmt.after_table then
+        fmt.after_table(tbl)
+      end
+    end
+  end
   return self
 end
 
