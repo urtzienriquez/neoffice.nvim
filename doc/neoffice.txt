@@ -170,7 +170,11 @@ position), and reply, resolve and delete act on the comment under the cursor.
 
                                                      *neoffice-comments-panel*
 :Neoffice comments toggles the comments panel, with every comment and its
-replies. In it (see |neoffice-options| to change these keys):
+replies. It opens on the comment closest to the cursor, and follows the cursor
+as you move in the document; the text of the comment it is on is highlighted
+in the document (NeofficeCommentCurrent), and moving in the panel scrolls the
+document to it when it is out of view. In it (see |neoffice-options| to
+change these keys):
 
   r       reply to the comment under the cursor
   <CR>    resolve it, or reopen it
@@ -327,6 +331,7 @@ Highlight groups (all `default`, so your colour scheme can set them):
   NeofficeComment           commented text
   NeofficeCommentSign       the comment sign
   NeofficeCommentVirt       a comment's text at the end of its line
+  NeofficeCommentCurrent    the text of the comment the panel is on
   NeofficeTitle             the title
   NeofficeNumber            heading numbers
   NeofficeAlign             the alignment marks

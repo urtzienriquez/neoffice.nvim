@@ -190,6 +190,54 @@ describe("docx comment parts", function()
 end)
 
 describe("the comments panel", function()
+  it("opens on the comment closest to the cursor, and follows the cursor", function()
+    H.open(H.copy("rich.docx"))
+    H.cursor(12, "paragraph")
+    H.input = "Second"
+    comments.add()
+    H.cursor(12, "Last")
+    vim.cmd("Neoffice comments")
+    assert.truthy(api.nvim_get_current_line():find(neo.config.author, 1, true))
+    vim.cmd("wincmd p")
+    H.cursor(3, "and more") -- (just after Alice's comment)
+    api.nvim_exec_autocmds("CursorMoved", { buffer = 0 })
+    vim.cmd("wincmd p")
+    assert.truthy(api.nvim_get_current_line():find("Alice", 1, true))
+    vim.cmd("Neoffice comments") -- (closed again)
+  end)
+
+  it("highlights the text of the comment it is on", function()
+    H.open(H.copy("rich.docx"))
+    local doc = api.nvim_get_current_buf()
+    local ns = api.nvim_get_namespaces().neoffice_comment_current
+    local function lit()
+      local m = api.nvim_buf_get_extmarks(doc, ns, 0, -1, { details = true })[1]
+      return m and api.nvim_buf_get_text(doc, m[2], m[3], m[4].end_row, m[4].end_col, {})[1]
+    end
+    H.cursor(3, "Commented")
+    vim.cmd("Neoffice comments")
+    assert.equals("Commented text", lit())
+    vim.cmd("Neoffice comments")
+    assert.is_nil(lit())
+  end)
+
+  it("scrolls the document to the comment it goes to", function()
+    H.open(H.copy("rich.docx"))
+    local doc_win = api.nvim_get_current_win()
+    local filler = {}
+    for k = 1, 200 do
+      filler[#filler + 1] = k % 2 == 1 and "Filler paragraph " .. k or ""
+    end
+    api.nvim_buf_set_lines(0, 0, 0, false, filler) -- (the comment far down: out of view)
+    api.nvim_win_set_cursor(doc_win, { 1, 0 })
+    vim.cmd("Neoffice comments")
+    api.nvim_win_set_cursor(0, { 1, 0 })
+    api.nvim_exec_autocmds("CursorMoved", { buffer = 0 })
+    local row = api.nvim_win_get_cursor(doc_win)[1]
+    assert.truthy(api.nvim_buf_get_lines(api.nvim_win_get_buf(doc_win), row - 1, row, false)[1]:find("^Commented"))
+    vim.cmd("Neoffice comments")
+  end)
+
   it("moves between comments with ]] and [[", function()
     H.open(H.copy("rich.docx"))
     H.cursor(12, "paragraph")

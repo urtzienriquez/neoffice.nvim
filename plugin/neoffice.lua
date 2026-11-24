@@ -50,6 +50,7 @@ local function highlights()
     NeofficeCommentSign = { link = "DiagnosticWarn" },
     NeofficeCommentVirt = { link = "Comment" },
     NeofficeCommentAuthor = { link = "Title" },
+    NeofficeCommentCurrent = { link = "Search" }, -- (the text of the comment the panel is on)
   }) do
     hl.default = true
     api.nvim_set_hl(0, name, hl)

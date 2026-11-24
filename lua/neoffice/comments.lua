@@ -173,15 +173,91 @@ local function to_comment(dir)
   end
 end
 
+local function shown() -- (the panel is open: its window shows it)
+  return panel.win and api.nvim_win_is_valid(panel.win) and api.nvim_win_get_buf(panel.win) == panel.buf
+end
+
+-- The text of the comment the panel is on, highlighted in the document (NeofficeCommentCurrent).
+local NS_CURRENT = api.nvim_create_namespace("neoffice_comment_current")
+local function show_current()
+  if panel.doc and api.nvim_buf_is_valid(panel.doc) then
+    api.nvim_buf_clear_namespace(panel.doc, NS_CURRENT, 0, -1)
+  end
+  local entry = shown() and panel.rows and panel.rows[api.nvim_win_get_cursor(panel.win)[1]]
+  local pos = entry and entry[1] and api.nvim_buf_get_extmark_by_id(panel.doc, neo().ns.comment, entry[1].id, { details = true })
+  if not (pos and pos[1]) then
+    return
+  end
+  local row, col, end_row, end_col = pos[1], pos[2], pos[3].end_row, pos[3].end_col
+  if row == end_row and col == end_col then -- (a comment on a point: the character there)
+    local line = api.nvim_buf_get_lines(panel.doc, row, row + 1, false)[1] or ""
+    col = math.max(math.min(col, #line - 1), 0)
+    end_col = math.min(col + #(line:match("^.[\128-\191]*", col + 1) or " "), #line)
+  end
+  pcall(api.nvim_buf_set_extmark, panel.doc, NS_CURRENT, row, col, {
+    end_row = end_row, end_col = end_col, hl_group = "NeofficeCommentCurrent", priority = 300,
+  })
+  return row, col
+end
+
+-- Moving in the panel: the document scrolls to the comment's text, if it isn't in view.
+local function reveal()
+  local row, col = show_current()
+  local win = row and vim.fn.bufwinid(panel.doc)
+  if win and win ~= -1 then
+    api.nvim_win_call(win, function()
+      if row + 1 < vim.fn.line("w0") or row + 1 > vim.fn.line("w$") then
+        api.nvim_win_set_cursor(win, { row + 1, col })
+        vim.cmd("normal! zz")
+      end
+    end)
+  end
+end
+
 local function close()
-  if panel.win and api.nvim_win_is_valid(panel.win) then
+  if shown() and #api.nvim_list_wins() > 1 then
     api.nvim_win_close(panel.win, true)
   end
+  if panel.doc and api.nvim_buf_is_valid(panel.doc) then
+    api.nvim_buf_clear_namespace(panel.doc, NS_CURRENT, 0, -1)
+  end
   panel.win = nil
+  pcall(api.nvim_del_augroup_by_name, "neoffice_panel")
+end
+
+-- The comment at a position of the document, or else the closest to it (in lines, then columns):
+-- its number, in document order (as in the panel).
+local function nearest(buf, row, col)
+  local best, best_distance
+  for k, m in ipairs(marks(buf)) do
+    local before = m.end_row < row or m.end_row == row and m.end_col < col -- (it ends before the position)
+    local after = m.row > row or m.row == row and m.col > col
+    local r, c = before and m.end_row or after and m.row or row, before and m.end_col or after and m.col or col
+    local distance = math.abs(r - row) * 100000 + math.abs(c - col)
+    if not best_distance or distance < best_distance then
+      best, best_distance = k, distance
+    end
+  end
+  return best
+end
+
+-- The panel shows the comment nearest to the cursor in the document.
+local function follow()
+  local win = vim.fn.bufwinid(panel.doc or -1)
+  if not (shown() and win ~= -1) then
+    return
+  end
+  local pos = api.nvim_win_get_cursor(win)
+  local k = nearest(panel.doc, pos[1] - 1, pos[2])
+  local row = k and panel.threads and panel.threads[k]
+  if row then
+    api.nvim_win_set_cursor(panel.win, { row, 0 })
+  end
+  show_current()
 end
 
 function M.toggle_panel()
-  if panel.win and api.nvim_win_is_valid(panel.win) then
+  if shown() then
     return close()
   end
   local buf = api.nvim_get_current_buf()
@@ -207,8 +283,17 @@ function M.toggle_panel()
   panel.win = api.nvim_get_current_win()
   api.nvim_win_set_buf(panel.win, panel.buf)
   vim.wo[panel.win].number, vim.wo[panel.win].relativenumber, vim.wo[panel.win].wrap = false, false, true
-  vim.wo[panel.win].signcolumn, vim.wo[panel.win].winfixwidth = "no", true
+  vim.wo[panel.win].signcolumn, vim.wo[panel.win].winfixwidth, vim.wo[panel.win].cursorline = "no", true, true
   render()
+  follow() -- (on the comment where you are; and as you move in the document, or in the panel)
+  local group = api.nvim_create_augroup("neoffice_panel", {})
+  api.nvim_create_autocmd("CursorMoved", { group = group, buffer = buf, callback = follow })
+  api.nvim_create_autocmd("CursorMoved", { group = group, buffer = panel.buf, callback = reveal })
+  api.nvim_create_autocmd("BufWinLeave", { group = group, buffer = panel.buf, callback = function()
+    if panel.doc and api.nvim_buf_is_valid(panel.doc) then
+      api.nvim_buf_clear_namespace(panel.doc, NS_CURRENT, 0, -1)
+    end
+  end })
 end
 
 -- ── Adding ──────────────────────────────────────────────────────────────────
