@@ -1,0 +1,348 @@
+*neoffice.txt*  Edit Word and LibreOffice documents as plain text
+
+Author:  Urtzi Enriquez-Urzelai
+License: GPL-3.0
+
+==============================================================================
+INTRODUCTION                                                        *neoffice*
+
+neoffice opens Word (.docx, .doc) and LibreOffice (.odt) documents as plain
+text with Markdown-style marks, and |:w| writes them back: >
+
+  nvim report.docx      " or :edit report.odt
+<
+A file that does not exist yet opens as a new, empty document, created when
+you write it. Everything you can't edit as text (fonts, styles, headers,
+settings, ...) is kept, and only what you change is written (see
+|neoffice-safety|). It defines one command, |:Neoffice|, and no keymaps (see
+|neoffice-keymaps|).
+
+Requires Nvim 0.10+ and the `zip` and `unzip` commands. Optional: pandoc
+(|neoffice-equations|), LibreOffice (`soffice`, for .doc files: converted to
+.docx when opened and back when written) and ImageMagick (to show JPEG and GIF
+images).
+
+==============================================================================
+THE TEXT                                                       *neoffice-text*
+
+As in Markdown, paragraphs are separated by a blank line, and lines with no
+blank line between them are one paragraph (so you can wrap long paragraphs
+with |gq|: they are joined with spaces when written). Each further blank line
+is an empty paragraph, which Word documents often use for spacing; typing in
+one makes it a paragraph of its own, even with no blank line around it. A
+line opened with |o| or |O| right next to a paragraph continues it: leave a
+blank line to start a new one.
+
+Formatting ~
+                                                              *neoffice-marks*
+  `**bold**`              bold
+  `*italic*`              italic
+  `<u>underline</u>`      underlined
+  `~~struck~~`            struck through
+  `==marked==`            highlighted (yellow)
+  `cm^{2}`                superscript (as in LaTeX)
+  `W_{food}`              subscript
+  `[text](https://...)`   a link
+
+Text typed after a word takes that word's formatting, as in a word processor.
+
+Paragraphs ~
+                                                             *neoffice-blocks*
+A paragraph's kind is written at the start of its line:
+
+  `# `, `## `, ...        heading 1, 2, ... (|:Neoffice| numbers: numbered)
+  `% `                    the title (the document's Title style)
+  `> `                    a quote (its Quote style)
+  `- `                    a bullet list item
+  `1. `                   a numbered list item
+
+List items are indented two spaces per level, and can follow each other with
+no blank line between them. The numbers shown are those the document shows:
+the number you type doesn't matter. Headings are found by their style,
+whatever its name in your language; a heading of a level the document has no
+style for gets a "heading N" style.
+
+                                                              *neoffice-align*
+Its alignment, if not left, comes after its kind:
+
+  `<|> `                  centered
+  `->> `                  right-aligned
+  `<=> `                  justified
+
+  `# <|> A centered heading`, `> <=> A justified quote`, `- ->> An item`
+
+Alignment shows only when it is set on the paragraph itself: a style that
+centers its paragraphs (some Title styles) shows no mark.
+
+Breaks ~
+                                                             *neoffice-breaks*
+A `\` at the end of a line breaks the line there, inside its paragraph (the
+paragraph goes on in the next line). `\newpage` is a page break. In .odt files
+a page break comes before a paragraph, so there `\newpage` moves to the start
+of its paragraph.
+
+Escapes ~
+                                                            *neoffice-escapes*
+A `\` makes the next character plain text: `\*`, `\[`, `\#`, `\$`, `\_{`,
+`\-`, `\>`, `\|`, ... Text that would read as a mark is written escaped, so
+what you see is always what the document has.
+
+Objects ~
+Elements that can't be edited as text show as `￼`: delete that character to
+delete them.
+
+==============================================================================
+TABLES                                                       *neoffice-tables*
+
+Tables are Markdown pipe tables: a line per row, `|` between cells, a line of
+dashes after the first row, and `<br>` between the paragraphs of a cell: >
+
+  | Species | Mass (g) |
+  |---|---|
+  | *Podarcis* | 5.1 <br> (adults) |
+<
+Edit the cells' text, add a row by adding a line, delete a row by deleting its
+line, and add or remove a column by adding or removing a cell in every row.
+New rows and cells are formatted like the ones next to them; those you don't
+touch keep their exact XML. To make a new table, type one, with a blank line
+before and after it. Cells merged across columns show as one cell (those rows
+have fewer cells), and a line break inside a cell shows as `￼`.
+
+==============================================================================
+FOOTNOTES AND FIELDS                                      *neoffice-footnotes*
+
+A footnote is `^[its text]`, where its number is in the text: edit its text,
+type a new one, or delete it (in .docx files it leaves footnotes.xml too). A
+new footnote looks like the document's other footnotes. One with several
+paragraphs shows them joined; editing it makes it one paragraph. Endnotes show
+as `￼`.
+
+                                                             *neoffice-fields*
+Fields (citations from Zotero or Mendeley, cross-references, dates, page
+numbers, ...) show their text between `⟦ ⟧`. Their text can't be edited, as
+Word or Zotero would overwrite it: an edited field is kept as it was, and you
+are told so when writing. Delete the whole `⟦...⟧` to delete it.
+
+==============================================================================
+IMAGES                                                       *neoffice-images*
+
+Images show as `![alt](path){width=12.5cm}`, where the path is the image's
+file inside the document (`word/media/image1.png`, `Pictures/...`).
+
+- To replace one, write the path of a file on disk instead (absolute, `~/...`,
+  or relative to the document's folder).
+- To add one, type `![alt](file.png)` anywhere (PNG, JPEG or GIF).
+- To remove one, delete its text. The alt text can be edited too.
+- To resize one, change its width (the height follows): in `cm`, `mm`, `in`,
+  or `%` of the text's width (the page's, without its margins: `{width=100%}`
+  fills it). Opened again, the width shows in cm.
+
+A new image gets the width you write, or else its own size, up to 6 inches; a
+replaced one keeps the width of the image it replaces. When written, a new
+image goes into the document and its path then shows its place inside it.
+
+With Nvim 0.12+ (|vim.ui.img|) and a terminal that shows images (Kitty,
+Ghostty, WezTerm, ...), images are also shown under their line. JPEG and GIF
+images need ImageMagick (`magick`) to be shown.
+
+==============================================================================
+EQUATIONS                                                 *neoffice-equations*
+
+In .docx files, equations show as LaTeX: `$...$` within text, `$$...$$` on a
+line of their own. Edit the LaTeX, type a new equation, or delete one;
+equations you don't edit keep their exact XML. A `$` must touch the equation
+(`$x$`, not `$ x $`), so `$5 and $10` stays text.
+
+This needs pandoc, which converts between LaTeX and Word's equations. Without
+it, equations show as `￼` and are kept as they are. An equation pandoc can't
+convert makes writing fail, without changing the file. In .odt files formulas
+show as `￼` and are kept as they are.
+
+==============================================================================
+COMMENTS                                                   *neoffice-comments*
+
+Comments are underlined, with 💬 in the sign column and their text at the end
+of the line. |:Neoffice| comment comments the selection (or the cursor
+position), and reply, resolve and delete act on the comment under the cursor.
+
+                                                     *neoffice-comments-panel*
+:Neoffice comments toggles the comments panel, with every comment and its
+replies. In it (see |neoffice-options| to change these keys):
+
+  r       reply to the comment under the cursor
+  <CR>    resolve it, or reopen it
+  d       delete it (or the reply under the cursor)
+  o       go to it in the document
+  ]] [[   go to the next / previous comment
+  q       close the panel
+
+Comments you don't touch keep their exact XML, also in Word's own comment
+parts.
+
+==============================================================================
+TRACKED CHANGES                                             *neoffice-changes*
+
+As in Word: inserted text is underlined, deleted text stays in the text,
+struck through (a deleted paragraph break shows as `¶`), and formatting
+changes are underlined with dashes. Each author's changes have a colour of
+their own, and with the cursor on a change the end of the line says who made
+it and when (`Bob · 2024-01-02 · inserted`).
+
+Reviewing ~
+                                                     *neoffice-accept-reject*
+Accept keeps what you see: inserted text stays, deleted text goes. Reject goes
+back: inserted text goes, deleted text stays. Either acts on
+
+- the change at the cursor (or the nearest one on the line),
+- with a visual selection, the selected part of every change it touches (the
+  rest of a change stays a change),
+- or all of them (`all`), or all of someone's (`all Bob`).
+
+|u| and |CTRL-R| undo and redo reviews and tracked edits, with their changes.
+
+Tracking your edits ~
+                                                       *neoffice-tracking*
+With tracking on (`:Neoffice track`), what you type is a tracked insertion and
+what you delete stays in the text as a tracked deletion, under your `author`
+name. Tracking starts on when the document has it on; turning it on or off
+only affects your session (the document's own setting is not changed).
+
+- What is recorded is exactly what you edited, where you edited it (Nvim
+  tells where each edit is): typing `is ` next to an `is` never takes the old
+  letters as yours; a replacement (|cw|, |s|, pasting over a selection) is the
+  old text deleted and the new one inserted; edits made at once in several
+  places (`:s///g`) are each recorded where they are.
+- Typing inside your own insertion extends it. What you type inside someone
+  else's insertion, or inside or right before a deletion, is your own
+  insertion: theirs is split around it.
+- Deleting your own inserted text just removes it, and deleted text can't be
+  deleted again (it stays deleted by whoever deleted it).
+- With tracking off, what you type is plain text, also inside or next to
+  someone's changes (they are split around it).
+- Images, equations, footnotes, fields and breaks can't be deleted while
+  tracking (they are put back, and you are told so): turn tracking off to
+  delete them. Editing an image's alt text, path or width, an equation or a
+  footnote isn't tracked (Word doesn't either).
+- Changing formatting, a paragraph's kind or its alignment isn't tracked.
+- Rejecting a formatting change restores the old formatting in .docx. .odt
+  files don't keep the formatting from before the change, so there rejecting
+  only removes the mark.
+
+==============================================================================
+COMMANDS                                                         *:Neoffice*
+
+Everything is a subcommand of :Neoffice. Alone, it lets you pick one.
+
+:Neoffice comments              Toggle the comments panel.
+:Neoffice comment               Comment the selection, or the cursor position.
+:Neoffice reply                 Reply to the comment under the cursor.
+:Neoffice resolve               Resolve (or reopen) the comment under the
+                                cursor.
+:Neoffice delete                Delete the comment under the cursor.
+:Neoffice track [on|off]        Record your edits as tracked changes
+                                (toggles).
+:Neoffice accept [all [{author}]]
+                                Accept the change at the cursor, the selected
+                                part, all, or all of {author}'s.
+:Neoffice reject [all [{author}]]
+                                Reject them, the same way.
+:Neoffice next                  Jump to the next tracked change.
+:Neoffice prev                  Jump to the previous tracked change.
+:Neoffice changes [{author}]    List the tracked changes (of {author}) in the
+                                |location-list|.
+:Neoffice numbers [on|off]      Number the headings 1, 1.1, 1.2, 2, ... as
+                                Word and LibreOffice do it, through the
+                                heading styles (toggles). The numbers are
+                                shown before the headings, but aren't part of
+                                the text.
+
+<Tab> completes the subcommands and the authors' names.
+
+==============================================================================
+KEYMAPS                                                     *neoffice-keymaps*
+
+neoffice sets no keymaps. Documents get the `neoffice` filetype: define yours
+there. For example, all under <leader>w: >lua
+
+  vim.api.nvim_create_autocmd("FileType", {
+    pattern = "neoffice",
+    callback = function(ev)
+      local function map(lhs, cmd, desc, mode)
+        vim.keymap.set(mode or "n", "<leader>w" .. lhs,
+          "<Cmd>Neoffice " .. cmd .. "<CR>", { buffer = ev.buf, desc = desc })
+      end
+      map("w", "", "Pick an action")
+      map("c", "comments", "Comments panel")
+      map("a", "comment", "Add comment", { "n", "x" })
+      map("r", "reply", "Reply to comment")
+      map("x", "resolve", "Resolve / reopen comment")
+      map("d", "delete", "Delete comment")
+      map("t", "track", "Track changes on/off")
+      map("j", "next", "Next change")
+      map("k", "prev", "Previous change")
+      map("y", "accept", "Accept change", { "n", "x" })
+      map("n", "reject", "Reject change", { "n", "x" })
+      map("Y", "accept all", "Accept all changes")
+      map("N", "reject all", "Reject all changes")
+      map("l", "changes", "List changes")
+      map("h", "numbers", "Heading numbers on/off")
+    end,
+  })
+<
+==============================================================================
+OPTIONS                                                     *neoffice-options*
+
+                                                            *neoffice.setup()*
+setup() is optional. Every field is optional too; these are the defaults: >lua
+
+  require("neoffice").setup({
+    author = vim.env.USER, -- on your comments and tracked changes
+    track_changes = nil,   -- true/false: always/never track your edits;
+                           -- nil: as the document says
+    conceal = false,       -- hide the marks (except on the cursor line)
+    images = true,         -- show images (where the terminal can)
+    image_width = 60,      -- at most this many columns wide
+    image_height = 20,     -- and this many lines high
+    panel_keys = {         -- in the comments panel (false drops one)
+      reply = "r", resolve = "<CR>", delete = "d", jump = "o", close = "q",
+      next = "]]", prev = "[[",
+    },
+  })
+<
+                                                         *neoffice-highlights*
+Highlight groups (all `default`, so your colour scheme can set them):
+
+  NeofficeInsert1 ... 6     insertions, one colour per author
+  NeofficeDelete1 ... 6     deletions, one colour per author
+  NeofficeChangeInfo        who made the change at the cursor, and when
+  NeofficeFormat            formatting changes
+  NeofficeComment           commented text
+  NeofficeCommentSign       the comment sign
+  NeofficeCommentVirt       a comment's text at the end of its line
+  NeofficeTitle             the title
+  NeofficeNumber            heading numbers
+  NeofficeAlign             the alignment marks
+
+==============================================================================
+WHAT IS (AND ISN'T) CHANGED                                  *neoffice-safety*
+
+- Writing without changes writes nothing: the file stays byte for byte as it
+  was.
+- Only the paragraphs you edited are rewritten. The others, and every part of
+  the file you didn't touch (styles, headers, footnotes, settings, ...), are
+  written back exactly as they were.
+- Writing is all or nothing: if something is wrong (an image file that doesn't
+  exist, an equation that can't be converted), the file is not changed and the
+  buffer stays modified. The file is replaced in one step, so it is never left
+  half written.
+- If another program changed the file since it was read or written, writing
+  stops; |:w!| writes over it.
+- A document that can't be read opens read-only and empty, so it can't be
+  written over.
+- `:w other.docx` writes a copy and leaves the original alone.
+- In paragraphs you edit, Word's spell-check marks (`w:proofErr`) are dropped
+  (Word recreates them).
+- .doc files go through LibreOffice's converter, so what it can't convert is
+  lost.
+
+ vim:tw=78:ts=8:ft=help:norl:

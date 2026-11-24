@@ -29,7 +29,7 @@ One command, `:Neoffice` (alone, it lets you pick):
 - `:Neoffice next|prev` — jump between changes; `:Neoffice changes [author]` lists them
 - `:Neoffice numbers [on|off]` — number the headings
 
-No keymaps are set.
+No keymaps are set. See `:help neoffice`.
 
 ## Requirements
 
