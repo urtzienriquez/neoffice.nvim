@@ -19,23 +19,19 @@ jobs:
           - nightly
 
     steps:
-      - name: Checkout neoffice
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Neovim (${{ matrix.neovim }})
-        uses: rhysd/action-setup-vim@v1
+      - uses: rhysd/action-setup-vim@v1
         with:
           neovim: true
           version: ${{ matrix.neovim }}
 
       - name: Install plenary.nvim
-        run: |
-          mkdir -p ~/.local/share/nvim/site/pack/test/start
-          git clone --depth 1 https://github.com/nvim-lua/plenary.nvim \
-            ~/.local/share/nvim/site/pack/test/start/plenary.nvim
+        run: git clone --depth 1 https://github.com/nvim-lua/plenary.nvim /tmp/plenary.nvim
 
-      - name: Run test suite
+      - name: Run tests
+        env:
+          PLENARY_DIR: /tmp/plenary.nvim
         run: |
           nvim --headless -u tests/minimal_init.lua \
-          -c "lua require('plenary.test_harness').test_directory('tests/', { incremental = false, sequential = true, halt_on_error = true })" \
-          -c "qa!"
+            -c "PlenaryBustedDirectory tests {minimal_init='tests/minimal_init.lua', sequential=true}"

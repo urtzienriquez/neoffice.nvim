@@ -1,77 +1,50 @@
--- neoffice/zip.lua
--- Helpers for reading/writing entries inside ZIP archives (.docx/.odt are ZIPs).
--- Uses system `unzip` + `zip` binaries. No LuaRocks required.
-
+-- .docx and .odt files are ZIP archives; read and replace their entries with unzip/zip.
 local M = {}
 
-local function sq(s)
-  return "'" .. tostring(s):gsub("'", "'\"'\"'") .. "'"
+function M.read(path, entry)
+  -- "[" is a wildcard for unzip, so "[Content_Types].xml" needs escaping
+  local r = vim.system({ "unzip", "-p", path, (entry:gsub("%[", "[[]")) }):wait()
+  return r.code == 0 and r.stdout ~= "" and r.stdout or nil
 end
 
-function M.read_entry(zip_path, entry)
-  local cmd = "unzip -p " .. sq(zip_path) .. " " .. sq(entry) .. " 2>/dev/null"
-  local out = vim.fn.system(cmd)
-  if vim.v.shell_error ~= 0 then
-    return nil
+function M.list(path)
+  local r = vim.system({ "unzip", "-Z1", path }):wait()
+  local names = {}
+  for name in r.stdout:gmatch("[^\n]+") do
+    names[name] = true
   end
-  if out == "" then
-    return nil
-  end
-  return out
+  return names
 end
 
-function M.list_entries(zip_path)
-  local cmd = "unzip -Z1 " .. sq(zip_path) .. " 2>/dev/null"
-  local out = vim.fn.system(cmd)
-  local entries = {}
-  for line in out:gmatch("[^\n]+") do
-    if line:match("^[%w/]") then
-      table.insert(entries, line)
+-- Replace or add entries ({ [name] = content }) and write the result to `target` (default: `path`).
+-- Works on a copy that is renamed over the target at the end, so a failure never damages the file.
+function M.write(path, entries, target)
+  target = target or path
+  if next(entries) == nil then -- nothing changed: leave the file alone (or just copy it)
+    if target ~= path then
+      assert(vim.uv.fs_copyfile(path, target .. ".neoffice~"))
+      assert(os.rename(target .. ".neoffice~", target))
     end
+    return
   end
-  return entries
-end
-
-function M.has_entry(zip_path, entry)
-  for _, e in ipairs(M.list_entries(zip_path)) do
-    if e == entry then
-      return true
-    end
+  local dir, names = vim.fn.tempname(), {}
+  for name, content in pairs(entries) do
+    local file = dir .. "/" .. name
+    vim.fn.mkdir(vim.fs.dirname(file), "p")
+    local f = assert(io.open(file, "wb"))
+    f:write(content)
+    f:close()
+    names[#names + 1] = name
   end
-  return false
-end
-
-function M.write_entry(zip_path, entry, content)
-  local abs_zip = vim.fn.fnamemodify(zip_path, ":p")
-  local tmp_dir = vim.fn.tempname()
-  vim.fn.mkdir(tmp_dir, "p")
-
-  local dir_part = entry:match("^(.+)/[^/]+$")
-  if dir_part then
-    vim.fn.mkdir(tmp_dir .. "/" .. dir_part, "p")
+  local tmp = target .. ".neoffice~"
+  assert(vim.uv.fs_copyfile(path, tmp))
+  local r = vim.system({ "zip", "-q", "-X", "-nw", tmp, unpack(names) }, { cwd = dir }):wait()
+  vim.fn.delete(dir, "rf")
+  if r.code ~= 0 then
+    os.remove(tmp)
+    error("zip failed: " .. r.stderr)
   end
-
-  local tmp_file = tmp_dir .. "/" .. entry
-  local lines = vim.split(content, "\n", { plain = true })
-  vim.fn.writefile(lines, tmp_file)
-
-  if vim.fn.filereadable(tmp_file) ~= 1 then
-    vim.fn.system("rm -rf " .. sq(tmp_dir))
-    return false
-  end
-
-  -- local cmd = "cd " .. sq(tmp_dir) .. " && zip -u " .. sq(abs_zip) .. " " .. sq(entry) .. " 2>&1"
-  local cmd = string.format("cd %s && zip %s %s", sq(tmp_dir), sq(abs_zip), sq(entry))
-  local out = vim.fn.system(cmd)
-  local exit_code = vim.v.shell_error
-
-  vim.fn.system("rm -rf " .. sq(tmp_dir))
-
-  if exit_code ~= 0 then
-    vim.notify(string.format("[neoffice] ZIP: zip command failed (exit %d): %s", exit_code, out), vim.log.levels.ERROR)
-    return false
-  end
-  return true
+  assert(os.rename(tmp, target))
 end
 
 return M

@@ -1,238 +1,200 @@
--- neoffice/xml.lua
+-- A tiny XML DOM: just enough to edit .docx/.odt parts without losing anything.
+--   element: { tag = "w:p", attrs = { { "w:val", "x" }, ... }, children = { ... }, parent = <element> }
+--   text:    { text = "decoded text" }
+--   other:   { raw = "<?...?>" }  (declarations, comments and CDATA are kept verbatim)
 local M = {}
 
-local function read_tag(s, pos)
-  local len = #s
-  local buf = {}
-  local in_q = nil
-  while pos <= len do
-    local c = s:sub(pos, pos)
-    if in_q then
-      buf[#buf + 1] = c
-      if c == in_q then
-        in_q = nil
-      end
-    else
-      if c == '"' or c == "'" then
-        in_q = c
-        buf[#buf + 1] = c
-      elseif c == ">" then
-        pos = pos + 1
-        break
-      else
-        buf[#buf + 1] = c
-      end
+local ENTITIES = { lt = "<", gt = ">", amp = "&", quot = '"', apos = "'" }
+
+local function decode(s)
+  return (s:gsub("&(#?)(x?)(%w+);", function(hash, hex, v)
+    if hash == "" then
+      return ENTITIES[v]
     end
-    pos = pos + 1
-  end
-  return table.concat(buf), pos
+    return vim.fn.nr2char(tonumber(v, hex == "x" and 16 or 10))
+  end))
 end
 
-local function parse_attrs(s)
-  local attrs = {}
-  local pos = 1
-  while pos <= #s do
-    local ws = s:match("^%s+", pos)
-    if ws then
-      pos = pos + #ws
-    end
-    local name = s:match("^([%w:%-_.]+)", pos)
-    if not name then
-      break
-    end
-    pos = pos + #name
-    local eq = s:match("^%s*=%s*", pos)
-    if eq then
-      pos = pos + #eq
-      local q = s:sub(pos, pos)
-      local val = ""
-      if q == '"' or q == "'" then
-        val = s:match("^" .. q .. "(.-)" .. q, pos)
-        pos = pos + #val + 2
-      else
-        val = s:match("^([^%s>]+)", pos)
-        pos = pos + #val
-      end
-      attrs[name] = val:gsub("&amp;", "&"):gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&quot;", '"')
-    else
-      attrs[name] = true
-    end
-  end
-  return attrs
+function M.escape(s, in_attr)
+  s = s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+  return in_attr and (s:gsub('"', "&quot;")) or s
 end
 
 function M.parse(s)
-  local pos = 1
-  -- Start with a clean ROOT to capture top-level elements
-  local root = { tag = "ROOT", children = {}, attrs = {} }
-  local stack = { root }
-
+  local doc = { children = {} }
+  local node, pos = doc, 1
   while pos <= #s do
-    local start_tag = s:find("<", pos)
-    if not start_tag then
-      local text = s:sub(pos)
-      if text ~= "" then
-        table.insert(stack[#stack].children, { tag = "_TEXT", text = text })
-      end
+    local lt = s:find("<", pos, true) or #s + 1
+    if lt > pos then
+      M.append(node, { text = decode(s:sub(pos, lt - 1)) })
+    end
+    if lt > #s then
       break
     end
-
-    if start_tag > pos then
-      local text = s:sub(pos, start_tag - 1)
-      if text:match("%S") then
-        table.insert(stack[#stack].children, { tag = "_TEXT", text = text })
+    local next_char = s:sub(lt + 1, lt + 1)
+    if next_char == "/" then -- closing tag
+      pos = s:find(">", lt, true) + 1
+      node = node.parent
+    elseif next_char == "?" or next_char == "!" then -- <?..?>, <!--..-->, <![CDATA[..]]>, <!DOCTYPE..>
+      local close = (s:sub(lt, lt + 3) == "<!--" and "-->") or (s:sub(lt, lt + 8) == "<![CDATA[" and "]]>") or ">"
+      local _, stop = s:find(close, lt, true)
+      M.append(node, { raw = s:sub(lt, stop) })
+      pos = stop + 1
+    else -- opening or self-closing tag
+      local tag, p = s:match("^([^%s/>]+)()", lt + 1)
+      local el = M.append(node, M.elem(tag))
+      while true do
+        local name, _, value, after = s:match("^%s*([^%s=/>]+)%s*=%s*([\"'])(.-)%2()", p)
+        if not name then
+          break
+        end
+        table.insert(el.attrs, { name, decode(value) })
+        p = after
       end
-    end
-
-    local tag_str, next_pos = read_tag(s, start_tag + 1)
-    pos = next_pos
-
-    if tag_str:sub(1, 1) == "/" then
-      if #stack > 1 then
-        table.remove(stack)
+      local slash, after = s:match("^%s*(/?)>()", p)
+      if slash == "" then
+        node = el
       end
-    elseif tag_str:sub(-1) == "/" then
-      local name = tag_str:match("^([%w:%-_.]+)")
-      local attrs = parse_attrs(tag_str:sub(#name + 1, -2))
-      table.insert(stack[#stack].children, { tag = name, attrs = attrs, children = {} })
-    elseif tag_str:sub(1, 1) == "?" or tag_str:sub(1, 1) == "!" then
-      -- Skip
-    else
-      local name = tag_str:match("^([%w:%-_.]+)")
-      local attrs = parse_attrs(tag_str:sub(#name + 1))
-      local node = { tag = name, attrs = attrs, children = {} }
-      table.insert(stack[#stack].children, node)
-      table.insert(stack, node)
+      pos = after
     end
   end
-  return root
+  return doc
 end
 
-function M.serialize(node)
-  if not node then
-    return ""
+function M.serialize(n)
+  if n.text then
+    return M.escape(n.text)
+  elseif n.raw then
+    return n.raw
   end
-
-  -- 1. Handle Virtual ROOT
-  if node.tag == "ROOT" then
-    local res = ""
-    for _, child in ipairs(node.children or {}) do
-      res = res .. M.serialize(child)
-    end
-    return res
+  local inner = {}
+  for _, child in ipairs(n.children) do
+    inner[#inner + 1] = M.serialize(child)
   end
-
-  -- 2. Handle Text Nodes
-  if node.tag == "_TEXT" then
-    return tostring(node.text or ""):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+  inner = table.concat(inner)
+  if not n.tag then -- the document node
+    return inner
   end
-
-  -- 3. Build Tag
-  local parts = {}
-  -- Use table.concat logic but append manually to be safe
-  parts[#parts + 1] = "<" .. node.tag
-
-  -- Attributes
-  for k, v in pairs(node.attrs or {}) do
-    local val = tostring(v):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;")
-    parts[#parts + 1] = string.format(' %s="%s"', k, val)
+  local attrs = {}
+  for _, kv in ipairs(n.attrs) do
+    attrs[#attrs + 1] = string.format(' %s="%s"', kv[1], M.escape(kv[2], true))
   end
-
-  if #(node.children or {}) == 0 then
-    parts[#parts + 1] = "/>"
-  else
-    parts[#parts + 1] = ">"
-    for _, child in ipairs(node.children) do
-      parts[#parts + 1] = M.serialize(child)
-    end
-    parts[#parts + 1] = "</" .. node.tag .. ">"
-  end
-
-  return table.concat(parts)
+  local open = "<" .. n.tag .. table.concat(attrs)
+  return inner == "" and open .. "/>" or open .. ">" .. inner .. "</" .. n.tag .. ">"
 end
 
-function M.serialize_inner(node)
-  if not node or not node.children then
-    return ""
-  end
-  local parts = {}
-  for _, child in ipairs(node.children) do
-    -- Using the #parts+1 syntax is safer than table.insert
-    -- because it's impossible to pass a "bad argument #2"
-    parts[#parts + 1] = M.serialize(child)
-  end
-  return table.concat(parts)
-end
+-- ── Building ────────────────────────────────────────────────────────────────
 
-function M.inner_text(node)
-  if not node then
-    return ""
-  end
-  local parts = {}
-  if node.text and node.text ~= "" then
-    parts[#parts + 1] = node.text
-  end
-  for _, child in ipairs(node.children or {}) do
-    local t = M.inner_text(child)
-    if t ~= "" then
-      parts[#parts + 1] = t
+-- elem("w:t", { { "xml:space", "preserve" } }, { child, ... }); nil children are skipped.
+function M.elem(tag, attrs, children)
+  local el = { tag = tag, attrs = attrs or {}, children = {} }
+  for i = 1, table.maxn(children or {}) do
+    if children[i] then
+      M.append(el, children[i])
     end
   end
-  return table.concat(parts, "")
+  return el
 end
 
-function M.attr(node, key)
-  if not node or not node.attrs then
-    return nil
+function M.append(parent, child, index)
+  child.parent = parent
+  table.insert(parent.children, index or #parent.children + 1, child)
+  return child
+end
+
+function M.index(n)
+  for i, c in ipairs(n.parent.children) do
+    if c == n then
+      return i
+    end
   end
-  if node.attrs[key] then
-    return node.attrs[key]
+end
+
+function M.remove(n)
+  table.remove(n.parent.children, M.index(n))
+  n.parent = nil
+end
+
+function M.copy(n)
+  if not n.tag then
+    return { text = n.text, raw = n.raw }
   end
-  -- Handle namespace matching: office:name matches both "office:name" and "name"
-  local local_key = key:match(":(.+)$") or key
-  for k, v in pairs(node.attrs) do
-    local lk = k:match(":(.+)$") or k
-    if lk == local_key then
-      return v
+  local el = M.elem(n.tag, vim.deepcopy(n.attrs))
+  for _, c in ipairs(n.children) do
+    M.append(el, M.copy(c))
+  end
+  return el
+end
+
+-- ── Querying ────────────────────────────────────────────────────────────────
+
+function M.attr(n, name)
+  for _, kv in ipairs(n.attrs or {}) do
+    if kv[1] == name then
+      return kv[2]
     end
   end
   return nil
 end
 
-function M.find_all(node, tag, acc)
-  acc = acc or {}
-  if not node or type(node) ~= "table" then
-    return acc
-  end
-  if node.tag == tag then
-    table.insert(acc, node)
-  end
-  for _, child in ipairs(node.children or {}) do
-    M.find_all(child, tag, acc)
-  end
-  return acc
-end
-
-function M.find_first(node, tag)
-  local results = M.find_all(node, tag)
-  return results[1]
-end
-
-function M.find_first_local(node, local_tag)
-  if not node or type(node) ~= "table" then
-    return nil
-  end
-  local current_local = node.tag:match(":(.+)$") or node.tag
-  if current_local == local_tag then
-    return node
-  end
-  for _, child in ipairs(node.children or {}) do
-    local res = M.find_first_local(child, local_tag)
-    if res then
-      return res
+function M.set_attr(n, name, value) -- value nil removes the attribute
+  for i, kv in ipairs(n.attrs) do
+    if kv[1] == name then
+      if value then
+        kv[2] = value
+      else
+        table.remove(n.attrs, i)
+      end
+      return
     end
   end
-  return nil
+  if value then
+    table.insert(n.attrs, { name, value })
+  end
+end
+
+function M.child(n, tag)
+  for _, c in ipairs(n.children or {}) do
+    if c.tag == tag then
+      return c
+    end
+  end
+end
+
+function M.find(n, tag) -- first descendant (or self) with this tag
+  if n.tag == tag then
+    return n
+  end
+  for _, c in ipairs(n.children or {}) do
+    local found = M.find(c, tag)
+    if found then
+      return found
+    end
+  end
+end
+
+-- All descendants whose tag is in `tags` (without looking inside them), skipping `skip` subtrees.
+function M.collect(n, tags, skip, out)
+  out = out or {}
+  for _, c in ipairs(n.children or {}) do
+    if tags[c.tag] then
+      out[#out + 1] = c
+    elseif c.tag and not (skip and skip[c.tag]) then
+      M.collect(c, tags, skip, out)
+    end
+  end
+  return out
+end
+
+function M.text(n) -- all text inside a node
+  if n.text then
+    return n.text
+  end
+  local parts = {}
+  for _, c in ipairs(n.children or {}) do
+    parts[#parts + 1] = M.text(c)
+  end
+  return table.concat(parts)
 end
 
 return M

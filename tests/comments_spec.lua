@@ -1,403 +1,209 @@
--- tests/comments_spec.lua
--- Tests for comment parsing, rendering, and manipulation
-
-local assert = require("luassert")
+-- Comments: adding, replying, resolving and deleting, without touching the other comments.
+local H = dofile("tests/helpers.lua")
+local neo = require("neoffice")
+local comments = require("neoffice.comments")
+local zip = require("neoffice.zip")
 local xml = require("neoffice.xml")
+local api = vim.api
 
-describe("Comments", function()
-  local comments
+local function add(n, text, comment) -- comment `text` in paragraph n (as :'<,'>Neoffice comment does)
+  local r = H.row(n)
+  local s = assert(H.lines()[r]:find(text, 1, true))
+  vim.fn.setpos("'<", { 0, r, s, 0 })
+  vim.fn.setpos("'>", { 0, r, s + #text - 1, 0 })
+  vim.fn.histadd("cmd", "") -- (visualmode() needs a visual selection to have been made)
+  vim.cmd("normal! gvv")
+  H.input = comment
+  comments.add(true)
+end
 
-  before_each(function()
-    comments = require("neoffice.comments")
-  end)
-
-  describe("comment structure", function()
-    it("parses basic comment annotation", function()
-      local xml_content = [[
-        <office:annotation office:name="comment1">
-          <dc:creator>TestUser</dc:creator>
-          <dc:date>2024-03-11T10:00:00</dc:date>
-          <text:p>This is a comment</text:p>
-        </office:annotation>
-      ]]
-
-      local tree = xml.parse(xml_content)
-      local annotations = xml.find_all(tree, "office:annotation")
-
-      assert.equals(1, #annotations)
-
-      local ann = annotations[1]
-      assert.equals("comment1", xml.attr(ann, "office:name"))
-
-      local creator = xml.find_first(ann, "dc:creator")
-      assert.equals("TestUser", xml.inner_text(creator))
+for _, name in ipairs({ "rich.docx", "office.docx", "rich.odt" }) do
+  describe(name, function()
+    before_each(function()
+      H.open(H.copy(name))
     end)
 
-    it("parses comment with multiple paragraphs", function()
-      local xml_content = [[
-        <office:annotation office:name="comment1">
-          <dc:creator>User</dc:creator>
-          <dc:date>2024-03-11</dc:date>
-          <text:p>First paragraph</text:p>
-          <text:p>Second paragraph</text:p>
-        </office:annotation>
-      ]]
-
-      local tree = xml.parse(xml_content)
-      local ann = xml.find_first(tree, "office:annotation")
-      local paragraphs = xml.find_all(ann, "text:p")
-
-      assert.equals(2, #paragraphs)
+    it("shows the comment and its range", function()
+      local list = H.comments()
+      assert.equals(1, #list)
+      assert.equals("A comment", list[1].text)
+      assert.equals("Alice", list[1].author)
+      local m = api.nvim_buf_get_extmarks(0, neo.ns.comment, 0, -1, { details = true })[1]
+      local line = H.lines()[m[2] + 1]
+      assert.equals("Commented text", line:sub(m[3] + 1, m[4].end_col))
     end)
 
-    it("identifies replies via parent-name attribute", function()
-      local xml_content = [[
-        <office:annotation loext:parent-name="comment1">
-          <dc:creator>ReplyUser</dc:creator>
-          <dc:date>2024-03-12</dc:date>
-          <text:p>This is a reply</text:p>
-        </office:annotation>
-      ]]
-
-      local tree = xml.parse(xml_content)
-      local ann = xml.find_first(tree, "office:annotation")
-
-      local parent = xml.attr(ann, "loext:parent-name")
-      assert.equals("comment1", parent)
-    end)
-  end)
-
-  describe("comment detection in buffer", function()
-    it("detects annotation tags in text", function()
-      local buf = vim.api.nvim_create_buf(false, true)
-      local lines = {
-        'Text before <office:annotation office:name="c1"><dc:creator>User</dc:creator><text:p>Comment</text:p></office:annotation> text after',
-      }
-      vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-
-      local content = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
-      assert.is_true(content:find("office:annotation", 1, true) ~= nil)
-
-      vim.api.nvim_buf_delete(buf, { force = true })
+    it("adds a comment on a selection", function()
+      add(12, "paragraph", "Why last?")
+      assert.is_true(vim.bo.modified)
+      H.reopen()
+      local list = H.comments()
+      assert.equals(2, #list)
+      assert.equals("Why last?", list[2].text)
+      assert.equals(neo.config.author, list[2].author)
+      local m = vim.iter(api.nvim_buf_get_extmarks(0, neo.ns.comment, 0, -1, { details = true })):find(function(m)
+        return H.doc().comment[m[1]] == list[2]
+      end)
+      assert.equals("paragraph", H.lines()[m[2] + 1]:sub(m[3] + 1, m[4].end_col))
     end)
 
-    it("detects annotation-end markers", function()
-      local buf = vim.api.nvim_create_buf(false, true)
-      local lines = {
-        'Text <office:annotation-end office:name="c1"/> after',
-      }
-      vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-
-      local content = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
-      assert.is_true(content:find("annotation-end", 1, true) ~= nil)
-
-      vim.api.nvim_buf_delete(buf, { force = true })
-    end)
-  end)
-
-  describe("comment threading", function()
-    it("associates replies with parent comments", function()
-      -- Test data structure
-      local parent_comment = {
-        id = "c1",
-        author = "Alice",
-        date = "2024-03-11",
-        text = "Original comment",
-        replies = {},
-        resolved = false,
-      }
-
-      local reply = {
-        author = "Bob",
-        date = "2024-03-12",
-        text = "Reply to Alice",
-      }
-
-      table.insert(parent_comment.replies, reply)
-
-      assert.equals(1, #parent_comment.replies)
-      assert.equals("Bob", parent_comment.replies[1].author)
+    it("adds a comment at the cursor (no selection)", function()
+      H.cursor(12, "paragraph")
+      H.input = "Here."
+      comments.add()
+      H.reopen()
+      assert.equals("Here.", H.comments()[2].text)
     end)
 
-    it("handles multiple replies", function()
-      local comment = {
-        id = "c1",
-        replies = {},
-      }
-
-      for i = 1, 5 do
-        table.insert(comment.replies, {
-          author = "User" .. i,
-          text = "Reply " .. i,
-        })
-      end
-
-      assert.equals(5, #comment.replies)
-    end)
-  end)
-
-  describe("comment ID generation", function()
-    it("generates unique comment IDs", function()
-      -- Simulate ID generation
-      local id1 = string.format("__Annotation__%d_%d", math.random(10000, 99999), math.random(1000000000, 9999999999))
-      local id2 = string.format("__Annotation__%d_%d", math.random(10000, 99999), math.random(1000000000, 9999999999))
-
-      -- They should be different (with very high probability)
-      assert.is_not_equal(id1, id2)
+    it("replies, resolves and reopens from the document", function()
+      H.cursor(3, "Commented")
+      H.input = "A reply from Neovim"
+      comments.reply()
+      comments.resolve()
+      H.reopen()
+      local c = H.comments()[1]
+      assert.is_true(c.resolved)
+      assert.equals("A reply from Neovim", c.replies[#c.replies].text)
+      H.cursor(3, "Commented")
+      comments.resolve()
+      H.reopen()
+      assert.is_falsy(H.comments()[1].resolved)
     end)
 
-    it("uses expected ID format", function()
-      local id = string.format("__Annotation__%d_%d", 12345, 9876543210)
-
-      assert.is_true(id:find("__Annotation__", 1, true) ~= nil)
-      assert.is_true(id:find("12345", 1, true) ~= nil)
-      assert.is_true(id:find("9876543210", 1, true) ~= nil)
-    end)
-  end)
-
-  describe("anchor matching", function()
-    it("extracts anchor text from paragraph", function()
-      local xml_content = [[
-        <text:p>This is the anchor text that identifies the comment location</text:p>
-      ]]
-
-      local tree = xml.parse(xml_content)
-      local para = tree.children[1]
-      local inner = xml.serialize_inner(para)
-      local anchor = inner:sub(1, 60)
-
-      assert.is_not_nil(anchor)
-      assert.is_true(#anchor <= 60)
-      assert.is_true(anchor:find("anchor text", 1, true) ~= nil)
+    it("deletes a comment, leaving no trace of it", function()
+      H.cursor(3, "Commented")
+      comments.delete()
+      H.reopen()
+      assert.equals(0, #H.comments())
+      local main = zip.read(H.doc().path, H.MAIN[name:match("%w+$")])
+      assert.falsy(main:find("commentRange") or main:find("commentReference") or main:find("office:annotation"))
+      assert.equals("Commented text and more.", H.paras()[3])
     end)
 
-    it("limits anchor length to 60 characters", function()
-      local long_text = string.rep("a", 200)
-      local anchor = long_text:sub(1, 60)
-
-      assert.equals(60, #anchor)
-    end)
-  end)
-
-  describe("comment rendering logic", function()
-    it("formats comment author correctly", function()
-      local author = "JohnDoe"
-      local formatted = "@" .. author
-
-      assert.equals("@JohnDoe", formatted)
-    end)
-
-    it("truncates dates to date only", function()
-      local full_date = "2024-03-11T10:30:45Z"
-      local date_only = full_date:sub(1, 10)
-
-      assert.equals("2024-03-11", date_only)
-    end)
-
-    it("shows resolved indicator", function()
-      local comment = { resolved = true }
-      local indicator = comment.resolved and "  ✓" or ""
-
-      assert.equals("  ✓", indicator)
-    end)
-
-    it("does not show indicator for unresolved", function()
-      local comment = { resolved = false }
-      local indicator = comment.resolved and "  ✓" or ""
-
-      assert.equals("", indicator)
-    end)
-  end)
-
-  describe("text wrapping for display", function()
-    it("wraps long lines", function()
-      local text = "This is a very long comment that needs to be wrapped to fit within the display width"
-      local width = 40
-      local indent = 3
-
-      -- Simple wrapping simulation
-      local lines = {}
-      local current_line = ""
-      local prefix = string.rep(" ", indent)
-
-      for word in text:gmatch("%S+") do
-        if #current_line + #word + 1 > width - indent then
-          table.insert(lines, prefix .. current_line)
-          current_line = word
-        else
-          current_line = current_line == "" and word or (current_line .. " " .. word)
+    it("deletes a reply only", function()
+      H.cursor(3, "Commented")
+      H.input = "First reply"
+      comments.reply()
+      H.input = "Second reply"
+      comments.reply()
+      H.reopen()
+      vim.cmd("Neoffice comments") -- in the panel, on the last reply's header line
+      local lines, row = api.nvim_buf_get_lines(0, 0, -1, false), nil
+      for k = #lines, 1, -1 do
+        if lines[k]:find("↳", 1, true) then
+          row = k
+          break
         end
       end
+      api.nvim_win_set_cursor(0, { row, 0 })
+      comments.delete()
+      vim.cmd("wincmd p")
+      H.reopen()
+      local replies = vim.tbl_map(function(r) return r.text end, H.comments()[1].replies)
+      assert.is_true(vim.tbl_contains(replies, "First reply"))
+      assert.is_false(vim.tbl_contains(replies, "Second reply"))
+    end)
 
-      if current_line ~= "" then
-        table.insert(lines, prefix .. current_line)
+    it("keeps the comment when the text it is on is deleted", function()
+      H.replace(3, "Commented text and more.", "Other words.")
+      H.reopen()
+      assert.equals(1, #H.comments())
+      assert.equals("Other words.", H.paras()[3])
+    end)
+
+    it("leaves the existing comments' XML alone when adding another", function()
+      local ext = name:match("%w+$")
+      local function existing()
+        local path = H.doc().path
+        if ext == "odt" then
+          return zip.read(path, "content.xml"):match("<office:annotation .-</office:annotation>")
+        end
+        return xml.serialize(xml.collect(xml.parse(zip.read(path, "word/comments.xml")), { ["w:comment"] = true })[1])
       end
-
-      assert.is_true(#lines > 1) -- Should wrap to multiple lines
+      local before = existing()
+      add(12, "paragraph", "Another")
+      H.reopen()
+      assert.equals(before, existing())
     end)
   end)
+end
 
-  describe("XML escaping", function()
-    it("escapes special characters in comment text", function()
-      local text = "<script>alert('xss')</script> & other"
-      local escaped = text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
-
-      assert.equals("&lt;script&gt;alert('xss')&lt;/script&gt; &amp; other", escaped)
-    end)
-
-    it("handles quote characters", function()
-      local text = 'He said "hello"'
-      local escaped = text:gsub('"', "&quot;")
-
-      assert.is_true(escaped:find("&quot;", 1, true) ~= nil)
-    end)
+describe("docx comment parts", function()
+  it("are created (and registered) in a document that had no comments", function()
+    local path = H.copy("empty.docx")
+    H.open(path)
+    api.nvim_buf_set_lines(0, 0, -1, false, { "Some text to comment." })
+    H.save()
+    add(1, "text", "First comment ever")
+    H.reopen()
+    assert.equals("First comment ever", H.comments()[1].text)
+    assert.truthy(zip.read(path, "[Content_Types].xml"):find("/word/comments.xml", 1, true))
+    assert.truthy(zip.read(path, "word/_rels/document.xml.rels"):find('Target="comments.xml"', 1, true))
   end)
 
-  describe("comment deletion logic", function()
-    it("removes comment from list", function()
-      local comments_list = {
-        { id = "c1", text = "Comment 1" },
-        { id = "c2", text = "Comment 2" },
-        { id = "c3", text = "Comment 3" },
-      }
-
-      -- Simulate deletion of c2
-      comments_list = vim.tbl_filter(function(c)
-        return c.id ~= "c2"
-      end, comments_list)
-
-      assert.equals(2, #comments_list)
-      assert.equals("c1", comments_list[1].id)
-      assert.equals("c3", comments_list[2].id)
-    end)
-
-    it("removes reply from comment", function()
-      local comment = {
-        replies = {
-          { author = "User1", text = "Reply 1" },
-          { author = "User2", text = "Reply 2" },
-          { author = "User3", text = "Reply 3" },
-        },
-      }
-
-      -- Remove reply at index 2
-      table.remove(comment.replies, 2)
-
-      assert.equals(2, #comment.replies)
-      assert.equals("User1", comment.replies[1].author)
-      assert.equals("User3", comment.replies[2].author)
-    end)
+  it("lose a deleted comment everywhere, including Word's commentsIds and commentsExtensible", function()
+    local path = H.copy("office.docx")
+    local para = zip.read(path, "word/comments.xml"):match('w14:paraId="(%x+)"')
+    zip.write(path, {
+      ["word/commentsIds.xml"] = ('<w16cid:commentsIds xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid"><w16cid:commentId w16cid:paraId="%s" w16cid:durableId="1A2B3C4D"/></w16cid:commentsIds>'):format(para),
+      ["word/commentsExtensible.xml"] = '<w16cex:commentsExtensible xmlns:w16cex="http://schemas.microsoft.com/office/word/2018/wordml/cex"><w16cex:commentExtensible w16cex:durableId="1A2B3C4D" w16cex:dateUtc="2024-01-01T10:00:00Z"/></w16cex:commentsExtensible>',
+    })
+    H.open(path)
+    H.cursor(3, "Commented")
+    comments.delete()
+    H.save()
+    assert.falsy(zip.read(path, "word/commentsIds.xml"):find(para, 1, true))
+    assert.falsy(zip.read(path, "word/commentsExtensible.xml"):find("1A2B3C4D", 1, true))
+    assert.falsy(zip.read(path, "word/comments.xml"):find(para, 1, true))
   end)
 
-  describe("comment XML generation", function()
-    it("generates valid annotation XML", function()
-      local comment_id = "test_comment_1"
-      local author = "TestUser"
-      local date = "2024-03-11T10:00:00Z"
-      local text = "This is a test comment"
-
-      local xml_template = string.format(
-        '<office:annotation office:name="%s">'
-          .. "<dc:creator>%s</dc:creator>"
-          .. "<dc:date>%s</dc:date>"
-          .. "<text:p>%s</text:p>"
-          .. "</office:annotation>",
-        comment_id,
-        author,
-        date,
-        text
-      )
-
-      assert.is_true(xml_template:find("office:annotation", 1, true) ~= nil)
-      assert.is_true(xml_template:find(comment_id, 1, true) ~= nil)
-      assert.is_true(xml_template:find(author, 1, true) ~= nil)
-      assert.is_true(xml_template:find(text, 1, true) ~= nil)
-    end)
-
-    it("generates reply with parent reference", function()
-      local parent_id = "parent_comment"
-      local reply_xml = string.format(
-        '<office:annotation loext:parent-name="%s">'
-          .. "<dc:creator>ReplyAuthor</dc:creator>"
-          .. "<text:p>Reply text</text:p>"
-          .. "</office:annotation>",
-        parent_id
-      )
-
-      assert.is_true(reply_xml:find("loext:parent-name", 1, true) ~= nil)
-      assert.is_true(reply_xml:find(parent_id, 1, true) ~= nil)
-    end)
+  it("thread a reply to a comment that had no paragraph id", function()
+    local path = H.copy("rich.docx") -- (pandoc writes comments without w14:paraId)
+    H.open(path)
+    H.cursor(3, "Commented")
+    H.input = "Threaded?"
+    comments.reply()
+    H.save()
+    local extended = zip.read(path, "word/commentsExtended.xml")
+    assert.truthy(extended:find("w15:paraIdParent", 1, true))
+    H.open(path)
+    assert.equals("Threaded?", H.comments()[1].replies[1].text)
   end)
 
-  describe("resolved status", function()
-    it("toggles resolved status", function()
-      local comment = { resolved = false }
-
-      comment.resolved = not comment.resolved
-      assert.is_true(comment.resolved)
-
-      comment.resolved = not comment.resolved
-      assert.is_false(comment.resolved)
+  if H.has_libreoffice then
+    it("LibreOffice reads new comments and replies", function()
+      local path = H.copy("office.docx")
+      H.open(path)
+      H.cursor(3, "Commented")
+      H.input = "Reply for LibreOffice"
+      comments.reply()
+      add(12, "paragraph", "Comment for LibreOffice")
+      H.save()
+      local dir = vim.fn.tempname()
+      vim.system({ "soffice", "-env:UserInstallation=file://" .. dir .. "/p", "--headless", "--convert-to", "odt", "--outdir", dir, path }):wait()
+      local content = zip.read(dir .. "/office.odt", "content.xml")
+      assert.truthy(content:find("Reply for LibreOffice", 1, true))
+      assert.truthy(content:find("Comment for LibreOffice", 1, true))
+      assert.truthy(content:find("loext:parent%-name"))
     end)
+  end
+end)
 
-    it("uses loext:resolved attribute", function()
-      local xml_content = [[
-        <office:annotation office:name="c1" loext:resolved="true">
-          <dc:creator>User</dc:creator>
-          <text:p>Comment</text:p>
-        </office:annotation>
-      ]]
-
-      local tree = xml.parse(xml_content)
-      local ann = xml.find_first(tree, "office:annotation")
-      local resolved = xml.attr(ann, "loext:resolved")
-
-      assert.equals("true", resolved)
-    end)
-  end)
-
-  describe("edge cases", function()
-    it("handles empty comment text", function()
-      local comment = {
-        id = "c1",
-        author = "User",
-        text = "",
-        replies = {},
-      }
-
-      assert.equals("", comment.text)
-      assert.is_not_nil(comment.id)
-    end)
-
-    it("handles comments with no author", function()
-      local comment = {
-        id = "c1",
-        author = nil,
-        text = "Anonymous comment",
-      }
-
-      local display_author = comment.author or "?"
-      assert.equals("?", display_author)
-    end)
-
-    it("handles missing date", function()
-      local comment = {
-        id = "c1",
-        date = nil,
-      }
-
-      local display_date = (comment.date or ""):sub(1, 10)
-      assert.equals("", display_date)
-    end)
-
-    it("handles very long comment text", function()
-      local long_text = string.rep("This is a long comment. ", 100)
-      local comment = {
-        text = long_text,
-      }
-
-      -- Should not crash
-      assert.is_true(#comment.text > 1000)
-    end)
+describe("the comments panel", function()
+  it("moves between comments with ]] and [[", function()
+    H.open(H.copy("rich.docx"))
+    H.cursor(12, "paragraph")
+    H.input = "Second"
+    comments.add()
+    vim.cmd("Neoffice comments")
+    local function line() return api.nvim_get_current_line() end
+    api.nvim_win_set_cursor(0, { 1, 0 })
+    assert.truthy(line():find("Alice"))
+    vim.cmd("normal ]]")
+    assert.truthy(line():find(neo.config.author, 1, true))
+    vim.cmd("normal ]]") -- (no further: stays)
+    assert.truthy(line():find(neo.config.author, 1, true))
+    vim.cmd("normal [[")
+    assert.truthy(line():find("Alice"))
   end)
 end)
