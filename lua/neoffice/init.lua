@@ -21,6 +21,7 @@ M.config = {
   track_changes = nil, -- record your edits as tracked changes: true/false, nil = as the document says
   conceal = false, -- hide the formatting marks (except on the cursor line)
   images = true, -- show images in the buffer (needs Neovim's vim.ui.img and a terminal that supports it)
+  lsp = true, -- a language server for documents: headings as symbols (gO), folding, hover on comments
   image_width = 60, -- at most this many columns wide
   image_height = 20, -- and this many lines high
   panel_keys = { -- in the comments panel (false disables one)
@@ -391,6 +392,7 @@ local function setup_buffer(buf)
   vim.bo[buf].filetype = "neoffice"
   pcall(vim.treesitter.start, buf) -- markdown (see plugin/neoffice.lua): highlights the marks
   vim.bo[buf].syntax = "neoffice" -- adds <u> (see syntax/neoffice.vim)
+  require("neoffice.lsp").start(buf)
   local function window()
     vim.wo.wrap, vim.wo.linebreak, vim.wo.breakindent = true, true, true
     if M.config.conceal then

@@ -241,6 +241,23 @@ only affects your session (the document's own setting is not changed).
   only removes the mark.
 
 ==============================================================================
+LANGUAGE SERVER                                                 *neoffice-lsp*
+
+neoffice runs a small language server for documents, inside Nvim (nothing to
+install), attached to each document as `neoffice`. It answers:
+
+- Document symbols: the title and the headings, nested by level (numbered
+  when the document numbers them), each over its section. |gO| lists them,
+  and so does any picker or outline that shows LSP symbols (fzf-lua's
+  `lsp_document_symbols`, aerial, ...): a quick way to go to a section.
+- Folding ranges: each heading's section, with LSP folding: >lua
+    vim.wo.foldmethod, vim.wo.foldexpr = "expr", "v:lua.vim.lsp.foldexpr()"
+<- Hover (|K|): on commented text, the comment and its replies; on a tracked
+  change, who made it and when.
+
+`lsp = false` (|neoffice-options|) turns it off.
+
+==============================================================================
 COMMANDS                                                         *:Neoffice*
 
 Everything is a subcommand of :Neoffice. Alone, it lets you pick one.
@@ -313,6 +330,7 @@ setup() is optional. Every field is optional too; these are the defaults: >lua
                            -- nil: as the document says
     conceal = false,       -- hide the marks (except on the cursor line)
     images = true,         -- show images (where the terminal can)
+    lsp = true,            -- the language server (|neoffice-lsp|)
     image_width = 60,      -- at most this many columns wide
     image_height = 20,     -- and this many lines high
     panel_keys = {         -- in the comments panel (false drops one)

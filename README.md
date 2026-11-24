@@ -20,6 +20,8 @@ else in the file stays exactly as it was.
 - Comments: add, reply, resolve and delete, in a side panel.
 - Tracked changes: shown by author, accepted or rejected (at the cursor, in a selection, all, or
   someone's), and your own edits tracked. Undo works.
+- A built-in language server: headings as symbols (`gO`, pickers, outlines), sections as folds,
+  hover on comments and changes.
 
 One command, `:Neoffice` (alone, it lets you pick):
 
