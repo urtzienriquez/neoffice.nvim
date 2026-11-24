@@ -150,5 +150,6 @@ function H.libreoffice_reads(path, text, format)
 end
 
 H.has_libreoffice = vim.fn.executable("soffice") == 1
+H.has_pandoc = vim.fn.executable("pandoc") == 1 -- (equations: LaTeX <-> Word)
 
 return H

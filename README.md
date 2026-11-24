@@ -31,8 +31,12 @@ One command, `:Neoffice` (alone, it lets you pick):
 
 No keymaps are set.
 
-Requires Neovim 0.10+ and `zip`/`unzip`. Optional: pandoc (equations), LibreOffice (`.doc`),
-ImageMagick (JPEG and GIF images).
+## Requirements
+
+- Neovim 0.10+ (to show images: 0.12+, in a terminal like Kitty, Ghostty or WezTerm)
+- `zip` and `unzip` (as for Neovim's own zip plugin)
+- Optional: [pandoc](https://pandoc.org) to edit equations (without it they are kept as they
+  are, shown as `￼`), LibreOffice for `.doc` files, ImageMagick to show JPEG and GIF images
 
 ## Installation
 

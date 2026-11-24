@@ -26,6 +26,9 @@ jobs:
           neovim: true
           version: ${{ matrix.neovim }}
 
+      - name: Install pandoc (equations)
+        run: sudo apt-get update && sudo apt-get install -y pandoc
+
       - name: Install plenary.nvim
         run: git clone --depth 1 https://github.com/nvim-lua/plenary.nvim /tmp/plenary.nvim
 
