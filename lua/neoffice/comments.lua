@@ -18,8 +18,26 @@ function M.style(c)
     hl_group = c.resolved and "NeofficeCommentResolved" or "NeofficeComment",
     sign_text = "",
     sign_hl_group = "NeofficeCommentSign",
-    virt_text = { { ("  %s: %s%s"):format(c.author, vim.fn.strcharpart((c.text:gsub("\n", " ")), 0, 50), more), "NeofficeCommentVirt" } },
+    virt_text = neo().config.comment_text -- (its text at the end of the line: if asked for)
+        and { { ("  %s: %s%s"):format(c.author, vim.fn.strcharpart((c.text:gsub("\n", " ")), 0, 50), more), "NeofficeCommentVirt" } }
+      or nil,
   }
+end
+
+-- :Neoffice comments text [on|off]: each comment's text at the end of its line, or not (toggles).
+function M.text(arg)
+  local on = arg == "on" or arg ~= "off" and not neo().config.comment_text
+  neo().config.comment_text = on
+  for buf, doc in pairs(neo().docs) do
+    for _, m in ipairs(api.nvim_buf_get_extmarks(buf, neo().ns.comment, 0, -1, { details = true })) do
+      local c = doc.comment[m[1]]
+      if c then
+        local opts = vim.tbl_extend("force", M.style(c), { id = m[1], end_row = m[4].end_row, end_col = m[4].end_col, right_gravity = false })
+        api.nvim_buf_set_extmark(buf, neo().ns.comment, m[2], m[3], opts)
+      end
+    end
+  end
+  vim.notify("[neoffice] Comment text " .. (on and "shown" or "hidden"))
 end
 
 -- All comment marks of a document, in document order: { buf, id, row, col, end_row, end_col, c }
@@ -110,7 +128,7 @@ end
 -- A comment changed: update its mark, flag the document as modified, redraw the panel.
 local function changed(m)
   local mark = api.nvim_buf_get_extmark_by_id(m.buf, neo().ns.comment, m.id, { details = true })
-  local opts = vim.tbl_extend("force", M.style(m.c), { id = m.id, end_row = mark[3].end_row, end_col = mark[3].end_col })
+  local opts = vim.tbl_extend("force", M.style(m.c), { id = m.id, end_row = mark[3].end_row, end_col = mark[3].end_col, right_gravity = false })
   api.nvim_buf_set_extmark(m.buf, neo().ns.comment, mark[1], mark[2], opts)
   M.modified(m.buf)
   render()

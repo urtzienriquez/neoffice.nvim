@@ -77,6 +77,24 @@ describe("the text", function()
     assert.falsy(line:find("\n"))
   end)
 
+  for action, expected in pairs({ accept = "See *et al.*, 2021; Brown, 2018) here.", reject = "See *et al.*, 2021) here." }) do
+    it("tracks a replacement of text that starts with a mark (" .. action .. ")", function()
+      local path = H.copy("rich.docx")
+      H.open(path)
+      H.set(12, "See *et al.*, 2021) here.")
+      H.save()
+      vim.cmd("Neoffice track on")
+      local r = H.row(12)
+      local s = H.lines()[r]:find("*et al.", 1, true)
+      typed(r - 1, s - 1, r - 1, s - 1 + #"*et al.*, 2021)", "*et al.*, 2021; Brown, 2018)") -- (as ct) does)
+      assert.equals("See *et al.*, 2021)*et al.*, 2021; Brown, 2018) here.", H.paras()[12])
+      H.reopen()
+      assert.equals("See *et al.*, 2021)*et al.*, 2021; Brown, 2018) here.", H.paras()[12])
+      changes.resolve(action, true)
+      assert.equals(expected, H.paras()[12])
+    end)
+  end
+
   it("keeps an escaped ¶ when a deletion of it is rejected", function()
     H.open(H.copy("rich.docx"))
     H.set(12, "See \\¶ 3. Last paragraph.")
@@ -277,6 +295,16 @@ describe("tracked changes", function()
     assert.same({}, owners(r))
   end)
 
+  it("reject a formatting change over a line break", function()
+    local change = '<w:rPrChange w:id="5" w:author="Bob" w:date="2024-01-02T10:00:00Z"><w:rPr/></w:rPrChange>'
+    local path = edit_xml("rich.docx", '<w:r><w:t xml:space="preserve">Last paragraph.</w:t></w:r>',
+      '<w:r><w:rPr><w:b/>' .. change .. '</w:rPr><w:t>Last</w:t><w:br/><w:t xml:space="preserve">paragraph.</w:t></w:r>')
+    H.open(path)
+    assert.equals("**Last**\\\n**paragraph.**", H.paras()[12])
+    changes.resolve("reject", true)
+    assert.equals("Last\\\nparagraph.", H.paras()[12])
+  end)
+
   it("keep another author's deletion without text (a tab) when its paragraph is edited", function()
     local path = edit_xml("rich.docx", '<w:r><w:t xml:space="preserve">inside.</w:t></w:r>',
       '<w:del w:id="7" w:author="Bob" w:date="2024-01-02T10:00:00Z"><w:r><w:tab/></w:r></w:del><w:r><w:t xml:space="preserve">inside.</w:t></w:r>')
@@ -308,7 +336,9 @@ describe("comments", function()
     api.nvim_win_set_cursor(0, { 1, 0 })
     require("neoffice.comments").jump()
     assert.truthy(api.nvim_get_current_line():find("^Commented text"))
+    neo.config.comment_text = true
     local style = require("neoffice.comments").style({ author = "A", text = ("a"):rep(49) .. "ñandú", replies = {} })
+    neo.config.comment_text = false
     assert.is_true(vim.str_utf_pos(style.virt_text[1][1]) ~= nil and vim.fn.strchars(style.virt_text[1][1]) > 0)
     assert.falsy(style.virt_text[1][1]:find("\195$"))
   end)
@@ -438,6 +468,133 @@ describe("the formats", function()
     H.reopen()
     assert.equals("Last edited paragraph.", H.paras()[12])
     assert.equals("Commented! text ", H.paras()[3]) -- ("and more." moved away: gone once accepted)
+  end)
+
+  it("read a deletion inside a move as part of it: accepting both deletes its text once", function()
+    local D = 'w:author="Fernando" w:date="2026-10-26T19:42:00Z"'
+    local path = H.copy("rich.docx", function(entry, text)
+      if entry ~= "word/document.xml" then
+        return text
+      end
+      local n
+      text, n = text:gsub('<w:r><w:t xml:space="preserve">and more.</w:t></w:r>',
+        '<w:moveFrom w:id="80" ' .. D .. '><w:r><w:t xml:space="preserve">and </w:t></w:r>'
+          .. '<w:del w:id="81" ' .. D .. '><w:r><w:delText xml:space="preserve">more</w:delText></w:r></w:del>'
+          .. '</w:moveFrom><w:r><w:t xml:space="preserve">. Kept.</w:t></w:r>', 1)
+      assert(n == 1, "fixture edit didn't apply")
+      return text
+    end)
+    H.open(path)
+    assert.equals(1, #vim.tbl_filter(function(ch) return ch.type == "delete" end, H.changes("Fernando")))
+    assert.equals("Commented text and more. Kept.", H.paras()[3])
+    H.save() -- (unchanged: written back as it was, the deletion inside the move too)
+    assert.truthy(zip.read(path, "word/document.xml"):find('<w:moveFrom w:id="80" ' .. D .. '><w:r><w:t xml:space="preserve">and </w:t></w:r><w:del w:id="81"', 1, true))
+    changes.resolve("accept", true)
+    H.reopen()
+    assert.equals("Commented text . Kept.", H.paras()[3])
+  end)
+
+  for action, expected in pairs({
+    accept = "Commented text ^{13} and *V. aspis*; Vila vipers.",
+    reject = "Commented text ^{14} and *V. aspis*, Vila *V. seoanei*.",
+  }) do
+    it(action .. " all keep the formatting around changes next to formatted text", function()
+      local D = 'w:author="Fernando" w:date="2026-10-26T19:42:00Z"'
+      local SUP, I = '<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>', "<w:rPr><w:i/></w:rPr>"
+      local path = H.copy("rich.docx", function(entry, text)
+        if entry ~= "word/document.xml" then
+          return text
+        end
+        local n
+        text, n = text:gsub('<w:r><w:t xml:space="preserve">and more.</w:t></w:r>', table.concat({
+          "<w:r>" .. SUP .. "<w:t>1</w:t></w:r>", -- (a superscript: one digit inserted, one deleted)
+          '<w:ins w:id="90" ' .. D .. "><w:r>" .. SUP .. "<w:t>3</w:t></w:r></w:ins>",
+          '<w:del w:id="91" ' .. D .. "><w:r>" .. SUP .. "<w:delText>4</w:delText></w:r></w:del>",
+          '<w:r><w:t xml:space="preserve"> and </w:t></w:r><w:r>' .. I .. "<w:t>V. aspis</w:t></w:r>", -- (after italics)
+          '<w:del w:id="92" ' .. D .. '><w:r><w:delText xml:space="preserve">, </w:delText></w:r></w:del>',
+          '<w:ins w:id="93" ' .. D .. '><w:r><w:t xml:space="preserve">; </w:t></w:r></w:ins>',
+          '<w:r><w:t xml:space="preserve">Vila </w:t></w:r>',
+          '<w:del w:id="94" ' .. D .. "><w:r>" .. I .. "<w:delText>V. seoanei</w:delText></w:r></w:del>",
+          '<w:ins w:id="95" ' .. D .. '><w:r><w:rPr><w:rPrChange w:id="96" ' .. D .. ">" .. I -- (italics removed)
+            .. "</w:rPrChange></w:rPr><w:t>vipers</w:t></w:r></w:ins>",
+          "<w:r><w:t>.</w:t></w:r>",
+        }), 1)
+        assert(n == 1, "fixture edit didn't apply")
+        return text
+      end)
+      H.open(path)
+      changes.resolve(action, true)
+      assert.equals(expected, H.paras()[3])
+      H.reopen()
+      assert.equals(expected, H.paras()[3])
+    end)
+  end
+
+  describe("a formatting change of a paragraph mark (not in the text)", function()
+    local D = 'w:author="Fernando" w:date="2026-10-26T19:42:00Z"'
+    local CHANGE = '<w:rPrChange w:id="97" ' .. D .. "><w:rPr><w:i/></w:rPr></w:rPrChange>"
+    local function open()
+      local path = H.copy("rich.docx", function(entry, text)
+        if entry ~= "word/document.xml" then
+          return text
+        end
+        local n
+        text, n = text:gsub('<w:pPr><w:pStyle w:val="BodyText" /></w:pPr><w:r><w:t xml:space="preserve">Last paragraph.',
+          '<w:pPr><w:pStyle w:val="BodyText" /><w:rPr><w:b/>' .. CHANGE .. '</w:rPr></w:pPr><w:r><w:t xml:space="preserve">Last paragraph.', 1)
+        assert(n == 1, "fixture edit didn't apply")
+        return text
+      end)
+      H.open(path)
+      return path
+    end
+    local function mark(path)
+      return zip.read(path, "word/document.xml"):match('<w:pStyle w:val="BodyText" ?/><w:rPr>(.-)</w:rPr></w:pPr><w:r><w:t xml:space="preserve">Last')
+    end
+
+    it("is accepted with all the changes", function()
+      local path = open()
+      changes.resolve("accept", true)
+      H.save()
+      assert.equals("<w:b/>", mark(path))
+    end)
+
+    it("is rejected with all the changes, and with all of its author's", function()
+      local path = open()
+      changes.resolve("reject", true, false, "Fernando")
+      H.save()
+      assert.equals("<w:i/>", mark(path))
+    end)
+
+    it("is left by all of someone else's, and by an accept all undone", function()
+      local path = open()
+      changes.resolve("accept", true, false, "Bob")
+      H.save()
+      assert.equals("<w:b/>" .. CHANGE, mark(path))
+      changes.resolve("accept", true)
+      vim.cmd("silent undo")
+      changes.after_edit(api.nvim_get_current_buf()) -- (what TextChanged does)
+      H.save()
+      assert.truthy(mark(path):find("w:rPrChange", 1, true))
+    end)
+  end)
+
+  it("writes a comment's reference once when a deletion kept in its paragraph holds one", function()
+    local D = 'w:author="Fernando" w:date="2026-10-26T19:42:00Z"'
+    local REF = '<w:r><w:rPr><w:rStyle w:val="CommentReference" /></w:rPr><w:commentReference w:id="0" /></w:r>'
+    local path = H.copy("rich.docx", function(entry, text)
+      if entry ~= "word/document.xml" then
+        return text
+      end
+      local n
+      text, n = text:gsub(vim.pesc(REF), function() return '<w:del w:id="98" ' .. D .. ">" .. REF .. "</w:del>" end, 1)
+      assert(n == 1, "fixture edit didn't apply")
+      return text
+    end)
+    H.open(path)
+    H.replace(3, "and more", "and even more") -- (its paragraph written again)
+    H.save()
+    local _, refs = zip.read(path, "word/document.xml"):gsub("<w:commentReference ", "")
+    assert.equals(1, refs)
   end)
 
   it("save an alt text change of an image that isn't PNG, JPEG or GIF", function()

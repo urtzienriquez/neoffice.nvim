@@ -10,6 +10,7 @@
 -- While tracking is on, your own edits are recorded as changes too (see M.record).
 local markup = require("neoffice.markup")
 local api = vim.api
+local xml = require("neoffice.xml")
 local M = {}
 
 local function neo()
@@ -79,16 +80,18 @@ end
 
 local function capture(buf)
   local doc = neo().docs[buf]
-  return vim.tbl_map(function(m)
+  local state = vim.tbl_map(function(m)
     local ch = doc.change[m[1]]
     return { m[2], m[3], m[4].end_row, m[4].end_col, ch, ch.shown }
   end, marks(buf, 0, -1))
+  state.decisions = vim.deepcopy(doc.mark_decisions or {}) -- (on paragraph marks: see resolve)
+  return state
 end
 
 local function restore(buf, state)
   local doc = neo().docs[buf]
   api.nvim_buf_clear_namespace(buf, neo().ns.change, 0, -1)
-  doc.change = {}
+  doc.change, doc.mark_decisions = {}, vim.deepcopy(state.decisions or {})
   for _, entry in ipairs(state) do
     neo().place(buf, "change", entry[5], entry[1], entry[2], entry[3], entry[4])
     entry[5].shown = entry[6]
@@ -400,7 +403,7 @@ function M.record(buf)
   local edits, area = {}, nil -- (area: the rows edited, when Neovim told where)
   -- Compare the characters before and after the edit (A, B), and record what changed; `stop` is
   -- where the end of B is, for what was deleted after its last character.
-  local function compare(A, B, stop, whole, window_span)
+  local function compare(A, B, stop, whole, window_span, new_first)
     -- an image, equation, footnote... edited inside (alt text, width, LaTeX, note) is the same
     -- object, edited: not a deletion and an insertion (they aren't tracked: see deleted())
     local function same_object(a, b)
@@ -459,7 +462,9 @@ function M.record(buf)
     end
     for _, d in ipairs(hunks) do
       local i, ci, j, cj = unpack(d)
-      local at = B[j] and { B[j][1], B[j][2] } or stop
+      -- (replaced as a whole: what was there goes back where the span starts, before any mark the
+      -- new text opens, like the "*" of "*et al.*": not inside it)
+      local at = whole and window_span and new_first or B[j] and { B[j][1], B[j][2] } or stop
       -- (only line breaks inserted, a blank line or a split paragraph: not recorded, as for deleting them)
       local typed = cj > 0 and join(B, j, j + cj - 1):find("[^\n]")
       -- what was there: all of the span Neovim told (its marks too), or from the first character
@@ -474,7 +479,7 @@ function M.record(buf)
     local lo, suffix = unpack(doc.window)
     local A, old_end, old_first = window(old.lines, lo, suffix)
     local B, new_end, first = window(new, lo, suffix)
-    compare(A, B, new_end, doc.window[3], { old_first, old_end })
+    compare(A, B, new_end, doc.window[3], { old_first, old_end }, first)
     area = { first[1], new_end[1] }
   else -- (or else, where a comparison of the lines finds it)
     for _, h in ipairs(neo().diff(old.lines, new)) do
@@ -655,11 +660,13 @@ local function apply(buf, m, action, a, b)
   if ch.type == "format" then
     local flags, props = ch[action] and ch[action]()
     if flags then -- (.docx only: .odt doesn't keep the formatting from before)
-      neo().set_format(buf, s[1], s[2], e[2], flags, props)
+      for row = s[1], e[1] do -- (each of its lines)
+        neo().set_format(buf, row, row == s[1] and s[2] or 0, row == e[1] and e[2] or math.huge, flags, props)
+      end
       return true
     end
   elseif (action == "accept") == (ch.type == "delete") then -- an accepted deletion, a rejected insertion
-    api.nvim_buf_set_text(buf, a[1], a[2], b[1], b[2], {})
+    neo().cut(buf, a, b)
     local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
     if ch.type == "delete" and a[2] == 0 and lines[a[1] + 1] == "" and (b[1] > a[1] or b[2] > 0) then
       -- all of a paragraph was deleted: the paragraph goes too (with a blank line around it)
@@ -719,15 +726,37 @@ function M.resolve(action, all, use_marks, author)
     end
     return list
   end
-  if not vim.iter(areas):any(function(area) return #changes_in(area) > 0 end) then
+  -- (all of them: the formatting changes of paragraph marks too, which the text doesn't show)
+  local doc, ids = neo().docs[buf], {}
+  if all and doc.fmt.mark_changes then
+    local shown = {}
+    for _, ch in pairs(doc.change) do
+      shown[ch.node and xml.attr(ch.node, "w:id") or false] = true
+    end
+    for _, m in ipairs(doc.fmt.mark_changes(doc.ctx, shown)) do
+      ids[m.id] = (not author or m.author == author) or nil
+    end
+  end
+  if not next(ids) and not vim.iter(areas):any(function(area) return #changes_in(area) > 0 end) then
     return vim.notify("[neoffice] No tracked change here")
+  end
+  if next(ids) then -- (written with the document: see docx.save)
+    doc.mark_decisions = doc.mark_decisions or {}
+    table.insert(doc.mark_decisions, { action = action, ids = ids })
   end
   vim.o.undolevels = vim.o.undolevels -- (each review is an undo step of its own)
   local changed = false
-  for a = #areas, 1, -1 do -- (back to front, so edits don't move what is still to do)
-    local list = changes_in(areas[a])
-    for k = #list, 1, -1 do
-      changed = apply(buf, list[k][1], action, list[k][2], list[k][3]) or changed
+  -- insertions and deletions first, then formatting (whose marks, written around text about to
+  -- go, would move the edges of its change)
+  for _, kinds in ipairs({ { insert = true, delete = true }, { format = true } }) do
+    for a = #areas, 1, -1 do -- (back to front, so edits don't move what is still to do)
+      local list = changes_in(areas[a])
+      for k = #list, 1, -1 do
+        local ch = neo().docs[buf].change[list[k][1][1]]
+        if ch and kinds[ch.type] then
+          changed = apply(buf, list[k][1], action, list[k][2], list[k][3]) or changed
+        end
+      end
     end
   end
   if not changed then -- (still a step of its own, so that u undoes it)

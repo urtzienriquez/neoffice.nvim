@@ -226,6 +226,8 @@ local function read_para(ctx, p)
     local old_flags = flags(old)
     return {
       type = "format", author = xml.attr(el, "w:author") or "?", date = xml.attr(el, "w:date") or "",
+      old_flags = old_flags, -- (the formatting from before: see merge.lua)
+      node = el,
       accept = function()
         xml.remove(el)
       end,
@@ -260,9 +262,9 @@ local function read_para(ctx, p)
     end
     for _, el in ipairs(r.children) do
       local br = (el.tag == "w:br" or el.tag == "w:cr") and (xml.attr(el, "w:type") or "textWrapping")
-      if el.tag == "w:t" or el.tag == "w:tab" then
-        local text = el.tag == "w:t" and xml.text(el) or "\t"
-        if el.tag == "w:t" and xml.attr(el, "xml:space") ~= "preserve" then -- (as Word reads it)
+      if el.tag == "w:t" or el.tag == "w:delText" or el.tag == "w:tab" then -- (deleted text too: see w:del)
+        local text = el.tag ~= "w:tab" and xml.text(el) or "\t"
+        if el.tag ~= "w:tab" and xml.attr(el, "xml:space") ~= "preserve" then -- (as Word reads it)
           text = vim.trim(text)
         end
         add(vim.tbl_extend("force", { text = text, props = r, link = link }, f))
@@ -291,6 +293,7 @@ local function read_para(ctx, p)
     end
   end
 
+  local deleting = false -- (inside a deletion: a deletion in it, as in a move, is part of it)
   local function walk(parent, link)
     local k = 0
     while k < #parent.children do
@@ -330,11 +333,22 @@ local function read_para(ctx, p)
         add({ insert_start = change })
         walk(el, link)
         add({ insert_end = change })
+      elseif (tag == "w:del" or tag == "w:moveFrom") and deleting then
+        walk(el, link)
       elseif tag == "w:del" or tag == "w:moveFrom" then -- (deleted, or moved away)
-        add({ deletion = {
+        local change = {
           type = "delete", node = el, author = xml.attr(el, "w:author") or "?", date = xml.attr(el, "w:date") or "",
           text = xml.text(el), moved = tag == "w:moveFrom" or nil,
-        } })
+        }
+        if change.text ~= "" then -- (its runs as text, formatted, in a range of the deletion)
+          add({ insert_start = change })
+          deleting = true
+          walk(el, link)
+          deleting = false
+          add({ insert_end = change })
+        else -- (a deleted image, tab...: a point)
+          add({ deletion = change })
+        end
       elseif tag == "m:oMath" or tag == "m:oMathPara" then -- an equation (its LaTeX comes later)
         add({ object = el, visible = true, math = { display = tag == "m:oMathPara" } })
         table.insert(ctx.equations, spans[#spans])
@@ -1001,6 +1015,17 @@ end
 function M.fill(ctx, p, block, pieces)
   local ppr = xml.child(p, "w:pPr")
   p.children = {}
+  -- comment references a deletion written back as it was holds (a reference run, deleted): not
+  -- written again for its comment
+  local held = {}
+  for _, piece in ipairs(pieces) do
+    local del = piece.deletion
+    if del and del.node and piece.deleted == del.text then
+      for _, ref in ipairs(xml.collect(del.node, { ["w:commentReference"] = true })) do
+        held[xml.attr(ref, "w:id") or ""] = true
+      end
+    end
+  end
   -- what kind of paragraph it is: a heading or title (by its style), a list item, or plain
   local style = ppr and xml.child(ppr, "w:pStyle")
   local current = style and xml.attr(style, "w:val")
@@ -1113,8 +1138,10 @@ function M.fill(ctx, p, block, pieces)
       if c then
         xml.append(p, xml.elem("w:commentRangeEnd", { { "w:id", comment_id(ctx, c) } }))
         for _, x in ipairs({ c, unpack(c.replies) }) do
-          local ref = xml.elem("w:commentReference", { { "w:id", comment_id(ctx, x) } })
-          xml.append(p, xml.elem("w:r", {}, { ref }))
+          if not held[comment_id(ctx, x)] then
+            local ref = xml.elem("w:commentReference", { { "w:id", comment_id(ctx, x) } })
+            xml.append(p, xml.elem("w:r", {}, { ref }))
+          end
         end
       end
     end
@@ -1237,7 +1264,47 @@ local function save_comments(ctx, live)
   end
 end
 
+-- Formatting changes the text doesn't show (of paragraph marks, of runs inside fields...), so not
+-- changes of their own: accepted or rejected with all the changes (of an author). Those in the
+-- document, but those of `skip` (ids: shown as changes), as { id, author }.
+function M.mark_changes(ctx, skip)
+  local out = {}
+  for _, change in ipairs(xml.collect(ctx.root, { ["w:rPrChange"] = true })) do
+    local id = xml.attr(change, "w:id")
+    if id and not (skip or {})[id] then
+      out[#out + 1] = { id = id, author = xml.attr(change, "w:author") or "?" }
+    end
+  end
+  return out
+end
+
+-- decisions: { action, ids } (the changes there were when it was made), in order: the last one
+-- about a change decides
+local function resolve_marks(ctx, decisions)
+  for _, change in ipairs(#decisions > 0 and xml.collect(ctx.root, { ["w:rPrChange"] = true }) or {}) do
+    local id = xml.attr(change, "w:id")
+    for k = #decisions, 1, -1 do
+      local d = decisions[k]
+      if id and d.ids[id] then
+        local rpr = change.parent
+        if d.action == "reject" then -- (the formatting from before)
+          local old = xml.child(change, "w:rPr")
+          rpr.children = {}
+          for _, c in ipairs(old and old.children or {}) do
+            xml.append(rpr, xml.copy(c))
+          end
+        else
+          xml.remove(change)
+        end
+        ctx.dirty[M.MAIN] = true
+        break
+      end
+    end
+  end
+end
+
 function M.save(ctx, live)
+  resolve_marks(ctx, live.mark_decisions or {})
   save_comments(ctx, live.comments)
   -- footnotes whose reference was deleted go too
   local notes = ctx.dirty[M.MAIN] and part(ctx, FOOTNOTES)

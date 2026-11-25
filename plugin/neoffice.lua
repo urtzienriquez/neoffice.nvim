@@ -72,7 +72,12 @@ local function changes()
   return require("neoffice.changes")
 end
 local SUBCOMMANDS = {
-  comments = function() comments().toggle_panel() end, -- the comments panel
+  comments = function(arg) -- the comments panel; text [on|off]: their text at the end of the line
+    if arg:match("^text") then
+      return comments().text(arg:match("^text%s+(%S+)"))
+    end
+    comments().toggle_panel()
+  end,
   comment = function(_, o) comments().add(o.range > 0) end, -- comment the selection / cursor
   reply = function() comments().reply() end, -- (to the comment under the cursor)
   resolve = function() comments().resolve() end,
@@ -85,8 +90,10 @@ local SUBCOMMANDS = {
   prev = function() changes().jump(-1) end,
   track = function(arg) changes().track(arg ~= "" and arg or nil) end, -- record your edits: on/off
   numbers = function(arg) require("neoffice").numbers(arg ~= "" and arg or nil) end, -- number headings: on/off
+  -- the document's edits into its LaTeX/Rnoweb source (files): a diff view to review them
+  merge = function(arg) require("neoffice.merge").run(vim.tbl_map(vim.fn.expand, vim.split(arg, "%s+", { trimempty = true }))) end,
 }
-local ARGUMENTS = { accept = { "all" }, reject = { "all" }, track = { "on", "off" }, numbers = { "on", "off" } }
+local ARGUMENTS = { accept = { "all" }, reject = { "all" }, track = { "on", "off" }, numbers = { "on", "off" }, comments = { "text" } }
 local NAMES = vim.tbl_keys(SUBCOMMANDS)
 table.sort(NAMES)
 
@@ -109,11 +116,17 @@ end, {
     local words = vim.split(cmdline:sub(1, #cmdline - #lead), "%s+", { trimempty = true })
     local list = #words == 1 and NAMES or ARGUMENTS[words[2]] or {}
     local by_author = (words[2] == "accept" or words[2] == "reject") and words[3] == "all" or words[2] == "changes" and #words == 2
+    if words[2] == "comments" and words[3] == "text" then
+      list = { "on", "off" }
+    end
+    if words[2] == "merge" then -- (source files)
+      return vim.fn.getcompletion(lead, "file")
+    end
     if by_author then -- the authors of the changes (names may have spaces: the rest of the line)
       local typed = cmdline:match("^%s*%S+%s+%S+%s+all%s+(.*)$") or cmdline:match("^%s*%S+%s+changes%s+(.*)$") or lead
       return vim.tbl_filter(function(name) return vim.startswith(name, typed) end, changes().authors())
     end
     return vim.tbl_filter(function(item) return vim.startswith(item, lead) end, list)
   end,
-  desc = "neoffice: comments, comment, reply, resolve, delete, changes [author], accept [all [author]], reject [all [author]], next, prev, track [on|off], numbers [on|off]",
+  desc = "neoffice: comments [text [on|off]], comment, reply, resolve, delete, changes [author], accept [all [author]], reject [all [author]], next, prev, track [on|off], numbers [on|off], merge {files}",
 })

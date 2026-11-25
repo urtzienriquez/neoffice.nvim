@@ -22,6 +22,7 @@ M.config = {
   conceal = false, -- hide the formatting marks (except on the cursor line)
   images = true, -- show images in the buffer (needs Neovim's vim.ui.img and a terminal that supports it)
   lsp = true, -- a language server for documents: headings as symbols (gO), folding, hover on comments
+  comment_text = false, -- each comment's author and text at the end of its line (:Neoffice comments text)
   image_width = 60, -- at most this many columns wide
   image_height = 20, -- and this many lines high
   panel_keys = { -- in the comments panel (false disables one)
@@ -772,22 +773,44 @@ end
 
 -- Give columns [c1, c2) of a line this bold/italic/underline (rewriting its marks) and these
 -- run properties. Used to reject a tracked formatting change.
-function M.set_format(buf, row, c1, c2, flags, props)
-  local line = api.nvim_buf_get_lines(buf, row, row + 1, true)[1]
-  local block, chars = markup.parse(line)
-  local spans = vim.tbl_map(function(c)
-    local inside = c.col >= c1 and c.col < c2
-    local span = { text = c.ch, link = c.link, image = c.image, math = c.math }
+-- The spans that render characters of markup.parse (all they read as), with `flags` changed for
+-- those `inside(c)`.
+local function spans_of(chars, inside, flags)
+  return vim.tbl_map(function(c)
+    local span = { text = c.ch ~= "\n" and c.ch or nil, link = c.link, line_break = c.ch == "\n" or nil,
+      image = c.image, math = c.math, footnote = c.footnote, field = c.field, page_break = c.page_break }
     for _, flag in ipairs(markup.FLAGS) do
       span[flag] = c[flag]
-      if inside and flags[flag] ~= nil then
+      if flags and inside(c) and flags[flag] ~= nil then
         span[flag] = flags[flag]
       end
     end
     return span
   end, chars)
-  local new = markup.render(spans, block)
-  -- replace only what differs, so the marks around it stay where they are
+end
+
+-- Line `row` rewritten as `new`: only the characters that differ are replaced (a mark moved past a
+-- word: the mark, not the word), so the marks around and between them stay where they are.
+-- Returns the columns, in the new line, from the first difference to the last.
+local function rewrite(buf, row, new)
+  local line = api.nvim_buf_get_lines(buf, row, row + 1, true)[1]
+  local function chars(s) -- (its characters, and where each starts)
+    local list, at = {}, {}
+    for pos, ch in s:gmatch("()([^\128-\191][\128-\191]*)") do
+      list[#list + 1], at[#at + 1] = ch, pos - 1
+    end
+    at[#list + 1] = #s
+    return list, at
+  end
+  local old, old_at = chars(line)
+  local list = chars(new)
+  local hunks = vim.diff(table.concat(old, "\n") .. "\n", table.concat(list, "\n") .. "\n", { result_type = "indices" })
+  for k = #hunks, 1, -1 do -- (from the end: the columns before stay right)
+    local a1, an, b1, bn = unpack(hunks[k])
+    local c1 = an > 0 and old_at[a1] or old_at[a1 + 1]
+    local c2 = an > 0 and old_at[a1 + an] or c1
+    api.nvim_buf_set_text(buf, row, c1, row, c2, { table.concat(list, "", b1, b1 + bn - 1) })
+  end
   local p, s = 0, 0
   while p < math.min(#line, #new) and line:byte(p + 1) == new:byte(p + 1) do
     p = p + 1
@@ -795,8 +818,44 @@ function M.set_format(buf, row, c1, c2, flags, props)
   while s < math.min(#line, #new) - p and line:byte(#line - s) == new:byte(#new - s) do
     s = s + 1
   end
-  api.nvim_buf_set_text(buf, row, p, row, #line - s, { new:sub(p + 1, #new - s) })
-  M.place(buf, "run", props, row, p, row, #new - s)
+  return p, #new - s
+end
+
+function M.set_format(buf, row, c1, c2, flags, props)
+  local line = api.nvim_buf_get_lines(buf, row, row + 1, true)[1]
+  local block, chars = markup.parse(line)
+  local new = markup.render(spans_of(chars, function(c) return c.col >= c1 and c.col < c2 end, flags), block)
+  local p, e = rewrite(buf, row, new)
+  M.place(buf, "run", props, row, p, row, e)
+end
+
+-- Delete the text from a to b ({ row, col }, b excluded) keeping the rest as it reads: a mark it
+-- shares with the text around (the "^{" of "^{3" in "^{34}", when "4}" goes) stays.
+function M.cut(buf, a, b)
+  local expected
+  if a[1] == b[1] then
+    local _, chars = markup.parse(api.nvim_buf_get_lines(buf, a[1], a[1] + 1, true)[1])
+    expected = vim.tbl_filter(function(c) return c.col < a[2] or c.col >= b[2] end, chars)
+  end
+  api.nvim_buf_set_text(buf, a[1], a[2], b[1], b[2], {})
+  if not expected then
+    return
+  end
+  local block, now = markup.parse(api.nvim_buf_get_lines(buf, a[1], a[1] + 1, true)[1])
+  local function reads(c) -- (all of a character that the text shows)
+    local key = { c.ch, c.link or "" }
+    for _, flag in ipairs(markup.FLAGS) do
+      key[#key + 1] = c[flag] and flag or ""
+    end
+    return table.concat(key, "\0")
+  end
+  local same = #now == #expected
+  for k = 1, same and #now or 0 do
+    same = same and reads(now[k]) == reads(expected[k])
+  end
+  if not same then
+    rewrite(buf, a[1], markup.render(spans_of(expected), block))
+  end
 end
 
 -- ── Save ────────────────────────────────────────────────────────────────────
@@ -1150,7 +1209,7 @@ function M.save(buf, target)
     end
 
     -- 3. Write the parts that changed (nothing at all if nothing did).
-    local live = { comments = vim.tbl_values(doc.comment), changes = {} }
+    local live = { comments = vim.tbl_values(doc.comment), changes = {}, mark_decisions = doc.mark_decisions }
     for _, ch in pairs(doc.change) do
       live.changes[ch] = true
     end

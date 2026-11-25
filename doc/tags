@@ -16,6 +16,9 @@ neoffice-images	neoffice.txt	/*neoffice-images*
 neoffice-keymaps	neoffice.txt	/*neoffice-keymaps*
 neoffice-lsp	neoffice.txt	/*neoffice-lsp*
 neoffice-marks	neoffice.txt	/*neoffice-marks*
+neoffice-merge	neoffice.txt	/*neoffice-merge*
+neoffice-merge-export	neoffice.txt	/*neoffice-merge-export*
+neoffice-merge-sources	neoffice.txt	/*neoffice-merge-sources*
 neoffice-options	neoffice.txt	/*neoffice-options*
 neoffice-safety	neoffice.txt	/*neoffice-safety*
 neoffice-tables	neoffice.txt	/*neoffice-tables*

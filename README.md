@@ -22,14 +22,17 @@ else in the file stays exactly as it was.
   someone's), and your own edits tracked. Undo works.
 - A built-in language server: headings as symbols (`gO`, pickers, outlines), sections as folds,
   hover on comments and changes.
+- Back to LaTeX: after any number of review rounds of a Word file made from LaTeX or Rnoweb, the
+  edits merged into your source in a diff view, with citations looked up in your `.bib`.
 
 One command, `:Neoffice` (alone, it lets you pick):
 
-- `:Neoffice comments` — the comments panel; `comment`, `reply`, `resolve`, `delete`
+- `:Neoffice comments` — the comments panel (`comments text` shows them at the end of their lines); `comment`, `reply`, `resolve`, `delete`
 - `:Neoffice track [on|off]` — record your edits as tracked changes
 - `:Neoffice accept|reject [all [author]]` — the change at the cursor, the selection, or all
 - `:Neoffice next|prev` — jump between changes; `:Neoffice changes [author]` lists them
 - `:Neoffice numbers [on|off]` — number the headings
+- `:Neoffice merge [source]` — bring the document's edits back into its LaTeX source
 
 No keymaps are set. See `:help neoffice`.
 
@@ -54,6 +57,7 @@ require("neoffice").setup({
   track_changes = nil, -- true/false: always/never track your edits (default: as the document says)
   conceal = false, -- hide the marks
   images = true, -- show images
+  comment_text = false, -- each comment's text at the end of its line (or :Neoffice comments text)
 })
 vim.api.nvim_create_autocmd("FileType", {
   pattern = "neoffice",

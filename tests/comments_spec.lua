@@ -255,3 +255,40 @@ describe("the comments panel", function()
     assert.truthy(line():find("Alice"))
   end)
 end)
+
+describe("a comment's text at the end of its line", function()
+  local function texts()
+    local out = {}
+    for _, m in ipairs(api.nvim_buf_get_extmarks(0, neo.ns.comment, 0, -1, { details = true })) do
+      out[#out + 1] = m[4].virt_text and m[4].virt_text[1][1] or false
+    end
+    return out
+  end
+
+  after_each(function() neo.config.comment_text = false end)
+
+  it("isn't shown by default (the comment is underlined, with a sign)", function()
+    H.open(H.copy("rich.docx"))
+    assert.same({ false }, texts())
+    local m = api.nvim_buf_get_extmarks(0, neo.ns.comment, 0, -1, { details = true })[1]
+    assert.equals("NeofficeComment", m[4].hl_group)
+    assert.truthy(m[4].sign_text)
+  end)
+
+  it("is shown with :Neoffice comments text on, hidden with off, toggled without either", function()
+    H.open(H.copy("rich.docx"))
+    vim.cmd("Neoffice comments text on")
+    assert.truthy(texts()[1] and texts()[1]:find("Alice: A comment", 1, true))
+    vim.cmd("Neoffice comments text off")
+    assert.same({ false }, texts())
+    vim.cmd("Neoffice comments text")
+    assert.truthy(texts()[1])
+    assert.same({ "on", "off" }, vim.fn.getcompletion("Neoffice comments text ", "cmdline"))
+  end)
+
+  it("is shown in documents opened after setup({ comment_text = true })", function()
+    neo.setup({ comment_text = true })
+    H.open(H.copy("rich.docx"))
+    assert.truthy(texts()[1])
+  end)
+end)

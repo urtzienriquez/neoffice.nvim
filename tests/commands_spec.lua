@@ -8,7 +8,7 @@ describe(":Neoffice", function()
     assert.same({ "accept" }, vim.fn.getcompletion("Neoffice acc", "cmdline"))
     assert.same({ "on", "off" }, vim.fn.getcompletion("Neoffice track ", "cmdline"))
     assert.same({ "all" }, vim.fn.getcompletion("Neoffice reject ", "cmdline"))
-    assert.equals(12, #vim.fn.getcompletion("Neoffice ", "cmdline"))
+    assert.equals(13, #vim.fn.getcompletion("Neoffice ", "cmdline"))
   end)
 
   it("runs subcommands", function()
