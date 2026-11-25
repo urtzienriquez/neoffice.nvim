@@ -261,97 +261,25 @@ install), attached to each document as `neoffice`. It answers:
 `lsp = false` (|neoffice-options|) turns it off.
 
 ==============================================================================
-BACK TO LATEX                                                 *neoffice-merge*
+FOR OTHER PLUGINS                                              *neoffice-read*
 
-If you write in LaTeX (or Rnoweb, knitr's .Rnw) and send collaborators a Word
-file made from it (with pandoc, say), :Neoffice merge brings their revisions
-back into your source, when the review is over: >
+`require("neoffice.read")` reads documents for other plugins (manuscript.nvim
+brings a revised document back into its LaTeX sources with it). It is kept
+stable; its `version` field changes if it doesn't.
 
-  1. export        main.Rnw → main.docx (keep it where it is), send it
-  2. review        rounds of edits and comments, in Word or in neoffice:
-                   accept, reject, comment, send back... as you like
-  3. merge         open the last .docx, wherever it is, and :Neoffice merge
-<
-Nothing is written. Each source file the document changes opens in a new tab,
-in a |diff| view: on the left what it would be with the document's edits, and
-your file on the right (as in vim-fugitive). In your file, take the ones you
-want with |do| (|]c| goes to the next one) and write it. The |quickfix| list
-has every edit ("change: old → new", "add:", "delete:"), the comments, and
-anything that needs your eyes, at their line in the source; its title says
-how many. It follows your file: an edit you take (or make yourself) leaves
-it a moment later. Its items open where their file is shown already (<CR>,
-|:cnext|...): yours on the right, the proposal on the left; so the diff stays
-as it is. Those about paragraphs only the document has (the title page...)
-come last, and open the document in its tab. (While a merge tab is open,
-'switchbuf' is "useopen,usetab,newtab"; yours again when it is closed.)
+  read.is_document({buf})   whether {buf} is a document opened by neoffice
+  read.path({buf})          its file
+  read.has_changes({buf})   whether it has tracked changes
+  read.paragraphs({buf})    its paragraphs (see below)
+  read.file({path})         the paragraphs of a document file, read in a
+                            hidden buffer (nil and the error if it can't be)
+  read.diff({a}, {b})       hunks between two lists of strings
 
-Running it again is safe, and it reads your source as it is in Nvim, with
-what you took and haven't written yet: what your source has already is left
-alone, and its tab shows only the rest. So you can fix the .bib, say, and run
-it again in the middle of a review.
-
-Where the sources are ~
-                                                      *neoffice-merge-sources*
->vim
-  :Neoffice merge                       " found (see below)
-  :Neoffice merge ~/papers/vipers/      " the .Rnw (or .tex) files there
-  :Neoffice merge main.Rnw appendix.Rnw " these
-<
-With no arguments: the .Rnw files of the current folder (or else its .tex
-files); if there are none, the manuscript it merged into before that has this
-document's text; if none does, it asks (with completion). So a document in
-Downloads finds its manuscript after the first time.
-
-What the document was ~
-                                                       *neoffice-merge-export*
-To tell the edits from what the export writes (citations, computed values,
-references...), the merge compares the document with the export it was made
-from: a .docx (or .odt) with no tracked changes in the sources' folder or the
-folders in it (where your export tool writes it, `toword/main.docx` say),
-like this document, and of those the most like your source. Keep it there
-until you merge; a copy named `*.sent.docx` beside the document works too,
-and so does giving it: >vim
-
-  :Neoffice merge ~/papers/vipers/ old/main.docx
-<
-With it, every edit of every round is found: tracked or not, accepted,
-rejected, yours or theirs, whole paragraphs added or deleted. Without it,
-the document's text as sent is its text with all tracked changes rejected,
-so only the edits still tracked are found (and it says so).
-
-If you change the source and export again during a review, the new export no
-longer is what the document was made from: merge the review first.
-
-How it works ~
-Each paragraph of the document is paired with the paragraph of the source
-with the most words in common (a short one, like a heading, only in the file
-of the paragraphs around it). Where the document and the export differ, the
-source changes, written as LaTeX: italics as `\emph{}`, bold as `\textbf{}`,
-special characters escaped. Your line wrapping, `%` comments and everything
-around the edits stay as they are.
-
-- A citation from which a reference was removed is rebuilt with the keys that
-  are left (`\parencite{a,b}` → `\parencite{a}`).
-- A citation typed in the document, like "(Smith & Lee, 2020; Kim et al.,
-  2021)", is looked up in the .bib files (the `\addbibresource{}` of the
-  sources, and those in their folders) by first author, year and number of
-  authors. One it can't find, or can't tell apart, stays as text, and its
-  item in the quickfix list goes to it in the proposal: replace it there with
-  your citation picker (citeref.nvim, for example: it works in the proposal,
-  which has your source's filetype), then take it with |do|. A reference
-  missing from your library: add it (zotero.nvim, with Better BibTeX keeping
-  the .bib up to date) and run :Neoffice merge again.
-- A computed value (`\Sexpr{}`), a reference, a unit or a formula edited in
-  the document is kept as it is, and listed. Deleted with the text around it,
-  it goes with it.
-- Unresolved comments are listed at their line in the source (resolved ones
-  were dealt with during the review).
-- If your source changed since the export, where the document changed it
-  too, your text is kept and the place is listed as a conflict.
-- A paragraph the document added goes after the one before it; one it deleted
-  is deleted; both are listed. Paragraphs not found in the source (tables or
-  text written by R, the title page, the reference list) are listed when they
-  changed.
+A paragraph is { first, last, text, sent, revised, comments }: its buffer
+lines and text; its characters as they were before its tracked changes (all
+rejected, with the formatting from before formatting changes) and with them
+(all accepted), each { ch, b, i, u, s, h, sup, sub, link, ... }; and its
+comments, { author, text, resolved, replies = { { author, text }, ... } }.
 
 ==============================================================================
 COMMANDS                                                         *:Neoffice*
@@ -383,11 +311,6 @@ Everything is a subcommand of :Neoffice. Alone, it lets you pick one.
                                 heading styles (toggles). The numbers are
                                 shown before the headings, but aren't part of
                                 the text.
-:Neoffice merge [{source} ...] [{export}]
-                                Bring the document's edits back into the
-                                LaTeX or Rnoweb files it was made from (files
-                                or folders; found when not given), in a diff
-                                view (|neoffice-merge|).
 
 <Tab> completes the subcommands and the authors' names.
 
@@ -419,7 +342,6 @@ there. For example, all under <leader>w: >lua
       map("N", "reject all", "Reject all changes")
       map("l", "changes", "List changes")
       map("h", "numbers", "Heading numbers on/off")
-      map("m", "merge", "Merge into the LaTeX source")
     end,
   })
 <

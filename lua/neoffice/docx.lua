@@ -226,7 +226,7 @@ local function read_para(ctx, p)
     local old_flags = flags(old)
     return {
       type = "format", author = xml.attr(el, "w:author") or "?", date = xml.attr(el, "w:date") or "",
-      old_flags = old_flags, -- (the formatting from before: see merge.lua)
+      old_flags = old_flags, -- (the formatting from before: see read.lua)
       node = el,
       accept = function()
         xml.remove(el)

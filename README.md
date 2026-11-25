@@ -22,8 +22,6 @@ else in the file stays exactly as it was.
   someone's), and your own edits tracked. Undo works.
 - A built-in language server: headings as symbols (`gO`, pickers, outlines), sections as folds,
   hover on comments and changes.
-- Back to LaTeX: after any number of review rounds of a Word file made from LaTeX or Rnoweb, the
-  edits merged into your source in a diff view, with citations looked up in your `.bib`.
 
 One command, `:Neoffice` (alone, it lets you pick):
 
@@ -32,9 +30,11 @@ One command, `:Neoffice` (alone, it lets you pick):
 - `:Neoffice accept|reject [all [author]]` — the change at the cursor, the selection, or all
 - `:Neoffice next|prev` — jump between changes; `:Neoffice changes [author]` lists them
 - `:Neoffice numbers [on|off]` — number the headings
-- `:Neoffice merge [source]` — bring the document's edits back into its LaTeX source
 
 No keymaps are set. See `:help neoffice`.
+
+Writing in LaTeX or Rnoweb? [manuscript.nvim](https://github.com/urtzienriquez/manuscript.nvim)
+exports your manuscript to Word, and brings your collaborators' revisions back into your sources.
 
 ## Requirements
 
