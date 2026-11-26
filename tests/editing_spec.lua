@@ -258,3 +258,56 @@ describe("titles", function()
     end)
   end
 end)
+
+describe("a new paragraph", function()
+  -- a paragraph whose font and size are set on its text (as Word and LibreOffice often do), first
+  local SIZED = {
+    docx = function(name, text)
+      if name ~= "word/document.xml" then
+        return text
+      end
+      local p = '<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="22"/></w:rPr>'
+        .. '<w:t>Sized text.</w:t></w:r></w:p>'
+      return (text:gsub("<w:body>", "<w:body>" .. p, 1))
+    end,
+    odt = function(name, text)
+      if name ~= "content.xml" then
+        return text
+      end
+      local style = '<style:style style:name="Sized" style:family="text"><style:text-properties style:font-name="Times New Roman" fo:font-size="11pt"/></style:style>'
+      return (text:gsub("<office:automatic%-styles>", "%0" .. style, 1):gsub("<office:text>", "%0<text:p><text:span text:style-name=\"Sized\">Sized text.</text:span></text:p>", 1))
+    end,
+  }
+  for _, ext in ipairs({ "docx", "odt" }) do
+    it("goes on with the font and size of the paragraph before it (" .. ext .. ")", function()
+      local path = H.copy("rich." .. ext, SIZED[ext])
+      H.open(path)
+      assert.equals("Sized text.", H.paras()[1])
+      local r = H.row(1)
+      vim.api.nvim_buf_set_lines(0, r, r, false, { "", "Typed **after** it." })
+      H.reopen()
+      assert.equals("Typed **after** it.", H.paras()[2])
+      local main = zip.read(path, H.MAIN[ext])
+      local new = main:match(ext == "docx" and "<w:p>.-Typed .-</w:p>" or "<text:p[^>]*>[^\n]-Typed .-</text:p>")
+      if ext == "docx" then
+        assert.truthy(new:find('<w:sz w:val="22"/>', 1, true), new)
+        assert.truthy(new:find('w:ascii="Times New Roman"', 1, true), new)
+        assert.truthy(new:find("<w:b/>", 1, true), new) -- (and bold where it says so)
+      else
+        local names = {}
+        for name in new:gmatch('text:style%-name="([^"]+)"') do
+          names[#names + 1] = name
+        end
+        local checked = 0
+        for _, name in ipairs(names) do
+          local style = main:match('<style:style style:name="' .. vim.pesc(name) .. '".-</style:style>')
+          if style and style:find('family="text"', 1, true) then
+            assert.truthy(style:find('fo:font-size="11pt"', 1, true), style)
+            checked = checked + 1
+          end
+        end
+        assert.is_true(checked >= 2, new) -- (its text, and its bold word)
+      end
+    end)
+  end
+end)

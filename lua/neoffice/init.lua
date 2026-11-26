@@ -235,6 +235,44 @@ end
 
 -- Cut a paragraph into pieces: text with uniform formatting, objects, images, and comment/change
 -- markers. Reads the buffer and its marks only.
+-- The run properties for the text of a new paragraph (which has none): those of most of the text
+-- of the nearest paragraph above it (else below) of the same kind (a heading's of a heading's...),
+-- as a paragraph typed in Word or LibreOffice goes on with the formatting of the one before it
+-- (its font and size, often set on the text rather than in a style). nil if there is none.
+local function neighbour_props(buf, para, block)
+  local doc = M.docs[buf]
+  local function kind(b)
+    return table.concat({ tostring(b.heading or false), tostring(b.title or false), tostring(b.list and true or false),
+      tostring(b.quote or false), tostring(b.caption or false) }, "|")
+  end
+  local want = kind(block)
+  local last = api.nvim_buf_line_count(buf) - 1
+  for _, dir in ipairs({ -1, 1 }) do
+    local from = dir < 0 and { para.first - 2, -1 } or { para.owns, 0 }
+    while from[1] >= 0 and from[1] <= last do
+      local found = api.nvim_buf_get_extmarks(buf, M.ns.run, from, dir < 0 and 0 or -1, { limit = 1 })[1]
+      if not found then
+        break
+      end
+      local row = found[2]
+      local line = api.nvim_buf_get_lines(buf, row, row + 1, true)[1]
+      if kind((markup.block(line))) == want then
+        local best, size
+        for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.run, { row, 0 }, { row, -1 }, { details = true })) do
+          local len = (m[4].end_row == row and m[4].end_col or #line) - m[3]
+          if doc.run[m[1]] and (not size or len > size) then
+            best, size = doc.run[m[1]], len
+          end
+        end
+        if best then
+          return best
+        end
+      end
+      from = dir < 0 and { row - 1, -1 } or { row + 1, 0 }
+    end
+  end
+end
+
 local function pieces(buf, para)
   local doc = M.docs[buf]
   local block, chars = markup.parse(para.text)
@@ -378,6 +416,9 @@ local function pieces(buf, para)
 
   local out, e, parts = {}, 1, {} -- (parts: how many pieces of each deletion so far)
   local props = runs[1] and doc.run[runs[1][1]] -- text before the first run takes its properties
+  if not props and not para.cell then -- (a new paragraph: its text as the paragraph next to it's)
+    props = neighbour_props(buf, para, block)
+  end
   for k = 1, #chars + 1 do
     while events[e] and events[e][1] == k do
       out[#out + 1], e = events[e][4], e + 1
