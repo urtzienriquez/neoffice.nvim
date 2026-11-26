@@ -1026,13 +1026,23 @@ local function style_for(ctx, piece, base, inherit)
   local paras, fonts = require("neoffice.paras"), {}
   local own = M.run_font(ctx, chain)
   base, inherit = base or {}, inherit or base or {}
+  -- (none of its own, where only its own automatic style gives one: taken out of it, not said)
+  local inner_el = inner and ctx.styles[inner]
+  local without = inner_el and inner_el.parent == ctx.auto
+    and M.run_font(ctx, vim.list_extend(vim.list_slice(outer), { xml.attr(inner_el, "style:parent-style-name") }))
   for _, key in ipairs({ "font", "size" }) do
     local want = piece[key]
     if want ~= nil and paras.measure(key, want or base[key]) ~= paras.measure(key, own[key] or inherit[key] or base[key]) then
-      fonts[key] = want or base[key] or false
+      if want then
+        fonts[key] = want
+      elseif without and without[key] == nil and own[key] then
+        fonts[key] = false -- (taken out)
+      else
+        fonts[key] = base[key] or false
+      end
     end
   end
-  if vim.iter(FLAGS):all(function(k) return have[k] == piece[k] end) and not fonts.font and not fonts.size then
+  if vim.iter(FLAGS):all(function(k) return have[k] == piece[k] end) and fonts.font == nil and fonts.size == nil then -- (false: to take out)
     return chain
   end
   local key = table.concat(vim.tbl_map(function(k) return tostring(piece[k]) end, FLAGS), "|") .. "|" .. (inner or "")

@@ -311,7 +311,11 @@ Edit the cells' text, add a row by adding a line, delete a row by deleting its
 line, and add or remove a column by adding or removing a cell in every row.
 New rows and cells are formatted like the ones next to them (a row pasted:
 its text as its column's in the row above, whatever the style says; a new
-table's, as the text near it); those you don't touch keep their exact XML. To make a new table, type one, with a blank line
+table's, as the text near it); those you don't touch keep their exact XML.
+A cell says the font and size of its text, in braces at its start, when they
+aren't what most of its table's text has (`| {size = 7pt} Some text |`):
+write them to change them, delete them for its table's again (the language
+server completes them). Nothing else of a paragraph's format goes in a cell. To make a new table, type one, with a blank line
 before and after it. Cells merged across columns show as one cell (those rows
 have fewer cells), and a line break inside a cell shows as `￼`. Such a row
 keeps its merged cells: empty cells added after them (as a formatter may add

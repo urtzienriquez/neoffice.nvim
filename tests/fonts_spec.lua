@@ -268,3 +268,64 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
   end)
 end
+
+for _, ext in ipairs({ "docx", "odt" }) do
+  describe(ext .. " a table cell's font and size", function()
+    local path, r
+    before_each(function()
+      path = H.copy("rich." .. ext, TABLED[ext])
+      H.open(path)
+      r = vim.iter(ipairs(H.lines())):find(function(_, l) return l:find("^| 2016") end)
+      assert.truthy(r)
+    end)
+    local function size_of(text) -- (of the text written in the cell)
+      local main = zip.read(path, H.MAIN[ext])
+      if ext == "docx" then
+        local before = main:sub(1, main:find(">" .. text .. "<", 1, true))
+        return before:sub(before:match(".*()<w:r>")):match('<w:sz w:val="(%d+)"')
+      end
+      local span = main:match('<text:span text:style%-name="([^"]+)">' .. text .. "</text:span>")
+      local style = span and main:match('<style:style style:name="' .. span:gsub("%p", "%%%0") .. '".-</style:style>')
+      return style and style:match('fo:font%-size="([%d.]+)pt"')
+    end
+
+    it("is said in braces when it isn't its table's, written so, and its table's again when they are deleted", function()
+      assert.is_nil(H.lines()[r]:find("{", 1, true)) -- (as its table: nothing to say)
+      api.nvim_buf_set_text(0, r - 1, 2, r - 1, 2, { "{size = 7pt} " })
+      H.reopen()
+      assert.truthy(H.lines()[r]:find("| {size = 7pt} 2016", 1, true), H.lines()[r])
+      assert.equals(ext == "docx" and "14" or "7", size_of("2016"))
+      local s, e = H.lines()[r]:find("{size = 7pt} ", 1, true)
+      api.nvim_buf_set_text(0, r - 1, s - 1, r - 1, e, { "" })
+      H.reopen()
+      assert.is_nil(H.lines()[r]:find("{", 1, true), H.lines()[r])
+      assert.is_nil(size_of("2016"))
+      assert.truthy(zip.read(path, H.MAIN[ext]):find("Courier New", 1, true)) -- (its font: as it was)
+    end)
+
+    it("doesn't take a paragraph's other attributes: the save says so and changes nothing", function()
+      local before = H.bytes(path)
+      local errors = {}
+      local notify = vim.notify
+      vim.notify = function(msg) errors[#errors + 1] = msg end
+      api.nvim_buf_set_text(0, r - 1, 2, r - 1, 2, { "{after = 6pt} " })
+      H.save()
+      vim.notify = notify
+      assert.equals(before, H.bytes(path))
+      assert.truthy(table.concat(errors, "\n"):find("only the font and size", 1, true))
+    end)
+
+    it("completes them in braces at a cell's start", function()
+      local buf = api.nvim_get_current_buf()
+      assert(vim.wait(2000, function() return #vim.lsp.get_clients({ bufnr = buf, name = "neoffice_ls" }) > 0 end))
+      api.nvim_buf_set_text(0, r - 1, 2, r - 1, 2, { "{" })
+      local params = { textDocument = { uri = vim.uri_from_bufnr(buf) }, position = { line = r - 1, character = 3 } }
+      local items = {}
+      for _, res in pairs(vim.lsp.buf_request_sync(buf, "textDocument/completion", params, 2000) or {}) do
+        items = res.result and (res.result.items or res.result) or items
+      end
+      local labels = vim.tbl_map(function(i) return i.label end, items)
+      assert.truthy(vim.tbl_contains(labels, "size = 11pt"), vim.inspect(labels))
+    end)
+  end)
+end

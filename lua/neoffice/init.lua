@@ -364,6 +364,66 @@ local function cell_props(buf, para)
   end
 end
 
+-- The font and size of most of a table's text (each its run's own, or false: its style's), as the
+-- buffer's marks say: what a cell's text has where it says nothing ("{size = 7pt}" in a cell says it).
+-- nil for a key if no text in it has a run (a new table).
+local function table_fonts(buf, para)
+  local doc = M.docs[buf]
+  local key = api.nvim_buf_get_changedtick(buf) .. ":" .. para.cell.table
+  doc.table_fonts = doc.table_fonts or {}
+  if doc.table_fonts.tick ~= api.nvim_buf_get_changedtick(buf) then
+    doc.table_fonts = { tick = api.nvim_buf_get_changedtick(buf) }
+  end
+  if doc.table_fonts[key] then
+    return doc.table_fonts[key]
+  end
+  local own_of, known = doc.fmt.run_font or function() return {} end, {}
+  local weight, order = {}, {}
+  for _, k in ipairs(markup.SPAN_KEYS) do
+    weight[k], order[k] = {}, {}
+  end
+  local last, r = api.nvim_buf_line_count(buf) - 1, para.cell.table - 1
+  while r <= last do
+    local line = api.nvim_buf_get_lines(buf, r, r + 1, true)[1]
+    if not line:match("^|") then
+      break
+    end
+    for _, sp in ipairs(not markup.table_format(line) and markup.cell_spans(line) or {}) do
+      for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.run, { r, sp.s - 1 }, { r, sp.e }, { details = true, overlap = true })) do
+        local props = doc.run[m[1]]
+        local s = math.max(m[3], sp.s - 1)
+        local e = m[4].end_row == r and math.min(m[4].end_col, sp.e) or sp.e
+        if props and e > s then
+          known[props] = known[props] or own_of(doc.ctx, props)
+          for _, k in ipairs(markup.SPAN_KEYS) do
+            local v = known[props][k] or false
+            local measure = v and (pformat.measure(k, v) or v) or false
+            if not weight[k][measure] then
+              order[k][#order[k] + 1], weight[k][measure] = measure, { n = 0, v = v }
+            end
+            weight[k][measure].n = weight[k][measure].n + e - s
+          end
+        end
+      end
+    end
+    r = r + 1
+  end
+  local out = {}
+  for _, k in ipairs(markup.SPAN_KEYS) do
+    local best
+    for _, m in ipairs(order[k]) do
+      if best == nil or weight[k][m].n > weight[k][best].n then -- (false, its style's, is a value)
+        best = m
+      end
+    end
+    if best ~= nil then
+      out[k] = weight[k][best].v
+    end
+  end
+  doc.table_fonts[key] = out
+  return out
+end
+
 -- (new: a paragraph the document hasn't yet, whose text takes the formatting of the one next to it)
 local function pieces(buf, para, new)
   local doc = M.docs[buf]
@@ -375,6 +435,14 @@ local function pieces(buf, para, new)
   end
   if para.cell and not block.align and para.cell.align ~= "left" then -- (its column's, unless it has its own)
     block.align = para.cell.align
+  end
+  local cell_own -- (a cell's: its text's font and size of its own, against its table's; nothing else)
+  if para.cell then
+    assert(not block.para_bad, block.para_bad)
+    for k in pairs(block.para or {}) do
+      assert(k == "font" or k == "size", ("in a table cell, only the font and size of its text can be given: %s"):format(k))
+    end
+    cell_own = block.para
   end
   if plain(block) and not para.cell and not para.box then -- its format: its run's, and what it says (see paras.lua)
     local format = pformat.apply(para.format or { attrs = {} }, block.align, block.para)
@@ -539,9 +607,14 @@ local function pieces(buf, para, new)
     known[props] = known[props] or own_of(doc.ctx, props)
     return known[props]
   end
+  local in_table = para.cell and table_fonts(buf, para)
   for _, key in ipairs(markup.SPAN_KEYS) do
     if block.para then -- (none: its style's)
       fonts[key] = block.para[key] or false
+    elseif cell_own and cell_own[key] then -- (a cell's own)
+      fonts[key] = cell_own[key]
+    elseif in_table and in_table[key] ~= nil and (not new or runs[1]) then -- (else its table's; a pasted row's: its column's, see cell_props)
+      fonts[key] = in_table[key]
     else
       local weight, order, at, props_now = {}, {}, walker(runs), runs[1] and doc.run[runs[1][1]] or inherited
       for _, ch in ipairs(chars) do
@@ -1220,6 +1293,66 @@ local function open(buf, path)
         b.align, b.para = nil, nil
       else
         b.align, b.para = pformat.diff(run, own)
+      end
+    end
+  end
+  -- a cell's font and size, when they aren't what most of its table's text has: "{size = 7pt} ..."
+  do
+    local function weigh(list, out)
+      for _, para in ipairs(list) do
+        for _, s in ipairs(para.spans) do
+          if s.text and s.text ~= "" and not s.deletion and not (s.image or s.math or s.footnote or s.field) then
+            for _, key in ipairs(markup.SPAN_KEYS) do
+              local v = s["run_" .. key] or false
+              local m = v and (pformat.measure(key, v) or v) or false
+              out[key] = out[key] or { order = {}, n = {}, v = {} }
+              if not out[key].n[m] then
+                table.insert(out[key].order, m)
+                out[key].n[m], out[key].v[m] = 0, v
+              end
+              out[key].n[m] = out[key].n[m] + #s.text
+            end
+          end
+        end
+      end
+      local main = {}
+      for key, w in pairs(out) do
+        local best
+        for _, m in ipairs(w.order) do
+          if best == nil or w.n[m] > w.n[best] then
+            best = m
+          end
+        end
+        main[key] = { m = best, v = w.v[best] }
+      end
+      return main
+    end
+    local of_table = {}
+    for k, para in ipairs(paras) do
+      if cells[k] then
+        of_table[cells[k].tbl] = of_table[cells[k].tbl] or {}
+        table.insert(of_table[cells[k].tbl], para)
+      end
+    end
+    local mains = {}
+    for tbl, list in pairs(of_table) do
+      mains[tbl] = weigh(list, {})
+    end
+    for k, para in ipairs(paras) do
+      if cells[k] then
+        local tmain, own = mains[cells[k].tbl], weigh({ para }, {})
+        local b = para.block
+        for _, key in ipairs(markup.SPAN_KEYS) do
+          local t, c = tmain[key], own[key]
+          if t and c and c.m ~= t.m then
+            local base = b.font_inherit or b.font_base or {}
+            local shown = c.v or base[key]
+            if shown then
+              b.para = b.para or {}
+              b.para[key] = shown
+            end
+          end
+        end
       end
     end
   end

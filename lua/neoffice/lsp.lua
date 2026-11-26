@@ -366,7 +366,8 @@ local function completion(buf, pos)
     pbraces = before:match("^{([^}]*)$")
   end
   pbraces = pbraces or hbraces
-  local sbraces = not pbraces and before:match("%]{([^}]*)$")
+  -- (a span's attributes, "[words]{...", or a table cell's, "| {..." / "| <|> {...": its text's font and size)
+  local sbraces = not pbraces and (before:match("%]{([^}]*)$") or before:match("^|.*|%s*[<>|=%-]*%s*{([^}]*)$") or before:match("^|%s*[<>|=%-]*%s*{([^}]*)$"))
   if pbraces or sbraces then
     local pf = require("neoffice.paras")
     local used = {}
