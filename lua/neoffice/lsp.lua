@@ -192,6 +192,15 @@ local function attribute_diagnostics(buf)
   -- the styles at the top: each line right, and a style the document has
   local header = markup.header(lines)
   local doc = neo().docs[buf]
+  if header and header.page and header.page.bad then -- (the page's settings, and each section's)
+    add(header.page.row, 0, #lines[header.page.row], vim.lsp.protocol.DiagnosticSeverity.Error, header.page.bad)
+  end
+  for r, line in ipairs(lines) do
+    local sec = line:find("^\\newpage%s*{") and markup.section_line(line)
+    if sec and sec.bad then
+      add(r, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Error, sec.bad)
+    end
+  end
   for _, st in ipairs(header and header.styles or {}) do
     local line = lines[st.row]
     if st.bad then
@@ -310,6 +319,38 @@ local function completion(buf, pos)
     for _, name in ipairs(doc.fmt.paragraph_styles(doc.ctx)) do
       if not listed[name:lower()] then
         add(name, #before - #typed, KIND.Class, "a paragraph style of this document", name .. ": {")
+      end
+    end
+    return items
+  end
+  -- the page's settings ("page: {..." at the top) or a section's ("\\newpage {..."): its attributes,
+  -- those not given yet, or a value
+  local page_braces = header and pos.line + 1 < header.last and before:match("^page:%s*{([^}]*)$") or before:match("^\\newpage%s*{([^}]*)$")
+  if page_braces then
+    local pages = require("neoffice.pages")
+    local used = {}
+    for _, a in ipairs((markup.attributes(page_braces))) do
+      used[a.name or ""] = true
+    end
+    local item = page_braces:match("([^,;]*)$")
+    local name, value = item:match("^%s*([%a_%-]+)%s*=%s*(.*)$")
+    local VALUES = {
+      size = pages.VALUES.size, orientation = pages.VALUES.orientation, start = pages.VALUES.start,
+      margins = { "2.5cm", "2cm", "2.54cm", "2.5cm 3cm" },
+      ["margin-top"] = { "2.5cm", "2cm" }, ["margin-bottom"] = { "2.5cm", "2cm" }, ["margin-left"] = { "2.5cm", "3cm" }, ["margin-right"] = { "2.5cm", "3cm" },
+    }
+    if name and VALUES[name] then
+      for _, v in ipairs(VALUES[name]) do
+        add(v, #before - #value, KIND.EnumMember, pages.DESCRIPTIONS[name])
+      end
+    elseif not name then
+      local typed = item:match("^%s*(.-)$")
+      for _, key in ipairs({ "size", "orientation", "margins", "margin-top", "margin-bottom", "margin-left", "margin-right", "start" }) do
+        if not used[key] and not (key == "start" and before:match("^page:")) then
+          for _, v in ipairs(VALUES[key]) do
+            add(key .. " = " .. v, #before - #typed, KIND.Property, pages.DESCRIPTIONS[key])
+          end
+        end
       end
     end
     return items

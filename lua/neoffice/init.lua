@@ -30,6 +30,7 @@ M.config = {
   conceal = false, -- hide the formatting marks (except on the cursor line)
   show_tabs = true, -- show tabs as a faint → (they look like spaces otherwise, and aren't)
   styles = true, -- the document's paragraph styles, at its top ("---" / "styles:" / "  Normal: {...}" / "---")
+  page = true, -- its page settings: at its top ("page: {size = A4, margins = 2.5cm}"), and where a section starts ("\\newpage {orientation = landscape}")
   images = true, -- show images in the buffer (needs Neovim's vim.ui.img and a terminal that supports it)
   lsp = true, -- a language server for documents: headings as symbols (gO), folding, hover on comments
   comment_text = false, -- each comment's author and text at the end of its line (:Neoffice comments text)
@@ -45,7 +46,7 @@ M.config = {
 }
 
 M.ns = {}
-for _, kind in ipairs({ "run", "object", "comment", "change", "empty" }) do
+for _, kind in ipairs({ "run", "object", "comment", "change", "empty", "section" }) do
   M.ns[kind] = api.nvim_create_namespace("neoffice_" .. kind)
 end
 local NS_DECOR = api.nvim_create_namespace("neoffice_decorations")
@@ -103,7 +104,11 @@ function M.paragraphs(lines, alone)
     blanks = {}
   end
   local header = markup.header(lines) -- (the document's styles, at its top: no paragraphs)
+  local section -- (a section's line, for the paragraph after it: see pages.lua)
   for row, line in ipairs(lines) do
+    if section and #out > section.count then
+      out[section.count + 1].section, section = section, nil
+    end
     local prev = out[#out]
     if header and row <= header.last then
       fenced = row == header.last or fenced -- (a blank line after it separates)
@@ -124,6 +129,16 @@ function M.paragraphs(lines, alone)
       goto continue
     end
     box_of_row[row] = box
+    local section_line = not box and line:find("^\\newpage") and markup.section_line(line)
+    if section_line then -- a section starts after it: what it changes
+      empty_paragraphs(empty_after())
+      if section then
+        section_line.bad = section_line.bad or ("line %d: two sections' lines with no paragraph between them (a section needs one)"):format(section.row)
+      end
+      section_line.row, section_line.count = row, #out
+      section, cut, fenced, table_start = section_line, true, true, nil
+      goto continue
+    end
     local para_line = not box and line:find("^[<%-{]") and not (lines[row + 1] or ""):match("^|") and markup.para_line(line)
     if para_line and para_line.bad and line:sub(1, 1) == "{" and pcall(require("neoffice.tables").parse, markup.table_options(line) or "") then
       empty_paragraphs(empty_after()) -- (a table's options with no table under it, deleted: nothing,
@@ -191,6 +206,17 @@ function M.paragraphs(lines, alone)
     ::continue::
   end
   empty_paragraphs(1)
+  if section and #out > section.count then
+    out[section.count + 1].section, section = section, nil
+  end
+  if section then -- (nothing after it: said when saving)
+    section.bad = "nothing after a section's line: a section needs a paragraph (delete the line to join it to the one before)"
+    if out[#out] then
+      out[#out].section_after = section
+    else
+      out.section_after = section
+    end
+  end
   local next_first = #lines + 1
   for k = #out, 1, -1 do
     local cell = out[k].cell
@@ -1219,7 +1245,25 @@ local function open(buf, path)
   local shown_format = { attrs = {} } -- (the format before each format's line: see M.para_line_for)
   -- the styles its paragraphs have, at its top (only in a document with text): its default one
   -- first, then as they come
+  -- its sections' page settings (see pages.lua): the first's at its top, each other's where it starts
+  local pages = require("neoffice.pages")
+  local section_at = {} -- (paragraph index -> section)
+  doc.sections, doc.section_mark = nil, {}
+  if M.config.page ~= false and doc.fmt.sections and last_text > 0 then
+    doc.sections = doc.fmt.sections(ctx, paras)
+    for j, sec in ipairs(doc.sections) do
+      sec.view = pages.view(sec.props)
+      if j > 1 then
+        section_at[sec.start] = j
+      end
+    end
+  end
+  local page_line = doc.sections and pages.render(doc.sections[1].view, true) or nil
   doc.header = nil
+  if page_line and not (M.config.styles ~= false and doc.fmt.style_of) then
+    vim.list_extend(lines, markup.render_header(nil, page_line))
+    lines[#lines + 1] = ""
+  end
   if M.config.styles ~= false and doc.fmt.style_of and last_text > 0 then
     local seen, order = {}, {}
     for _, para in ipairs(paras) do
@@ -1236,12 +1280,22 @@ local function open(buf, path)
       local entry = { id = id, name = doc.fmt.style_name(ctx, id), attrs = doc.fmt.style_view(ctx, id) }
       shown[#shown + 1], doc.header[entry.name:lower()] = entry, entry
     end
-    vim.list_extend(lines, markup.render_header(shown))
+    vim.list_extend(lines, markup.render_header(shown, page_line))
     lines[#lines + 1] = ""
   end
+  local section_rows = {}
   for k, para in ipairs(paras) do
     local r, at
     local cell, before, after = cells[k], cells[k - 1], cells[k + 1]
+    local j = section_at[k]
+    if j then -- (a section starts: its line, saying what changes)
+      if lines[#lines] and lines[#lines] ~= "" then
+        lines[#lines + 1] = ""
+      end
+      lines[#lines + 1] = "\\newpage {" .. pages.render(pages.delta(doc.sections[j - 1].view, doc.sections[j].view)) .. "}"
+      section_rows[#section_rows + 1] = { #lines - 1, j }
+      lines[#lines + 1] = ""
+    end
     if cell then
       if before and before.tr == cell.tr then
         lines[#lines] = lines[#lines] .. (before.tc == cell.tc and " <br> " or " | ")
@@ -1389,6 +1443,9 @@ local function open(buf, path)
   vim.bo[buf].undolevels = undolevels
   for _, mark in ipairs(marks) do
     M.place(buf, unpack(mark))
+  end
+  for _, sr in ipairs(section_rows) do
+    doc.section_mark[api.nvim_buf_set_extmark(buf, M.ns.section, sr[1], 0, { right_gravity = false })] = sr[2]
   end
   local alone = {}
   for _, r in ipairs(empty_rows) do
@@ -1552,7 +1609,10 @@ function M.decorate(buf)
   for r = 1, header and header.last or 0 do
     local line = lines[r]
     local s, e = line:find("^%s+[^:{}]-%s*:")
-    if s and r > 2 and r < header.last then
+    if line:match("^page:") then -- (the page's settings: its name as a style's)
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = 5, hl_group = "NeofficeStyleName", priority = 150 })
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 5, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
+    elseif s and r > 2 and r < header.last then
       local first = line:find("%S")
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, first - 1, { end_col = e - 1, hl_group = "NeofficeStyleName", priority = 150 })
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, e - 1, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
@@ -1561,6 +1621,11 @@ function M.decorate(buf)
     end
   end
   for r, line in ipairs(lines) do -- a table's options (above it); a format's line (its mark, its attributes)
+    if line:find("^\\newpage%s*{") and markup.section_line(line) then -- (a section's: as a box's line)
+      local brace = line:find("{", 1, true)
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = brace - 1, hl_group = "NeofficeSection", priority = 150 })
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, brace - 1, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
+    end
     local fence, attrs = markup.box_line(line)
     if fence then -- (a box's line: its ::: as a table's |, its attributes as formatting)
       local brace = attrs and line:find("{", 1, true)
@@ -2234,6 +2299,43 @@ function M.save(buf, target)
       st.id = id
     end
 
+    -- the sections' page settings (see pages.lua): the document's at its top, each section's from its
+    -- line (by its mark: the section it was; without one, a new one); only if they changed
+    local section_plan
+    if doc.sections then
+      local pages = require("neoffice.pages")
+      local top = markup.header(api.nvim_buf_get_lines(buf, 0, -1, false))
+      local first = doc.sections[1].view
+      if top and top.page then
+        assert(not top.page.bad, ("the page's line, at the top (line %d): %s"):format(top.page.row, top.page.bad or ""))
+        first = pages.apply(first, top.page.attrs)
+      end
+      local after = blocks.section_after or blocks[#blocks] and blocks[#blocks].section_after
+      assert(not after, after and ("line %d: %s"):format(after.row, after.bad))
+      local list = { { orig = 1, el = doc.sections[1].el, want = first, first_block = 1 } }
+      local mark_at = {}
+      for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.section, 0, -1, {})) do
+        mark_at[m[2]] = doc.section_mark[m[1]]
+      end
+      for k, block in ipairs(blocks) do
+        local sec = block.section
+        if sec then
+          assert(not sec.bad, ("line %d: %s"):format(sec.row, sec.bad or ""))
+          assert(k > 1, ("line %d: a section's line before the first paragraph (the first section's page is at the top: page: {...})"):format(sec.row))
+          local j = mark_at[sec.row - 1]
+          local orig = j and not vim.iter(list):any(function(s) return s.orig == j end) and j or nil
+          list[#list + 1] = { orig = orig, el = orig and doc.sections[orig].el, want = pages.apply(list[#list].want, sec.attrs), first_block = k }
+        end
+      end
+      local same = #list == #doc.sections
+      for j, sec in ipairs(list) do
+        local was = doc.sections[j]
+        same = same and was and sec.orig == j and pages.render(sec.want) == pages.render(was.view)
+          and old_of[sec.first_block] == was.start and (j == 1 or old_of[sec.first_block - 1] == was.start - 1)
+      end
+      section_plan = not same and list or nil
+    end
+
     local plans, equations = {}, {}
     local reusable = not doc.all_dirty and not doc.untracked and not doc.tracking and next(restyle) == nil
     for k, block in ipairs(blocks) do
@@ -2480,6 +2582,13 @@ function M.save(buf, target)
         ctx.dirty[doc.fmt.MAIN] = true
       end
     end
+    if section_plan then -- (each section where its line is, with what it says)
+      for j, sec in ipairs(section_plan) do
+        sec.first = paras[sec.first_block]
+        sec.holder = section_plan[j + 1] and paras[section_plan[j + 1].first_block - 1] or nil
+      end
+      doc.fmt.set_sections(ctx, section_plan)
+    end
     if ctx.dirty[doc.fmt.MAIN] and doc.fmt.number_captions then -- (captions added, removed, moved)
       doc.fmt.number_captions(ctx)
     end
@@ -2515,6 +2624,22 @@ function M.save(buf, target)
       M.place(buf, "object", p.data, p.new.row, p.new.col, p.new.end_row, p.new.end_col)
     end
     doc.paras, doc.texts, doc.sigs, doc.caption_seps, doc.boxes, doc.caption_as = paras, texts, {}, seps, box_keys, written_as
+    if doc.sections then -- (the sections as they now are, each line marked as its section)
+      local pages = require("neoffice.pages")
+      doc.sections = doc.fmt.sections(ctx, paras)
+      for _, sec in ipairs(doc.sections) do
+        sec.view = pages.view(sec.props)
+      end
+      api.nvim_buf_clear_namespace(buf, M.ns.section, 0, -1)
+      doc.section_mark = {}
+      local j = 1
+      for _, block in ipairs(blocks) do
+        if block.section then
+          j = j + 1
+          doc.section_mark[api.nvim_buf_set_extmark(buf, M.ns.section, block.section.row - 1, 0, { right_gravity = false })] = j
+        end
+      end
+    end
     for _, st in ipairs(next(restyle) and header.styles or {}) do -- (the styles as they now are: what the header is compared with next)
       local name = doc.fmt.style_name(ctx, st.id)
       doc.header[name:lower()] = { id = st.id, name = name, attrs = doc.fmt.style_view(ctx, st.id) }

@@ -133,6 +133,55 @@ fail, saying so. The language server completes the styles' names (those the
 document has) and their attributes, and folds the header out of the way
 (|zc|). `setup({ styles = false })` doesn't show it.
 
+                                                            *neoffice-pages*
+Page settings and sections ~
+The document's page settings are at the top too, on a line of their own: >
+
+  ---
+  page: {size = A4, margins = 2.5cm 3cm}
+  styles:
+    ...
+  ---
+<
+A section (Word's and LibreOffice's: pages with settings of their own, as a
+landscape page for a wide figure) starts where a line `\newpage {...}` says,
+alone on its line between paragraphs, saying what changes from the section
+before, as format lines do (|neoffice-para-format|): >
+
+  ...the paragraph before.
+
+  \newpage {orientation = landscape, margins = 3cm 2.5cm}
+
+  ![](wide-figure.png){width = 24cm}
+
+  \newpage {orientation = portrait, margins = 2.5cm 3cm}
+
+  The text goes on in portrait.
+<
+Attributes:
+
+  `size`          A3, A4, A5, B5, Letter, Legal, or its sides: `21cm x 29.7cm`
+  `orientation`   portrait, landscape
+  `margins`       all four (`2.5cm`), or top and bottom, left and right
+                (`2.5cm 3cm`); or each: `margin-top`, `margin-bottom`,
+                `margin-left`, `margin-right`
+  `start`         where the section starts: a new page (`page`, the default),
+                an `odd` or `even` one, or on the same page (`continuous`:
+                Word only)
+
+Edit the line at the top to change the document's settings (and those of the
+sections that don't say otherwise: what a line doesn't say goes on); edit a
+section's line to change that section; type one to start a section there;
+delete one to join its section to the one before. `\newpage {}` is a section
+that changes nothing shown (it starts a new page; Word's headers or columns
+may differ). Only what you change is written: the rest of a section (its
+headers and footers, columns) stays as it was, and a new one gets the
+section's it was cut from. In an .odt, a section is a page style
+(LibreOffice's): one changed for all its sections changes it, one changed for
+some is copied for those. A page break followed by text in braces is written
+`\newpage \{...}`. The language server completes the attributes.
+`setup({ page = false })` doesn't show them.
+
                                                        *neoffice-para-format*
 The format of plain paragraphs (not headings, titles, quotes, list items,
 captions, table cells or boxes) is what they have of their own, against
@@ -721,6 +770,7 @@ setup() is optional. Every field is optional too; these are the defaults: >lua
                            -- nil: as the document says
     conceal = false,       -- hide the marks (except on the cursor line)
     styles = true,         -- the styles at the top (|neoffice-styles|)
+    page = true,           -- the page's settings and sections (|neoffice-pages|)
     show_tabs = true,      -- show tabs as a faint → (|'list'|, in its windows only;
                            -- the Tab key types a tab, whatever 'expandtab' says)
     images = true,         -- show images (where the terminal can)
@@ -771,6 +821,7 @@ Highlight groups (all `default`, so your colour scheme can set them):
   NeofficeNumber            heading numbers
   NeofficeAlign             the alignment marks and format lines
   NeofficeStyleName         a style's name, in the styles at the top
+  NeofficeSection           `\newpage` starting a section (|neoffice-pages|)
   NeofficeLink              a link or an image (not an image's attributes)
   NeofficeBold              bold text (`**...**`)
   NeofficeItalic            italic text (`*...*`)

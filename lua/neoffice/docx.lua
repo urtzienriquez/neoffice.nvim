@@ -1967,6 +1967,167 @@ place_drawing = function(ctx, drawing, attrs)
   ensure_ns(xml.find(ctx.root, "w:document"), "wp")
 end
 
+-- ── Sections: page settings (see pages.lua) ─────────────────────────────────
+-- Word keeps a section's settings (w:sectPr) in its last paragraph's properties, and the last
+-- section's in the body.
+local SECTION_ORDER = { "w:headerReference", "w:footerReference", "w:footnotePr", "w:endnotePr", "w:type", "w:pgSz", "w:pgMar",
+  "w:paperSrc", "w:pgBorders", "w:lnNumType", "w:pgNumType", "w:cols", "w:formProt", "w:vAlign", "w:noEndnote", "w:titlePg",
+  "w:textDirection", "w:bidi", "w:rtlGutter", "w:docGrid", "w:printerSettings", "w:sectPrChange" }
+local START_OF = { nextPage = "page", continuous = "continuous", evenPage = "even", oddPage = "odd", nextColumn = "continuous" }
+local TYPE_OF = { page = "nextPage", continuous = "continuous", even = "evenPage", odd = "oddPage" }
+local TWIPS = { A3 = { 16838, 23811 }, A4 = { 11906, 16838 }, A5 = { 8391, 11906 }, B5 = { 9979, 14175 }, Letter = { 12240, 15840 }, Legal = { 12240, 20160 } }
+local function twips_cm(v)
+  local n = tonumber(v or "")
+  return n and math.abs(n) * 2.54 / 1440
+end
+local function section_props(el)
+  local size, margins, kind = xml.child(el or {}, "w:pgSz"), xml.child(el or {}, "w:pgMar"), xml.child(el or {}, "w:type")
+  local props = {
+    width = twips_cm(size and xml.attr(size, "w:w")) or 21.59, height = twips_cm(size and xml.attr(size, "w:h")) or 27.94,
+    start = START_OF[kind and xml.attr(kind, "w:val") or "nextPage"] or "page",
+  }
+  for _, side in ipairs({ "top", "bottom", "left", "right" }) do
+    props[side] = twips_cm(margins and xml.attr(margins, "w:" .. side)) or 2.54
+  end
+  return props
+end
+local function section_child(el, tag) -- (created where the schema wants it)
+  local have = xml.child(el, tag)
+  if have then
+    return have
+  end
+  local rank = {}
+  for i, t in ipairs(SECTION_ORDER) do
+    rank[t] = i
+  end
+  local at
+  for i, c in ipairs(el.children) do
+    if not at and c.tag and (rank[c.tag] or 0) > rank[tag] then
+      at = i
+    end
+  end
+  return xml.append(el, xml.elem(tag), at)
+end
+
+-- The document's sections: { { start = the index in `paras` of its first paragraph, el = its
+-- w:sectPr, props } } (see pages.lua).
+function M.sections(ctx, paras)
+  local body = xml.find(ctx.root, "w:body")
+  local out, start = {}, 1
+  ctx.section_els = {}
+  for k, para in ipairs(paras) do
+    local node = para.node or para
+    local ppr = node.parent == body and node.tag == "w:p" and xml.child(node, "w:pPr")
+    local el = ppr and xml.child(ppr, "w:sectPr")
+    if el and k < #paras then -- (one in the last paragraph: an empty section after it, kept as it is)
+      out[#out + 1] = { start = start, el = el, props = section_props(el) }
+      ctx.section_els[el] = true
+      start = k + 1
+    end
+  end
+  local last = body and xml.child(body, "w:sectPr")
+  out[#out + 1] = { start = start, el = last, props = section_props(last) }
+  if last then
+    ctx.section_els[last] = true
+  end
+  return out
+end
+
+-- Settings changed (see pages.changes) on a section's w:sectPr.
+local function set_section(el, ch)
+  if ch.size then
+    local tw = TWIPS[ch.name or ""]
+    local short, long = tw and tw[1] or math.floor(math.min(ch.width, ch.height) * 1440 / 2.54 + 0.5), tw and tw[2] or math.floor(math.max(ch.width, ch.height) * 1440 / 2.54 + 0.5)
+    local size = section_child(el, "w:pgSz")
+    xml.set_attr(size, "w:w", tostring(ch.landscape and long or short))
+    xml.set_attr(size, "w:h", tostring(ch.landscape and short or long))
+    xml.set_attr(size, "w:orient", ch.landscape and "landscape" or nil)
+  end
+  if next(ch.margins) then
+    local margins = section_child(el, "w:pgMar")
+    for side, cm in pairs(ch.margins) do
+      xml.set_attr(margins, "w:" .. side, tostring(math.floor(cm * 1440 / 2.54 + 0.5)))
+    end
+    for _, attr in ipairs({ { "w:header", "720" }, { "w:footer", "720" }, { "w:gutter", "0" } }) do -- (all required)
+      xml.set_attr(margins, attr[1], xml.attr(margins, attr[1]) or attr[2])
+    end
+    for _, side in ipairs({ "top", "bottom", "left", "right" }) do
+      xml.set_attr(margins, "w:" .. side, xml.attr(margins, "w:" .. side) or "1440")
+    end
+  end
+  if ch.start then
+    xml.set_attr(section_child(el, "w:type"), "w:val", TYPE_OF[ch.start])
+  end
+end
+
+-- The sections as the buffer has them: list = { { el = the w:sectPr it had (nil: a new one, from
+-- the one before), want = its attributes, holder = its last paragraph (but the last's) } }. Changes
+-- only what differs; returns whether anything did.
+function M.set_sections(ctx, list)
+  local pages = require("neoffice.pages")
+  local body = xml.find(ctx.root, "w:body")
+  local used, els, changed = {}, {}, false
+  for j, s in ipairs(list) do
+    local el = s.el
+    if not el or used[el] then -- (a new section: as the one it was part of, but for what its line says)
+      el = xml.copy(els[j - 1] or xml.elem("w:sectPr"))
+      changed = true
+    end
+    used[el], els[j] = true, el
+    local ch = pages.changes(pages.view(section_props(el)), s.want)
+    if ch then
+      set_section(el, ch)
+      changed = true
+    end
+  end
+  local function place(el, parent, at)
+    if el.parent ~= parent then
+      if el.parent then
+        xml.remove(el)
+      end
+      xml.append(parent, el, at)
+      changed = true
+    end
+  end
+  for j, el in ipairs(els) do
+    if j < #els then -- (in its last paragraph: one of the body's, else a new one after its table)
+      local top = assert(list[j].holder, "a section has no paragraph")
+      while top.parent and top.parent ~= body do
+        top = top.parent
+      end
+      if top.tag ~= "w:p" then
+        top = xml.append(body, xml.elem("w:p"), xml.index(top) + 1)
+        changed = true
+      end
+      local ppr = xml.child(top, "w:pPr") or xml.append(top, xml.elem("w:pPr"), 1)
+      local have = xml.child(ppr, "w:sectPr")
+      if have and have ~= el then
+        xml.remove(have)
+        changed = true
+      end
+      local after = xml.child(ppr, "w:pPrChange") -- (sectPr comes last in pPr, but for this)
+      place(el, ppr, after and xml.index(after) or nil)
+    else
+      local have = xml.child(body, "w:sectPr")
+      if have and have ~= el then
+        xml.remove(have)
+        changed = true
+      end
+      place(el, body, nil)
+    end
+  end
+  for el in pairs(ctx.section_els or {}) do -- (those of sections joined to the one before: gone)
+    if not used[el] and el.parent then
+      xml.remove(el)
+      changed = true
+    end
+  end
+  if changed then
+    ctx.dirty[M.MAIN] = true
+  end
+  return changed
+end
+
 function M.text_width(ctx)
   local section = xml.child(xml.find(ctx.root, "w:body") or {}, "w:sectPr") or {}
   local size, margins = xml.child(section, "w:pgSz"), xml.child(section, "w:pgMar")

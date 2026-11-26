@@ -15,6 +15,8 @@ else in the file stays exactly as it was.
   LibreOffice's own numbering, so cross-references work).
 - The document's paragraph styles at its top (`Normal: {font = Times New Roman, size = 11pt}`):
   edit a line to change the style, and every paragraph of it follows.
+- Page settings at its top (`page: {size = A4, margins = 2.5cm}`), and sections where a line
+  says what changes (`\newpage {orientation = landscape}`): a landscape page for a wide figure.
 - Paragraph formats set for many paragraphs at once, as in LaTeX: a line `{align = justify, first =
   0.5cm}` sets what the paragraphs after it have of their own, against their style, until the next;
   one that differs says how (`<|> A centred one.`, `{before = 12pt} More space.`). A few words in
@@ -79,6 +81,7 @@ require("neoffice").setup({
   track_changes = nil, -- true/false: always/never track your edits (default: as the document says)
   conceal = false, -- hide the marks
   styles = true, -- the document's paragraph styles at its top
+  page = true, -- its page settings at its top, and its sections
   show_tabs = true, -- show tabs as a faint →
   images = true, -- show images
   comment_text = false, -- each comment's text at the end of its line (or :Neoffice comments text)

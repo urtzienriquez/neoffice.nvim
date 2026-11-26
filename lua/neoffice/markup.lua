@@ -238,19 +238,29 @@ end
 --     Heading 1: {font = Arial, size = 14pt, bold}
 --   ---
 -- { last = its last row, styles = { { row, name, text (in its braces), attrs, bad } } }, or nil.
+-- (and the document's page settings: "page: {size = A4, margins = 2.5cm}", see pages.lua)
 function M.header(lines)
-  if lines[1] ~= "---" or not (lines[2] or ""):match("^styles:%s*$") then
+  local second = lines[2] or ""
+  if lines[1] ~= "---" or not (second:match("^styles:%s*$") or second:match("^page:")) then
     return nil
   end
   local out = { styles = {} }
-  for r = 3, #lines do
+  for r = 2, #lines do
     local l = lines[r]
     if l == "---" then
       out.last = r
       return out
     end
     local name, inside = l:match("^%s+([^:{}]-)%s*:%s*{(.*)}%s*$")
-    if name then
+    local page = l:match("^page:%s*{(.*)}%s*$")
+    if l:match("^styles:%s*$") then
+      name = nil
+    elseif page then
+      local attrs, bad = require("neoffice.pages").parse(page)
+      out.page = { row = r, text = page, attrs = attrs, bad = bad }
+    elseif l:match("^page:") then
+      out.page = { row = r, bad = "not the page's line: write it as   page: {size = A4, margins = 2.5cm}" }
+    elseif name then
       local attrs, bad = require("neoffice.paras").parse_style(inside)
       out.styles[#out.styles + 1] = { row = r, name = vim.trim(name), text = inside, attrs = attrs, bad = bad }
     elseif not l:match("^%s*$") then
@@ -258,18 +268,36 @@ function M.header(lines)
     end
   end
 end
-function M.render_header(styles) -- (styles: { { name, attrs } }, in order)
+function M.render_header(styles, page) -- (styles: { { name, attrs } }, in order, or nil; page: its attributes, written)
   local width = 0
-  for _, s in ipairs(styles) do
+  for _, s in ipairs(styles or {}) do
     width = math.max(width, vim.fn.strdisplaywidth(s.name))
   end
-  local lines = { "---", "styles:" }
+  local lines = { "---" }
+  if page then
+    lines[#lines + 1] = "page: {" .. page .. "}"
+  end
+  if styles then
+    lines[#lines + 1] = "styles:"
+  end
+  styles = styles or {}
   for _, s in ipairs(styles) do
     local pad = (" "):rep(width - vim.fn.strdisplaywidth(s.name))
     lines[#lines + 1] = "  " .. s.name .. ": " .. pad .. "{" .. require("neoffice.paras").render_style(s.attrs) .. "}"
   end
   lines[#lines + 1] = "---"
   return lines
+end
+
+-- A section's line ("\newpage {orientation = landscape}", alone on its line: see pages.lua): {
+-- attrs (what it changes), bad (why they aren't right) }, or nil if the line isn't one.
+function M.section_line(line)
+  local inside = line:match("^\\newpage%s*{(.*)}%s*$")
+  if not inside then
+    return nil
+  end
+  local attrs, bad = require("neoffice.pages").parse(inside)
+  return { attrs = attrs or {}, bad = bad, text = inside }
 end
 
 -- The block a line starts with; where its text begins; where its kind's and its alignment's
@@ -523,7 +551,7 @@ function M.attributes(text, names)
       end
       if quoted then
         value, e = quoted, qe
-      elseif words and words:find(" ", 1, true) and name:lower() == "font" then -- (only a font's name has spaces)
+      elseif words and words:find(" ", 1, true) and (name:lower() == "font" or name:lower() == "size" and words:match("^%S+%s*[x×]%s*%S+$") or name:lower() == "margins" and words:match("^%S+%s+%S+$")) then -- (only a font's name has spaces, a page's size: "21cm x 29.7cm", and its margins: "2.5cm 3cm")
         value, e = words, we
       end
     end
@@ -805,6 +833,8 @@ function M.render(spans, block, strict)
         at = brace_at -- (text in braces that would read as its attributes: "\{")
       elseif not at and start == 1 and not kind(block) and not block.align and (text == "---" or M.para_line(text)) then
         at = 1 -- (text that would read as a format's line, or the header's: "\{...}", "\---")
+      elseif not at and text:match("^\\newpage%s*{.*}%s*$") then
+        at = #text:match("^\\newpage%s*") + 1 -- (a page break and braces that would read as a section's line: "\newpage \{")
       end
       if not at then
         break

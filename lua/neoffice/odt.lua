@@ -1569,6 +1569,238 @@ end
 
 -- ── Floating images and frames (see floats.lua) ─────────────────────────────
 
+-- ── Sections: page settings (see pages.lua) ─────────────────────────────────
+-- A section starts at a paragraph (or table) whose style names a master page ("page style"); the
+-- master page's page layout has its size, orientation and margins.
+local function masters(ctx)
+  local out = {}
+  for _, m in ipairs(xml.collect(ctx.styles_doc, { ["style:master-page"] = true })) do
+    out[xml.attr(m, "style:name") or ""] = m
+  end
+  return out
+end
+local function page_layout(ctx, master)
+  local name = master and xml.attr(master, "style:page-layout-name")
+  return name and vim.iter(xml.collect(ctx.styles_doc, { ["style:page-layout"] = true })):find(function(l)
+    return xml.attr(l, "style:name") == name
+  end)
+end
+local function layout_props(layout)
+  local props = layout and xml.child(layout, "style:page-layout-properties") or { attrs = {} }
+  local out = { width = markup.cm(xml.attr(props, "fo:page-width") or "") or 21, height = markup.cm(xml.attr(props, "fo:page-height") or "") or 29.7, start = "page" }
+  for _, side in ipairs({ "top", "bottom", "left", "right" }) do
+    out[side] = markup.cm(xml.attr(props, "fo:margin-" .. side) or "") or 2
+  end
+  return out
+end
+local function starts_at(node) -- (what a section starting at a paragraph starts at: its table, in one)
+  local el = node
+  while el.parent and el.tag ~= "table:table" do
+    el = el.parent
+  end
+  return el.tag == "table:table" and el or node
+end
+local function master_of(ctx, el) -- (the master page an element's style names: nil if none)
+  local name
+  if el.tag == "table:table" then
+    local st = style_named(ctx, "table", xml.attr(el, "table:style-name"))
+    name = st and xml.attr(st.el, "style:master-page-name")
+  else
+    local style = xml.attr(el, "text:style-name")
+    local auto = ctx.auto_paras[style or ""]
+    name = auto and xml.attr(auto, "style:master-page-name")
+    if name == nil then -- (its named style's, then)
+      local named = style_named(ctx, "paragraph", auto and xml.attr(auto, "style:parent-style-name") or style)
+      name = named and not named.automatic and xml.attr(named.el, "style:master-page-name") or nil
+    end
+  end
+  return name ~= "" and name or nil
+end
+local function default_master(ctx)
+  local all = masters(ctx)
+  if all.Standard then
+    return "Standard"
+  end
+  local first = xml.find(ctx.styles_doc, "style:master-page")
+  return first and xml.attr(first, "style:name")
+end
+
+function M.sections(ctx, paras)
+  local all = masters(ctx)
+  local out, prev = {}, nil
+  ctx.section_starts = {}
+  for k, para in ipairs(paras) do
+    local el = starts_at(para.node or para)
+    if el ~= prev then
+      local m = master_of(ctx, el)
+      if k == 1 or m and all[m] then
+        m = m and all[m] and m or default_master(ctx)
+        out[#out + 1] = { start = k, el = m, props = layout_props(page_layout(ctx, all[m or ""])) }
+        if k > 1 then
+          ctx.section_starts[el] = true
+        end
+      end
+    end
+    prev = el
+  end
+  if #out == 0 then
+    local m = default_master(ctx)
+    out[1] = { start = 1, el = m, props = layout_props(page_layout(ctx, all[m or ""])) }
+  end
+  return out
+end
+
+-- An element's style, naming this master page (nil: none; "" over a named style that names one).
+local function set_master(ctx, el, name)
+  if master_of(ctx, el) == name then
+    return false
+  end
+  if el.tag == "table:table" then
+    local props = own_style(ctx, el, "table", "style:table-properties")
+    local base = style_named(ctx, "table", xml.attr(props.parent, "style:parent-style-name"))
+    xml.set_attr(props.parent, "style:master-page-name", name or (base and xml.attr(base.el, "style:master-page-name") and "") or nil)
+    return true
+  end
+  local style = xml.attr(el, "text:style-name")
+  local key = "master|" .. (style or "") .. "|" .. (name or "")
+  if not ctx.made[key] then
+    local auto = ctx.auto_paras[style or ""]
+    local new_style = auto and xml.copy(auto) or xml.elem("style:style", { { "style:family", "paragraph" } })
+    if not auto and style then
+      xml.set_attr(new_style, "style:parent-style-name", style)
+    end
+    local new, n = nil, 1
+    repeat
+      new, n = "NeoP" .. n, n + 1
+    until ctx.parent_style[new] == nil
+    xml.set_attr(new_style, "style:name", new)
+    xml.set_attr(new_style, "style:master-page-name", nil)
+    local auto_new = ctx.auto_paras
+    auto_new[new] = new_style
+    local inherited = master_of(ctx, { tag = "text:p", attrs = { { "text:style-name", new } } })
+    xml.set_attr(new_style, "style:master-page-name", name or (inherited and "") or nil)
+    xml.append(automatic(ctx), new_style)
+    ctx.made[key] = new
+    ctx.parent_style[new] = xml.attr(new_style, "style:parent-style-name") or false
+    if ctx.para_style_el then
+      ctx.para_style_el[new] = new_style
+    end
+  end
+  xml.set_attr(el, "text:style-name", ctx.made[key])
+  return true
+end
+
+-- Settings changed (see pages.changes) on a page layout.
+local function set_layout_props(layout, ch)
+  local props = xml.child(layout, "style:page-layout-properties") or xml.append(layout, xml.elem("style:page-layout-properties"), 1)
+  local pages = require("neoffice.pages")
+  if ch.size then
+    xml.set_attr(props, "fo:page-width", pages.length(ch.width))
+    xml.set_attr(props, "fo:page-height", pages.length(ch.height))
+    xml.set_attr(props, "style:print-orientation", ch.landscape and "landscape" or "portrait")
+  end
+  for side, cm in pairs(ch.margins) do
+    xml.set_attr(props, "fo:margin-" .. side, pages.length(cm))
+  end
+end
+
+-- The sections as the buffer has them: list = { { el = the master page it had (nil: as the one
+-- before), want = its attributes, first = its first paragraph } }. A master page whose sections all
+-- want other settings gets them; one that only some do, a copy for those. Returns whether
+-- anything changed.
+function M.set_sections(ctx, list)
+  local pages = require("neoffice.pages")
+  local all = masters(ctx)
+  local changed = false
+  local base, groups = {}, {}
+  for j, s in ipairs(list) do
+    assert(s.want.start == "page", "a section of an .odt starts on a new page: start = page (continuous is Word's)")
+    base[j] = s.el and all[s.el] and s.el or base[j - 1] or default_master(ctx)
+    groups[base[j]] = groups[base[j]] or {}
+    table.insert(groups[base[j]], j)
+  end
+  local used_layouts = {}
+  for _, m in pairs(all) do
+    local name = xml.attr(m, "style:page-layout-name") or ""
+    used_layouts[name] = (used_layouts[name] or 0) + 1
+  end
+  local styles_auto = xml.find(ctx.styles_doc, "office:automatic-styles")
+  local function new_layout(layout) -- (a copy of a page layout, of its own)
+    local copy = xml.copy(layout or xml.elem("style:page-layout"))
+    local name, n = nil, 1
+    local names = {}
+    for _, l in ipairs(xml.collect(ctx.styles_doc, { ["style:page-layout"] = true })) do
+      names[xml.attr(l, "style:name") or ""] = true
+    end
+    repeat
+      name, n = "NeoPL" .. n, n + 1
+    until not names[name]
+    xml.set_attr(copy, "style:name", name)
+    xml.append(styles_auto, copy)
+    return copy
+  end
+  local master, copies = {}, {}
+  for m, js in pairs(groups) do
+    local layout = page_layout(ctx, all[m])
+    local have = pages.view(layout_props(layout))
+    local wants = {}
+    for _, j in ipairs(js) do
+      wants[pages.render(list[j].want)] = list[j].want
+    end
+    local keys = vim.tbl_keys(wants)
+    if #keys == 1 and keys[1] ~= pages.render(have) then -- (all of them: the master page itself)
+      if not layout or (used_layouts[xml.attr(layout, "style:name") or ""] or 0) > 1 then
+        layout = new_layout(layout)
+        xml.set_attr(all[m], "style:page-layout-name", xml.attr(layout, "style:name"))
+      end
+      set_layout_props(layout, pages.changes(have, wants[keys[1]]))
+      changed = true
+    end
+    for _, j in ipairs(js) do
+      local key = pages.render(list[j].want)
+      if #keys == 1 or key == pages.render(have) then
+        master[j] = m
+      else -- (only some: a copy of it for them)
+        if not copies[m .. "|" .. key] then
+          local copy = xml.copy(all[m])
+          local name, n = nil, 1
+          repeat
+            name, n = "NeoPage" .. n, n + 1
+          until not all[name]
+          xml.set_attr(copy, "style:name", name)
+          local want = list[j].want
+          xml.set_attr(copy, "style:display-name", (xml.attr(all[m], "style:display-name") or m) .. " (" .. want.size .. ", " .. want.orientation .. ")")
+          local own = new_layout(layout)
+          set_layout_props(own, pages.changes(have, want))
+          xml.set_attr(copy, "style:page-layout-name", xml.attr(own, "style:name"))
+          xml.append(all[m].parent, copy)
+          all[name], copies[m .. "|" .. key] = copy, name
+          changed = true
+        end
+        master[j] = copies[m .. "|" .. key]
+      end
+    end
+  end
+  local starts = {}
+  for j, s in ipairs(list) do
+    local el = starts_at(s.first)
+    starts[el] = true
+    local now = master_of(ctx, el)
+    if j > 1 or now or master[j] ~= default_master(ctx) then
+      changed = set_master(ctx, el, master[j]) or changed
+    end
+  end
+  for el in pairs(ctx.section_starts or {}) do -- (sections joined to the one before: no longer starting one)
+    if not starts[el] and el.parent and master_of(ctx, el) then
+      changed = set_master(ctx, el, nil) or changed
+    end
+  end
+  if changed then
+    ctx.dirty[M.MAIN], ctx.dirty[STYLES] = true, true
+  end
+  return changed
+end
+
 -- The page, for placing images: { text = the text's width, left, top = its margins } (cm).
 function M.page(ctx)
   local master = xml.find(ctx.styles_doc, "style:master-page")

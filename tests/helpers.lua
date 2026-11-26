@@ -34,6 +34,7 @@ function H.copy(name, edit)
 end
 
 neo.config.styles = false -- (the styles at the top: tested on their own, styles_spec.lua)
+neo.config.page = false -- (and the page's settings: pages_spec.lua)
 
 function H.open(path)
   vim.cmd("silent! %bwipeout!")
