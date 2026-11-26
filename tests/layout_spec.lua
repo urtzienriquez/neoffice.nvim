@@ -37,7 +37,7 @@ for _, name in ipairs({ "layout.docx", "layout.odt" }) do
         end
         return false
       end
-      assert.equals("@punctuation.special", vim.api.nvim_get_hl(0, { name = "NeofficeAlign" }).link)
+      assert.equals("NeofficeMark", vim.api.nvim_get_hl(0, { name = "NeofficeAlign" }).link) -- (formatting's gray)
       for _, row in ipairs({ H.row(1), H.row(2), H.row(3) }) do
         assert.same({ true, true, true, false }, { hl(row - 1, 0), hl(row - 1, 1), hl(row - 1, 2), hl(row - 1, 3) })
       end
@@ -218,3 +218,38 @@ for _, name in ipairs({ "layout.docx", "layout.odt" }) do
     end
   end)
 end
+
+describe("colours", function()
+  it("show formatting (marks, attributes, backslashes, tabs) in one gray, and text as text", function()
+    H.open(H.copy("rich.docx"))
+    H.set(1, "<|> {first = 1cm} Some **bold**, \\*a star\\* and ==marked== text.")
+    local neo = require("neoffice")
+    neo.decorate(0)
+    local ns = vim.api.nvim_create_namespace("neoffice_decorations")
+    local row, line = H.row(1), H.lines()[H.row(1)]
+    local gray = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(0, ns, { row - 1, 0 }, { row - 1, -1 }, { details = true })) do
+      if m[4].hl_group == "NeofficeMark" then
+        gray[#gray + 1] = line:sub(m[3] + 1, m[4].end_col)
+      end
+    end
+    assert.same({ "<|> {first = 1cm} ", "**", "**", "\\", "\\", "==", "==" }, gray)
+    -- what says what a paragraph is: not gray (a heading's #, a list's -, a table's |)
+    H.set(1, "# A **heading**")
+    H.set(2, "- An item")
+    neo.decorate(0)
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, { details = true })) do
+      local l = H.lines()[m[2] + 1]
+      if m[4].hl_group == "NeofficeMark" then
+        assert.is_nil(l:sub(m[3] + 1, m[4].end_col):find("^[#%-|] "), l)
+        assert.are_not.equal("|", l:sub(m[3] + 1, m[3] + 1))
+      end
+    end
+    assert.truthy(vim.wo.winhighlight:find("Whitespace:NeofficeMark", 1, true)) -- (tabs: the same gray)
+    local mark = vim.api.nvim_get_hl(0, { name = "NeofficeMark", link = false })
+    local normal = vim.api.nvim_get_hl(0, { name = "Normal" })
+    if normal.fg and normal.bg then -- (half way between the text's colour and the background's)
+      assert.is_true(mark.fg ~= normal.fg and mark.fg ~= normal.bg)
+    end
+  end)
+end)

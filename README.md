@@ -72,6 +72,7 @@ require("neoffice").setup({
   author = "Your Name", -- on your comments and changes (default: $USER)
   track_changes = nil, -- true/false: always/never track your edits (default: as the document says)
   conceal = false, -- hide the marks
+  show_tabs = true, -- show tabs as a faint →
   images = true, -- show images
   comment_text = false, -- each comment's text at the end of its line (or :Neoffice comments text)
   captions = { table = "Table", figure = { "Figure", "Fig." }, separator = ". " }, -- caption words (first written), after the number

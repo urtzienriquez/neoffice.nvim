@@ -125,6 +125,16 @@ for _, ext in ipairs({ "docx", "odt" }) do
       end
     end)
 
+    it("shows tabs as a faint →, in the document's window only", function()
+      assert.is_true(vim.wo.list)
+      assert.equals("tab:→ ", vim.wo.listchars)
+      local listchars = vim.go.listchars
+      vim.cmd("enew") -- (another buffer in the same window: as it was)
+      assert.is_false(vim.wo.list)
+      assert.equals(listchars, vim.wo.listchars)
+      vim.cmd("bwipeout")
+    end)
+
     it("keeps any text: unicode, symbols, tabs, runs of spaces", function()
       local text = "Ñandú — 日本語 😀 & < > \" ' \\* [x] # a\tb  c   d"
       H.set(12, text)
@@ -218,9 +228,9 @@ describe("titles", function()
       H.open(path)
       assert.equals("% Introduction", H.paras()[1])
       local ns = api.nvim_get_namespaces().neoffice_decorations
-      local marks = api.nvim_buf_get_extmarks(0, ns, 0, 0, { details = true }) -- (on its line)
+      local marks = vim.tbl_filter(function(m) return m[4].hl_group == "NeofficeTitle" end,
+        api.nvim_buf_get_extmarks(0, ns, 0, { 0, -1 }, { details = true })) -- (on its line)
       assert.equals(1, #marks)
-      assert.equals("NeofficeTitle", marks[1][4].hl_group)
       assert.same({ 0, 0, 0, #"% Introduction" }, { marks[1][2], marks[1][3], marks[1][4].end_row, marks[1][4].end_col })
       H.replace(1, "Introduction", "An introduction")
       H.reopen()

@@ -83,7 +83,12 @@ for _, ext in ipairs({ "docx", "odt" }) do
       vim.cmd("Neoffice numbers on")
       assert.is_true(vim.bo.modified)
       local ns = api.nvim_get_namespaces().neoffice_decorations
-      local numbers = vim.tbl_map(function(m) return m[4].virt_text[1][1] end, api.nvim_buf_get_extmarks(0, ns, 0, -1, { details = true }))
+      local numbers = {}
+      for _, m in ipairs(api.nvim_buf_get_extmarks(0, ns, 0, -1, { details = true })) do
+        if m[4].virt_text then
+          numbers[#numbers + 1] = m[4].virt_text[1][1]
+        end
+      end
       assert.same({ "1 ", "1.1 ", "1.2 ", "2 " }, numbers)
       H.reopen()
       assert.is_true(H.doc().ctx.numbered)
@@ -94,7 +99,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
       vim.cmd("Neoffice numbers off")
       H.reopen()
       assert.is_false(H.doc().ctx.numbered)
-      assert.equals(0, #api.nvim_buf_get_extmarks(0, ns, 0, -1, {}))
+      assert.equals(0, #vim.tbl_filter(function(m) return m[4].virt_text end, api.nvim_buf_get_extmarks(0, ns, 0, -1, { details = true }))) -- (no numbers)
     end)
 
     if H.has_libreoffice then

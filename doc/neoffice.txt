@@ -622,6 +622,7 @@ setup() is optional. Every field is optional too; these are the defaults: >lua
     track_changes = nil,   -- true/false: always/never track your edits;
                            -- nil: as the document says
     conceal = false,       -- hide the marks (except on the cursor line)
+    show_tabs = true,      -- show tabs as a faint → (|'list'|, in its windows only)
     images = true,         -- show images (where the terminal can)
     lsp = true,            -- the language server (|neoffice-lsp|)
     comment_text = false,  -- each comment's text at the end of its line
@@ -640,8 +641,22 @@ setup() is optional. Every field is optional too; these are the defaults: >lua
   })
 <
                                                          *neoffice-highlights*
+The colours say what is what: text in the text's colour; formatting in the
+text (`**`, `==`, `\`, tabs as `→`, alignment marks, attributes in braces) in
+one gray, quieter than the text but readable (NeofficeMark: made from your
+colour scheme, half way between its text and background colours, again when it
+changes); what says what a paragraph is in that element's colour (a heading's
+`#`, a title's `%`, a list's `-`, a quote's `>`, a caption's word, a table's
+`|`, a box's `:::`); fields and numbers as your scheme shows special things;
+comments and changes in their own colours.
+
 Highlight groups (all `default`, so your colour scheme can set them):
 
+  NeofficeMark              formatting in the text: marks, attributes, `\`,
+                            tabs (NeofficeAlign, NeofficeEscape,
+                            NeofficeTableOptions link to it)
+  NeofficeBox               a box's `:::` lines
+  NeofficeEscape            a `\` before a character that is just text
   NeofficeInsert1 ... 6     insertions, one colour per author
   NeofficeDelete1 ... 6     deletions, one colour per author
   NeofficeChangeInfo        who made the change at the cursor, and when
@@ -652,7 +667,7 @@ Highlight groups (all `default`, so your colour scheme can set them):
   NeofficeCommentCurrent    the text of the comment the panel is on
   NeofficeTitle             the title
   NeofficeNumber            heading numbers
-  NeofficeAlign             the alignment marks
+  NeofficeAlign             the alignment marks and format lines
   NeofficeUnderline         underlined text (`++...++`)
   NeofficeHighlight_rrggbb  highlighted text, by colour (`==...==`)
   NeofficeTableOptions      a table's options line (`{width = full}`)

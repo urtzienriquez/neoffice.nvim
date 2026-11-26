@@ -38,14 +38,38 @@ end
 unclaim()
 api.nvim_create_autocmd("SourcePost", { group = group, pattern = { "*/plugin/zip.lua", "*/plugin/zipPlugin.vim" }, callback = unclaim })
 
+-- The colours say what is what: text in the text's colour; formatting in the text (marks,
+-- attributes, alignment, tabs, backslashes) in one gray, readable but quieter than the text
+-- (NeofficeMark: half way between the text's colour and the background's); what says what a
+-- paragraph is (a heading's #, a title's %, a list's -, a quote's >, a caption's word, a table's |,
+-- a box's :::) in that element's colour; what the document makes (numbers) or keeps as it is
+-- (fields) as the colourscheme shows special things; comments and changes in their colours.
+local function mix(a, b, t) -- (colours as numbers: a, t of the way to b)
+  local out = 0
+  for shift = 16, 0, -8 do
+    local x, y = bit.band(bit.rshift(a, shift), 255), bit.band(bit.rshift(b, shift), 255)
+    out = out + bit.lshift(math.floor(x + (y - x) * t + 0.5), shift)
+  end
+  return out
+end
+local function mark_colour()
+  local normal = api.nvim_get_hl(0, { name = "Normal", link = false })
+  if not (normal.fg and normal.bg) then -- (the terminal's colours: not known)
+    return { link = "Comment" }
+  end
+  return { fg = mix(normal.fg, normal.bg, 0.45) }
+end
+
 local function highlights()
   for name, hl in pairs({
+    NeofficeMark = mark_colour(), -- formatting, as opposed to text
     NeofficeTitle = { link = "Title" },
     NeofficeNumber = { link = "Number" },
-    NeofficeAlign = { link = "@punctuation.special" },
-    NeofficeTableOptions = { link = "@attribute" },
+    NeofficeAlign = { link = "NeofficeMark" },
+    NeofficeTableOptions = { link = "NeofficeMark" },
+    NeofficeBox = { link = "@punctuation.special" }, -- (a box's :::, as a table's |)
     NeofficeCaption = { link = "@label" },
-    NeofficeEscape = { link = "NonText" }, -- (a backslash that makes the next character plain text)
+    NeofficeEscape = { link = "NeofficeMark" }, -- (a backslash that makes the next character plain text)
     NeofficeChangeInfo = { link = "Comment" },
     NeofficeFormat = { underdashed = true, sp = "#61afef" },
     NeofficeComment = { underdotted = true, sp = "#e5c07b" },

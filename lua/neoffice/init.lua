@@ -28,6 +28,7 @@ M.config = {
   author = vim.env.USER or "neoffice", -- name on your comments and tracked changes
   track_changes = nil, -- record your edits as tracked changes: true/false, nil = as the document says
   conceal = false, -- hide the formatting marks (except on the cursor line)
+  show_tabs = true, -- show tabs as a faint → (they look like spaces otherwise, and aren't)
   images = true, -- show images in the buffer (needs Neovim's vim.ui.img and a terminal that supports it)
   lsp = true, -- a language server for documents: headings as symbols (gO), folding, hover on comments
   comment_text = false, -- each comment's author and text at the end of its line (:Neoffice comments text)
@@ -539,6 +540,13 @@ local function setup_buffer(buf)
     vim.wo.wrap, vim.wo.linebreak, vim.wo.breakindent = true, true, true
     if M.config.conceal then
       vim.wo.conceallevel = 2
+    end
+    if M.config.show_tabs then -- (in this window, for this buffer only: as :setlocal; in the marks' gray)
+      vim.opt_local.list = true
+      vim.opt_local.listchars = "tab:→ "
+      if not vim.wo.winhighlight:find("Whitespace:", 1, true) then
+        vim.opt_local.winhighlight:append("Whitespace:NeofficeMark")
+      end
     end
   end
   local group = api.nvim_create_augroup("neoffice_" .. buf, {})
@@ -1078,6 +1086,9 @@ end
 -- Decorations that follow the text: titles highlighted (NeofficeTitle, above tree-sitter) and,
 -- when the document numbers its headings, their numbers (1, 1.1, ...) shown before them.
 local decorating = {}
+-- (each paragraph's characters, by its text, for each buffer: typing changes one paragraph, not the
+-- others; those of the texts decorated last time only, so it doesn't grow)
+local parsed = {}
 function M.decorate_soon(buf) -- (once typing pauses: decorations are for the whole buffer)
   if not decorating[buf] then
     decorating[buf] = true
@@ -1091,11 +1102,18 @@ function M.decorate_soon(buf) -- (once typing pauses: decorations are for the wh
 end
 
 function M.decorate(buf)
+  buf = buf == 0 and api.nvim_get_current_buf() or buf
   local doc = M.docs[buf]
   if not doc then
     return
   end
   api.nvim_buf_clear_namespace(buf, NS_DECOR, 0, -1)
+  for other in pairs(parsed) do -- (a buffer no longer a document's: forgotten)
+    if not M.docs[other] then
+      parsed[other] = nil
+    end
+  end
+  parsed[buf] = { last = parsed[buf] and parsed[buf].now or {}, now = {} }
   local lines, count = api.nvim_buf_get_lines(buf, 0, -1, false), {}
   for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.change, 0, -1, { details = true })) do
     local ch = doc.change[m[1]]
@@ -1107,6 +1125,14 @@ function M.decorate(buf)
     end
   end
   for r, line in ipairs(lines) do -- a table's options (above it); a format's line (its mark, its attributes)
+    local fence, attrs = markup.box_line(line)
+    if fence then -- (a box's line: its ::: as a table's |, its attributes as formatting)
+      local brace = attrs and line:find("{", 1, true)
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = brace and brace - 1 or #line, hl_group = "NeofficeBox", priority = 120 })
+      if brace then
+        api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, brace - 1, { end_col = #line, hl_group = "NeofficeMark", priority = 120 })
+      end
+    end
     if line:sub(1, 1) == "{" and markup.table_options(line) and (lines[r + 1] or ""):match("^|") then
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = #line, hl_group = "NeofficeTableOptions", priority = 150 })
     elseif line:find("^[<%-]") and markup.para_line(line) then
@@ -1118,7 +1144,8 @@ function M.decorate(buf)
     end
   end
   for _, para in ipairs(M.blocks(buf)) do
-    if para.text:find("==", 1, true) or para.text:find("\\", 1, true) then
+    -- (its marks, in gray: only a paragraph with a character that could be one has any)
+    if para.text:find("[\\*_~=+^%[{$!<⟦¶]") or para.text:find("^[#%%>%-]") or para.text:find("^%d+[.)]") then
       M.decorate_marks(buf, para, lines)
     end
     local block, text_start = markup.block(lines[para.first])
@@ -1171,8 +1198,16 @@ local function highlight_group(color)
   end
   return name
 end
+local function chars_of(buf, text) -- (see `parsed`)
+  parsed[buf] = parsed[buf] or { last = {}, now = {} }
+  local cache = parsed[buf]
+  local chars = cache.last[text] or cache.now[text] or select(2, markup.parse(text))
+  cache.now[text] = chars
+  return chars
+end
+
 function M.decorate_marks(buf, para, lines)
-  local _, chars = markup.parse(para.text)
+  local chars = chars_of(buf, para.text)
   local function position(offset, ends) -- (the paragraph's lines were joined by one character)
     if para.cell then
       return para.first - 1, para.col + offset
@@ -1184,16 +1219,31 @@ function M.decorate_marks(buf, para, lines)
     end
     return row - 1, offset
   end
+  -- what isn't text is formatting (marks, attributes, a backslash...): in the marks' gray. Not what
+  -- says what kind of paragraph it is ("# ", "% ", "- ", "> ", "Table: "): in that kind's colour
+  local text = para.text
+  local _, text_start, _, align_at = markup.block(text)
+  local at = (align_at or text_start) - 1
+  local function gray(from, to) -- (bytes from..to-1 of the text)
+    if to > from and text:sub(from + 1, to):find("%S") then
+      local r1, c1 = position(from)
+      local r2, c2 = position(to, true)
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r1, c1, { end_row = r2, end_col = c2, hl_group = "NeofficeMark", priority = 120 })
+    end
+  end
+  for _, c in ipairs(chars) do
+    gray(at, c.col)
+    at = math.max(at, c.col + (c.len or #c.ch))
+    local brace = c.image and text:sub(c.col + 1, at):find("){", 1, true) -- (an image's attributes)
+    if brace then
+      gray(c.col + brace, at)
+    end
+  end
+  gray(at, #text)
   local function mark(from, to, group) -- (chars from..to)
     local r1, c1 = position(chars[from].col)
     local r2, c2 = position(chars[to].col + (chars[to].len or #chars[to].ch), true)
     api.nvim_buf_set_extmark(buf, NS_DECOR, r1, c1, { end_row = r2, end_col = c2, hl_group = group, priority = 150 })
-  end
-  for _, c in ipairs(chars) do -- the backslash before an escaped character: faint (it is only there to be read)
-    if c.esc and c.col > 0 then
-      local r, col = position(c.col - 1)
-      api.nvim_buf_set_extmark(buf, NS_DECOR, r, col, { end_col = col + 1, hl_group = "NeofficeEscape", priority = 150 })
-    end
   end
   for _, key in ipairs({ "h" }) do -- (underlines: by the syntax, syntax/neoffice.vim)
     local from

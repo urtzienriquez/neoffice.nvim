@@ -16,8 +16,9 @@ highlight default link neofficeHighlight Search
 highlight default link neofficeSuperscript Special
 highlight default link neofficeSubscript Special
 highlight default link neofficeFootnote Comment
-highlight default link neofficeFootnoteMark Comment
+highlight default link neofficeFootnoteMark NeofficeMark
 highlight default link neofficeField Special
-highlight default link neofficeBreak NonText
-" (neofficeScriptMark, the ++ ^{ _{ } and == around underlines, superscripts, subscripts and
-" highlights, has no highlight of its own)
+highlight default link neofficeBreak NeofficeMark
+highlight default link neofficeScriptMark NeofficeMark
+" (neofficeScriptMark: the ++ ^{ _{ } and == around underlines, superscripts, subscripts and
+" highlights)
