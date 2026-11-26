@@ -28,7 +28,7 @@ M.config = {
   author = vim.env.USER or "neoffice", -- name on your comments and tracked changes
   track_changes = nil, -- record your edits as tracked changes: true/false, nil = as the document says
   conceal = false, -- hide the formatting marks (except on the cursor line)
-  show_tabs = true, -- show tabs as a faint → (they look like spaces otherwise, and aren't)
+  show_tabs = true, -- show tabs as a faint →, and non-breaking spaces as a faint · (they look like spaces otherwise, and aren't)
   styles = true, -- the document's paragraph styles, at its top ("---" / "styles:" / "  Normal: {...}" / "---")
   page = true, -- its page settings: at its top ("page: {size = A4, margins = 2.5cm}"), and where a section starts ("\\newpage {orientation = landscape}")
   images = true, -- show images in the buffer (needs Neovim's vim.ui.img and a terminal that supports it)
@@ -95,6 +95,9 @@ function M.paragraphs(lines, alone)
   local box, box_of_row, cut = nil, {}, false -- (cut: a box's line came just before: no paragraph goes on across it)
   local format, fenced = { attrs = {} }, false -- (the paragraphs' format: see paras.lua; fenced: a format's line came last)
   local function empty_after() -- (how many blank lines after a paragraph, or a format's line, separate)
+    if box and #out == box.count then -- (right after a box's line: nothing in it to separate from)
+      return 1
+    end
     return (out[#out] or fenced) and 2 or 1
   end
   local function empty_paragraphs(from)
@@ -123,7 +126,7 @@ function M.paragraphs(lines, alone)
       end
       if not was or fence_attrs then
         empty_paragraphs(empty_after())
-        box = { start = row, attrs = fence_attrs or "" }
+        box = { start = row, attrs = fence_attrs or "", count = #out }
       end
       table_start, cut = nil, true
       goto continue
@@ -742,6 +745,14 @@ end
 
 -- What a paragraph's fingerprint depends on besides its text and its marks: its format (from the
 -- line above it), its box, its column's alignment.
+-- What paragraphs are matched by (see match_lines): their text, and a table cell's its column too
+-- (in a table, many cells read the same: an empty one is matched with one of its column).
+local function match_key(text, col)
+  return col and (text .. "\1" .. col) or text
+end
+local function block_keys(blocks)
+  return vim.tbl_map(function(b) return match_key(b.text, b.cell and b.cell.col) end, blocks)
+end
 local function context_key(block)
   return table.concat({ block.format and pformat.key(block.format) or "", block.box and block.box.attrs or "",
     block.cell and tostring(block.cell.align) or "" }, "|")
@@ -1204,6 +1215,10 @@ local function open(buf, path)
     end
   end
   doc.texts = texts
+  doc.keys = {}
+  for k, text in ipairs(texts) do
+    doc.keys[k] = match_key(text, cells[k] and column[k])
+  end
 
   -- Aligned tables: each cell's text padded to its column's width (see tables.text_widths).
   local pad_before, pad_after = {}, {}
@@ -1603,6 +1618,12 @@ function M.decorate(buf)
         api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, c - 1, { virt_text = { { "→", "NeofficeMark" } }, virt_text_pos = "overlay", priority = 150 })
         c = line:find("\t", c + 1, true)
       end
+      -- (and a non-breaking space, which looks like a space and isn't: a ·, as LibreOffice shades it)
+      c = line:find("\194\160", 1, true)
+      while c do
+        api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, c - 1, { virt_text = { { "·", "NeofficeMark" } }, virt_text_pos = "overlay", priority = 150 })
+        c = line:find("\194\160", c + 2, true)
+      end
     end
   end
   local header = markup.header(lines) -- the styles at its top: their names, and the rest as formatting
@@ -1999,7 +2020,7 @@ function M.finish_sigs(buf)
     return
   end
   local blocks = M.blocks(buf)
-  local old_of = match_lines(doc.texts, vim.tbl_map(function(b) return b.text end, blocks))
+  local old_of = match_lines(doc.keys or doc.texts, block_keys(blocks))
   for k, block in ipairs(blocks) do
     local o = old_of[k]
     if o and o >= p.next and doc.sigs[o] == nil and not touched(doc, block) then
@@ -2027,7 +2048,7 @@ function M.block_styles(buf)
   local blocks = M.blocks(buf)
   local out = {}
   if doc and doc.fmt.style_of then
-    local old_of = match_lines(doc.texts, vim.tbl_map(function(p) return p.text end, blocks))
+    local old_of = match_lines(doc.keys or doc.texts, block_keys(blocks))
     for k in ipairs(blocks) do
       local node = old_of[k] and doc.paras[old_of[k]]
       out[k] = node and doc.fmt.style_of(doc.ctx, node) or nil
@@ -2195,7 +2216,7 @@ function M.number_columns(buf, blocks, old_of)
   end
   if not blocks then
     blocks = M.blocks(buf)
-    old_of = match_lines(doc.texts, vim.tbl_map(function(p) return p.text end, blocks))
+    old_of = match_lines(doc.keys or doc.texts, block_keys(blocks))
   end
   local tables, by_table, out, blocks_of = require("neoffice.tables"), {}, {}, {}
   for k, block in ipairs(blocks) do
@@ -2272,7 +2293,7 @@ function M.save(buf, target)
       blocks = {}
     end
     local texts = vim.tbl_map(function(p) return p.text end, blocks)
-    local old_of, deleted = match_lines(doc.texts, texts)
+    local old_of, deleted = match_lines(doc.keys or doc.texts, block_keys(blocks))
     align_numbers(buf, blocks, old_of)
 
     -- 1. Work out every paragraph first: if anything is wrong (a missing image, an equation that
@@ -2449,7 +2470,7 @@ function M.save(buf, target)
     for k, plan in ipairs(plans) do
       local node = plan.old and doc.paras[plan.old]
       local prev_box = prev and box_of(prev)
-      local placed = layout:node({ cell = plan.cell, node = node, edited = not plan.old or plan.sig ~= doc.sigs[plan.old] }, prev_box and outer or prev)
+      local placed = layout:node({ cell = plan.cell, node = node, edited = not plan.old or plan.sig ~= doc.sigs[plan.old], empty = blocks[k].text == "" }, prev_box and outer or prev)
       if node and (placed and placed ~= node or not placed and M.cell_of(node)) then
         deleted[#deleted + 1], plan.old, node = plan.old, nil, nil -- (moved into or out of a table cell)
       end
@@ -2584,7 +2605,11 @@ function M.save(buf, target)
     end
     if section_plan then -- (each section where its line is, with what it says)
       for j, sec in ipairs(section_plan) do
-        sec.first = paras[sec.first_block]
+        local first = sec.first_block -- (its first paragraph not in a box: the box's are shown before it)
+        while blocks[first + 1] and blocks[first].box do
+          first = first + 1
+        end
+        sec.first = paras[first]
         sec.holder = section_plan[j + 1] and paras[section_plan[j + 1].first_block - 1] or nil
       end
       doc.fmt.set_sections(ctx, section_plan)
@@ -2624,6 +2649,7 @@ function M.save(buf, target)
       M.place(buf, "object", p.data, p.new.row, p.new.col, p.new.end_row, p.new.end_col)
     end
     doc.paras, doc.texts, doc.sigs, doc.caption_seps, doc.boxes, doc.caption_as = paras, texts, {}, seps, box_keys, written_as
+    doc.keys = block_keys(blocks)
     if doc.sections then -- (the sections as they now are, each line marked as its section)
       local pages = require("neoffice.pages")
       doc.sections = doc.fmt.sections(ctx, paras)

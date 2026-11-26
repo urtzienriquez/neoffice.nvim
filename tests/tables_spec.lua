@@ -358,3 +358,106 @@ describe("table typesetting", function()
     end
   end)
 end)
+
+-- A table with merged cells (as forms have: a label, and one cell for its value across the rest).
+local MERGED = {
+  docx = function(name, text)
+    if name ~= "word/document.xml" then
+      return text
+    end
+    local function tc(t, span)
+      return "<w:tc><w:tcPr><w:tcW w:w=\"" .. (span and 6000 or 2000) .. "\" w:type=\"dxa\"/>" .. (span and '<w:gridSpan w:val="' .. span .. '"/>' or "")
+        .. "</w:tcPr><w:p><w:r><w:t xml:space=\"preserve\">" .. t .. "</w:t></w:r></w:p></w:tc>"
+    end
+    local tbl = '<w:tbl><w:tblPr><w:tblW w:w="8000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>'
+      .. "<w:tr>" .. tc("Name") .. tc(" ", 3) .. "</w:tr>"
+      .. "<w:tr>" .. tc("Gender") .. tc(" ") .. tc("Born") .. tc(" ") .. "</w:tr></w:tbl><w:p/>"
+    return (text:gsub("<w:body>", "<w:body>" .. tbl, 1))
+  end,
+  odt = function(name, text)
+    if name ~= "content.xml" then
+      return text
+    end
+    local function tc(t, span)
+      return "<table:table-cell" .. (span and ' table:number-columns-spanned="' .. span .. '"' or "") .. "><text:p>" .. t .. "</text:p></table:table-cell>"
+        .. ("<table:covered-table-cell/>"):rep((span or 1) - 1)
+    end
+    local tbl = '<table:table table:name="Form"><table:table-column table:number-columns-repeated="4"/>'
+      .. "<table:table-row>" .. tc("Name") .. tc(" ", 3) .. "</table:table-row>"
+      .. "<table:table-row>" .. tc("Gender") .. tc(" ") .. tc("Born") .. tc(" ") .. "</table:table-row></table:table><text:p/>"
+    return (text:gsub("<office:text>", "<office:text>" .. tbl, 1))
+  end,
+}
+
+for _, ext in ipairs({ "docx", "odt" }) do
+  describe(ext .. " a table with merged cells", function()
+    local path, row
+    before_each(function()
+      path = H.copy("rich." .. ext, MERGED[ext])
+      H.open(path)
+      row = vim.iter(ipairs(H.lines())):find(function(_, l) return l:find("^| Name") end)
+      assert.truthy(row, table.concat(H.lines(), "\n"))
+    end)
+    local function append(r, text) -- (typed at its end: as formatting would add them)
+      local line = H.lines()[r]
+      api.nvim_buf_set_text(0, r - 1, #line, r - 1, #line, { text })
+    end
+
+    -- the merged table's rows: each cell's span (covered cells, in an .odt: "c")
+    local function shape()
+      local main = zip.read(path, H.MAIN[ext])
+      local out = {}
+      if ext == "docx" then
+        local tbl = main:match("<w:tbl>.-</w:tbl>")
+        out.grid = select(2, tbl:gsub("<w:gridCol ", ""))
+        for tr in tbl:gmatch("<w:tr>.-</w:tr>") do
+          local spans = {}
+          for tc in tr:gmatch("<w:tc>.-</w:tc>") do
+            spans[#spans + 1] = tc:match('gridSpan w:val="(%d+)"') or "1"
+          end
+          out[#out + 1] = table.concat(spans, ",")
+        end
+      else
+        local tbl = main:match('<table:table table:name="Form".-</table:table>')
+        for tr in tbl:gmatch("<table:table%-row>(.-)</table:table%-row>") do
+          local spans = {}
+          for kind, attrs in tr:gmatch("<table:(%S+)([^>]*)") do
+            if kind == "table-cell" then
+              spans[#spans + 1] = attrs:match('number%-columns%-spanned="(%d+)"') or "1"
+            elseif kind == "covered-table-cell" or kind == "covered-table-cell/" then
+              spans[#spans + 1] = "c"
+            end
+          end
+          out[#out + 1] = table.concat(spans, ",")
+        end
+      end
+      return out
+    end
+
+    it("keeps them when a row is padded with empty cells (as another formatter would): nothing changes", function()
+      local before = shape()
+      append(row, "   |   |")
+      H.save()
+      assert.same(before, shape())
+      H.reopen()
+      assert.truthy(H.lines()[row]:match("^| Name%s+|%s+|$"), H.lines()[row])
+    end)
+
+    it("takes a column from a merged cell for a cell typed with text, and the table keeps its columns", function()
+      append(row, " Middle | M |")
+      H.reopen()
+      assert.truthy(H.lines()[row]:match("^| Name%s+|%s+| Middle%s+| M%s+|$"), H.lines()[row])
+      assert.is_true(require("neoffice.xml").check(zip.read(path, H.MAIN[ext])))
+      local got = shape()
+      if ext == "docx" then
+        assert.same({ grid = 4, "1,1,1,1", "1,1,1,1" }, got)
+      else
+        assert.same({ "1,1,1,1", "1,1,1,1" }, got)
+      end
+      if H.has_libreoffice then
+        local ok, out = H.libreoffice_reads(path, "Middle")
+        assert.is_true(ok, out)
+      end
+    end)
+  end)
+end

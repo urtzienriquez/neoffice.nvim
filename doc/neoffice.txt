@@ -310,7 +310,12 @@ line, and add or remove a column by adding or removing a cell in every row.
 New rows and cells are formatted like the ones next to them; those you don't
 touch keep their exact XML. To make a new table, type one, with a blank line
 before and after it. Cells merged across columns show as one cell (those rows
-have fewer cells), and a line break inside a cell shows as `￼`.
+have fewer cells), and a line break inside a cell shows as `￼`. Such a row
+keeps its merged cells: empty cells added after them (as a formatter may add
+them) are left out when writing, and a cell typed with text takes a column
+from the merged cell before it, so the table keeps its columns. A
+non-breaking space (forms put one in cells to fill in; LibreOffice shades
+it) shows as a faint `·`; type over it or delete it as any character.
 
                                                        *neoffice-table-format*
 Tables typeset themselves. Write only the cells; when you write the file, a
@@ -657,8 +662,9 @@ neoffice, and so is the documents' filetype). It answers:
   table option that isn't one, a hint when they aren't written `name =
   value, ...`; a code action (|vim.lsp.buf.code_action()|) rewrites them so.
 - Formatting (|vim.lsp.buf.format()|, also of a range): tables aligned, with
-  their line of dashes (added if missing) and a cell for every column, as
-  neoffice shows them when it opens a document; attributes in braces tidy.
+  their line of dashes (added if missing), as neoffice shows them when it
+  opens a document (a row with fewer cells keeps them: its cells are merged);
+  attributes in braces tidy, and the lines at the top.
   Only the spaces and `|` between the cells' text change, and what is inside
   braces: the text keeps its formatting, comments and tracked changes.
   conform.nvim uses it with `lsp_format = "fallback"` (or `"prefer"`): >lua
@@ -771,7 +777,7 @@ setup() is optional. Every field is optional too; these are the defaults: >lua
     conceal = false,       -- hide the marks (except on the cursor line)
     styles = true,         -- the styles at the top (|neoffice-styles|)
     page = true,           -- the page's settings and sections (|neoffice-pages|)
-    show_tabs = true,      -- show tabs as a faint → (|'list'|, in its windows only;
+    show_tabs = true,      -- show tabs as a faint →, non-breaking spaces as a faint · (|'list'|, in its windows only;
                            -- the Tab key types a tab, whatever 'expandtab' says)
     images = true,         -- show images (where the terminal can)
     lsp = true,            -- the language server (|neoffice-lsp|)

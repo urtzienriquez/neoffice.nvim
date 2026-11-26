@@ -1625,23 +1625,39 @@ local function default_master(ctx)
   return first and xml.attr(first, "style:name")
 end
 
+local function in_frame(node) -- (a box's paragraph: shown before the one it is anchored in)
+  local el = node.parent
+  while el do
+    if el.tag and el.tag:match("^draw:") then -- (a frame, a text box, a shape with text)
+      return true
+    end
+    el = el.parent
+  end
+  return false
+end
+
 function M.sections(ctx, paras)
   local all = masters(ctx)
-  local out, prev = {}, nil
+  local out, prev, boxes = {}, nil, nil -- (boxes: where the boxes shown before a paragraph start)
   ctx.section_starts = {}
   for k, para in ipairs(paras) do
-    local el = starts_at(para.node or para)
-    if el ~= prev then
-      local m = master_of(ctx, el)
-      if k == 1 or m and all[m] then
-        m = m and all[m] and m or default_master(ctx)
-        out[#out + 1] = { start = k, el = m, props = layout_props(page_layout(ctx, all[m or ""])) }
-        if k > 1 then
+    local node = para.node or para
+    if in_frame(node) then
+      boxes = boxes or k
+    else
+      local el = starts_at(node)
+      if el ~= prev then
+        local m = master_of(ctx, el)
+        if #out == 0 then -- (the first: its page style, named or the default)
+          m = m and all[m] and m or default_master(ctx)
+          out[1] = { start = 1, el = m, props = layout_props(page_layout(ctx, all[m or ""])) }
+        elseif m and all[m] then
+          out[#out + 1] = { start = boxes or k, el = m, props = layout_props(page_layout(ctx, all[m])) }
           ctx.section_starts[el] = true
         end
       end
+      prev, boxes = el, nil
     end
-    prev = el
   end
   if #out == 0 then
     local m = default_master(ctx)
@@ -2351,6 +2367,80 @@ function M.set_table_format(ctx, tbl, set)
 end
 
 -- As many columns as the widest row has (after rows or cells were added or removed).
+-- A row with cells added (see docx.fit_row): in an .odt, a merged cell is followed by the cells it
+-- covers (table:covered-table-cell); a new cell goes after those.
+function M.fit_row(_, tbl, tr, new)
+  local function count(el, attr)
+    return tonumber(xml.attr(el, attr) or "") or 1
+  end
+  local columns = 0
+  for _, col in ipairs(xml.collect(tbl, { ["table:table-column"] = true }, { ["table:table-row"] = true, ["table:table-rows"] = true })) do
+    columns = columns + count(col, "table:number-columns-repeated")
+  end
+  -- (each new cell after the cells covered by the cell of the document's before it, in order)
+  local groups, anchors, anchor = {}, {}, false
+  for _, c in ipairs(vim.list_slice(tr.children)) do
+    if new[c] then
+      xml.set_attr(c, "table:number-columns-spanned", nil)
+      xml.set_attr(c, "table:number-rows-spanned", nil)
+      if not groups[anchor] then
+        groups[anchor], anchors[#anchors + 1] = {}, anchor
+      end
+      table.insert(groups[anchor], c)
+      xml.remove(c)
+    elseif c.tag == "table:table-cell" then
+      anchor = c
+    end
+  end
+  for _, a in ipairs(anchors) do
+    local at = a and xml.index(a) + count(a, "table:number-columns-spanned") or 1
+    for i, c in ipairs(groups[a]) do
+      xml.append(tr, c, at + i - 1)
+    end
+  end
+  local function total()
+    local n = 0
+    for _, c in ipairs(tr.children) do
+      if c.tag == "table:table-cell" or c.tag == "table:covered-table-cell" then
+        n = n + count(c, "table:number-columns-repeated")
+      end
+    end
+    return n
+  end
+  if columns == 0 then
+    return
+  end
+  for k = #tr.children, 1, -1 do -- (padding: new empty cells, from the end)
+    if total() <= columns then
+      break
+    end
+    local c = tr.children[k]
+    if new[c] and not new[c].filled then
+      xml.remove(c)
+    end
+  end
+  local k = 1
+  while k <= #tr.children and total() > columns do -- (a new cell with text: a column of the merged cell before it)
+    local c = tr.children[k]
+    if new[c] then
+      for j = k - 1, 1, -1 do
+        local before = tr.children[j]
+        if before.tag == "table:table-cell" and not new[before] and count(before, "table:number-columns-spanned") > 1 then
+          local n = count(before, "table:number-columns-spanned") - 1
+          xml.set_attr(before, "table:number-columns-spanned", n > 1 and tostring(n) or nil)
+          local last = j + n -- (its last covered cell: no longer covered)
+          if tr.children[last] and tr.children[last].tag == "table:covered-table-cell" then
+            xml.remove(tr.children[last])
+            k = k - 1
+          end
+          break
+        end
+      end
+    end
+    k = k + 1
+  end
+end
+
 function M.fix_grid(_, tbl)
   local n, have = 0, 0
   local function count(el, attr)
@@ -2501,6 +2591,37 @@ function M.save(ctx, live)
     end
   end
   local entries, trees = {}, {}
+  if ctx.dirty[M.MAIN] and ctx.auto then -- (neoffice's own automatic styles nothing uses: gone)
+    local used = {}
+    local function walk(el, skip)
+      for _, kv in ipairs(el.attrs or {}) do
+        if kv[1] ~= "style:name" or not skip then
+          used[kv[2]] = true
+        end
+      end
+      for _, c in ipairs(el.children or {}) do
+        if c.tag then
+          walk(c, false)
+        end
+      end
+    end
+    walk(xml.find(ctx.root, "office:body") or {}, false)
+    for _, style in ipairs(ctx.auto.children) do
+      if style.tag then
+        walk(style, true) -- (what a style refers to: its parent, a list style...; not its own name)
+      end
+    end
+    for _, style in ipairs(vim.list_slice(ctx.auto.children)) do
+      local name = style.tag == "style:style" and xml.attr(style, "style:name")
+      if name and name:match("^Neo") and not used[name] then
+        xml.remove(style)
+        ctx.auto_paras[name] = nil
+        if ctx.named then
+          ctx.named[(xml.attr(style, "style:family") or "") .. "|" .. name] = nil
+        end
+      end
+    end
+  end
   if ctx.dirty[M.MAIN] then
     local root = xml.find(ctx.root, "office:document-content")
     for _, ns in ipairs(NAMESPACES) do

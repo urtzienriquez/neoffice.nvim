@@ -420,7 +420,20 @@ function M.start(fmt, ctx, plans, cell_of)
         end
       end
     end
-    state.tr, state.tc, state.col, state.cells = nil, nil, nil, {}
+    -- (cells added to a row: not merged as the one they were copied from; empty ones beyond the
+    -- table's columns, padding, go; one with text takes a column from a merged cell before it)
+    if state.tr and state.new and next(state.new) then
+      if fmt.fit_row then
+        fmt.fit_row(ctx, state.tbl, state.tr, state.new)
+      end
+      for tc in pairs(state.new) do -- (the row changed if one is still in it: padding alone, it didn't)
+        if tc.parent then
+          changed()
+          break
+        end
+      end
+    end
+    state.tr, state.tc, state.col, state.cells, state.new = nil, nil, nil, {}, {}
   end
   local function end_table()
     end_row()
@@ -512,10 +525,19 @@ function M.start(fmt, ctx, plans, cell_of)
         local cells = xml.collect(state.tr, CELLS)
         local nxt = next_of(cells, last)
         local lost = nxt and not taken[nxt] and not state.cells[nxt]
-        tc = lost and nxt or insert_after(emptied(last or cells[1] or xml.collect(state.tbl, CELLS)[1]), last, state.tr, not last and cells[1] or nil)
-        changed()
+        if not lost then -- (the row changed: said when it ends, see end_row)
+          tc = insert_after(emptied(last or cells[1] or xml.collect(state.tbl, CELLS)[1]), last, state.tr, not last and cells[1] or nil)
+          state.new = state.new or {}
+          state.new[tc] = { filled = false }
+        else
+          tc = nxt
+          changed()
+        end
       end
       state.col, state.tc, state.cells[tc], state.prev = at.col, tc, true, nil
+    end
+    if state.new and state.new[state.tc] and not plan.empty then
+      state.new[state.tc].filled = true
     end
     local node = plan.node
     local c = node and cell_of(node)

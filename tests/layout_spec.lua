@@ -268,3 +268,15 @@ describe("colours", function()
     end
   end)
 end)
+
+describe("non-breaking spaces", function()
+  it("show as a faint · (they look like spaces, and aren't)", function()
+    local H = dofile("tests/helpers.lua")
+    H.open(H.copy("rich.docx"))
+    H.set(1, "A\194\160B")
+    require("neoffice").decorate(vim.api.nvim_get_current_buf())
+    local row = H.row(1) - 1
+    local marks = vim.api.nvim_buf_get_extmarks(0, vim.api.nvim_get_namespaces().neoffice_decorations, { row, 0 }, { row, -1 }, { details = true })
+    assert.truthy(vim.iter(marks):find(function(m) return m[3] == 1 and m[4].virt_text and m[4].virt_text[1][1] == "·" end))
+  end)
+end)

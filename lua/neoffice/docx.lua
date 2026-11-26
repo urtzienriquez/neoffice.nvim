@@ -2196,6 +2196,98 @@ local function put(parent, el, order) -- (instead of the child with its tag, in 
   end
   return xml.append(parent, el, at)
 end
+
+-- A row with cells added (`new`: tc -> { filled }): those not merged as the one they were copied
+-- from; empty ones beyond the table's columns (padding, as a row with merged cells written with
+-- all its cells) removed; one with text taking a column from a merged cell before it. Each cell
+-- changed as wide as its columns.
+function M.fit_row(_, tbl, tr, new)
+  local grid = xml.child(tbl, "w:tblGrid")
+  local widths = {}
+  for _, c in ipairs(grid and xml.collect(grid, { ["w:gridCol"] = true }) or {}) do
+    widths[#widths + 1] = tonumber(xml.attr(c, "w:w") or "") or 0
+  end
+  local function span(tc)
+    local el = xml.child(xml.child(tc, "w:tcPr") or {}, "w:gridSpan")
+    return tonumber(el and xml.attr(el, "w:val") or "") or 1
+  end
+  local touched = {}
+  local function set_span(tc, n)
+    local tcpr = xml.child(tc, "w:tcPr") or xml.append(tc, xml.elem("w:tcPr"), 1)
+    local el = xml.child(tcpr, "w:gridSpan")
+    if n <= 1 then
+      if el then
+        xml.remove(el)
+      end
+    else
+      el = el or put(tcpr, xml.elem("w:gridSpan"), TCPR_ORDER)
+      xml.set_attr(el, "w:val", tostring(n))
+    end
+    touched[tc] = true
+  end
+  local cells = vim.tbl_filter(function(c) return c.tag == "w:tc" end, tr.children)
+  for _, tc in ipairs(cells) do
+    if new[tc] then
+      set_span(tc, 1)
+      local merge = xml.child(xml.child(tc, "w:tcPr") or {}, "w:hMerge")
+      if merge then
+        xml.remove(merge)
+      end
+    end
+  end
+  local trpr = xml.child(tr, "w:trPr") or {}
+  local function grid_skip(tag)
+    local el = xml.child(trpr, tag)
+    return tonumber(el and xml.attr(el, "w:val") or "") or 0
+  end
+  local total = grid_skip("w:gridBefore") + grid_skip("w:gridAfter")
+  for _, tc in ipairs(cells) do
+    total = total + span(tc)
+  end
+  if #widths == 0 then
+    return
+  end
+  for k = #cells, 1, -1 do -- (padding: new empty cells, from the end)
+    if total <= #widths then
+      break
+    end
+    if new[cells[k]] and not new[cells[k]].filled then
+      xml.remove(cells[k])
+      table.remove(cells, k)
+      total = total - 1
+    end
+  end
+  for k, tc in ipairs(cells) do -- (a new cell with text: a column of the merged cell before it)
+    if total <= #widths then
+      break
+    end
+    if new[tc] then
+      for j = k - 1, 1, -1 do
+        if not new[cells[j]] and span(cells[j]) > 1 then
+          set_span(cells[j], span(cells[j]) - 1)
+          total = total - 1
+          break
+        end
+      end
+    end
+  end
+  if total <= #widths then
+    local col = grid_skip("w:gridBefore") + 1
+    for _, tc in ipairs(cells) do
+      local w = 0
+      for c = col, col + span(tc) - 1 do
+        w = w + (widths[c] or 0)
+      end
+      local width = xml.child(xml.child(tc, "w:tcPr") or {}, "w:tcW")
+      if touched[tc] and width and w > 0 then
+        xml.set_attr(width, "w:w", tostring(w))
+        xml.set_attr(width, "w:type", "dxa")
+      end
+      col = col + span(tc)
+    end
+  end
+end
+
 local function props_of(el, tag) -- (its w:tblPr or w:tcPr, made if needed: the first child)
   return xml.child(el, tag) or xml.append(el, xml.elem(tag), 1)
 end

@@ -82,7 +82,7 @@ require("neoffice").setup({
   conceal = false, -- hide the marks
   styles = true, -- the document's paragraph styles at its top
   page = true, -- its page settings at its top, and its sections
-  show_tabs = true, -- show tabs as a faint →
+  show_tabs = true, -- show tabs as a faint →, non-breaking spaces as a faint ·
   images = true, -- show images
   comment_text = false, -- each comment's text at the end of its line (or :Neoffice comments text)
   captions = { table = "Table", figure = { "Figure", "Fig." }, separator = ". " }, -- caption words (first written), after the number

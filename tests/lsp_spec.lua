@@ -121,7 +121,7 @@ describe("formatting", function()
     end
   end
 
-  it("aligns tables, adds their line of dashes and missing cells, and tidies attributes", function()
+  it("aligns tables, adds their line of dashes, and tidies attributes; a row with fewer cells keeps them (merged)", function()
     H.open(H.copy("rich.docx"))
     local r = H.row(12)
     api.nvim_buf_set_lines(0, r - 1, r - 1, false, { "{grid,width=full}", "| one | **two** | three |", "| 1 | 2 | 3 |", "|4|5", "" })
@@ -131,7 +131,7 @@ describe("formatting", function()
       "| one | **two** | three |",
       "|----:|--------:|------:|", -- (columns of numbers aligned right, as saving would)
       "|   1 |       2 |     3 |",
-      "|   4 |       5 |       |",
+      "|   4 |       5 |",
     }, vim.list_slice(H.lines(), r, r + 4))
     local before = H.lines()
     format() -- (formatted: nothing more to do)

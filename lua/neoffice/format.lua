@@ -72,9 +72,8 @@ local function format_table(out, lines, first, last, numbers)
       end
       want[c] = #cells == 0 and "|" or c == 0 and "| " .. before or c == #cells and after .. " |" or after .. " | " .. before
     end
-    for c = #cells + 1, columns do -- (the cells a row lacks: empty)
-      want[#cells] = want[#cells] .. " " .. (" "):rep(widths and widths[c] or 0) .. " |"
-    end
+    -- (a row with fewer cells keeps them: in a document, its cells are merged, and cells added
+    -- would be new ones)
     if k == 1 and not has_dashes then -- (the line of dashes it lacks: after the first row)
       want[#cells] = want[#cells] .. "\n" .. dashes
     end
@@ -116,13 +115,15 @@ function M.edits(buf, first, last)
   local header = markup.header(lines) -- (the styles at the top: each line tidy, its names aligned)
   if header and first + 1 <= header.last then
     local ok = vim.iter(header.styles):all(function(st) return st.attrs ~= nil end)
-    if ok then
+    if ok and #header.styles > 0 then
       local tidy = markup.render_header(vim.tbl_map(function(st) return { name = st.name, attrs = st.attrs } end, header.styles))
-      for k, line in ipairs(tidy) do
-        if k > 2 and k < #tidy and lines[k] then
-          edit(out, k - 1, 0, lines[k], line)
-        end
+      for k, st in ipairs(header.styles) do -- (each on its own line: tidy's after "---" and "styles:")
+        edit(out, st.row - 1, 0, lines[st.row], tidy[k + 2])
       end
+    end
+    local page = header.page
+    if page and page.attrs and not page.bad then -- (the page's settings)
+      edit(out, page.row - 1, 0, lines[page.row], "page: {" .. require("neoffice.pages").render(page.attrs) .. "}")
     end
   end
   for row = first + 1, math.min(last + 1, #lines) do -- formats' lines (no marks on them: the whole line)

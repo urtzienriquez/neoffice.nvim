@@ -150,3 +150,26 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
   end)
 end
+
+describe("odt a first paragraph naming its page style, with a shape holding an empty paragraph (as LibreOffice writes a form)", function()
+  local SHAPED = function(name, text)
+    if name ~= "content.xml" then
+      return text
+    end
+    local style = '<style:style style:name="Start" style:family="paragraph" style:parent-style-name="Standard" style:master-page-name="Standard"/>'
+    local p = '<text:p text:style-name="Start"><draw:custom-shape text:anchor-type="paragraph" svg:width="5cm" svg:height="1cm" svg:x="0cm" svg:y="0cm"><text:p/></draw:custom-shape>A form</text:p>'
+    return (text:gsub("<office:automatic%-styles>", "%0" .. style, 1):gsub("<office:text>", "%0" .. p, 1))
+  end
+  it("opens, with no section of its own, and saves unchanged", function()
+    neo.config.page = true
+    local path = H.copy("rich.odt", SHAPED)
+    H.open(path)
+    neo.config.page = false
+    assert.truthy(vim.tbl_contains(H.paras(), "A form"), table.concat(H.lines(), "\n"))
+    assert.same({}, vim.tbl_filter(function(l) return l:find("^\\newpage {") ~= nil end, H.lines()))
+    local before = H.bytes(path)
+    vim.bo.modified = true
+    H.save()
+    assert.equals(before, H.bytes(path))
+  end)
+end)
