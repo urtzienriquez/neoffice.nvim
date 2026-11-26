@@ -45,7 +45,13 @@ local function is_on(el) -- <w:b/> is on; <w:b w:val="0"/> and <w:u w:val="none"
   return el ~= nil and v ~= "0" and v ~= "false" and v ~= "off" and v ~= "none"
 end
 
--- The formatting of run properties: { b, i, u, sup, sub } (see markup.FLAGS).
+-- The formatting of run properties: { b, i, u, s, h, sup, sub } (see markup.FLAGS).
+-- (Word's highlight colours: "darkBlue" <-> "darkblue")
+local function word_color(name)
+  return (name:gsub("^(%l+)(blue)$", "%1Blue"):gsub("^(%l+)(cyan)$", "%1Cyan"):gsub("^(%l+)(green)$", "%1Green")
+    :gsub("^(%l+)(magenta)$", "%1Magenta"):gsub("^(%l+)(red)$", "%1Red"):gsub("^(%l+)(yellow)$", "%1Yellow")
+    :gsub("^(%l+)(gray)$", "%1Gray"))
+end
 local function flags(rpr)
   local function get(tag)
     return is_on(rpr and xml.child(rpr, tag))
@@ -55,7 +61,7 @@ local function flags(rpr)
   local highlight = rpr and xml.child(rpr, "w:highlight")
   return {
     b = get("w:b"), i = get("w:i"), u = get("w:u"), s = get("w:strike"),
-    h = highlight ~= nil and xml.attr(highlight, "w:val") ~= "none",
+    h = is_on(highlight) and (markup.color(xml.attr(highlight, "w:val")) or "yellow"),
     sup = align == "superscript", sub = align == "subscript",
   }
 end
@@ -180,7 +186,15 @@ local function block_of(ctx, ppr)
     block = list and { list = list } or {}
   end
   block.align = JC[jc and xml.attr(jc, "w:val") or ""]
+  block.caption_style = id and ctx.caption_styles[id] or nil -- (see captions in init.lua)
   return block
+end
+
+-- The sequence a numbering field counts ("SEQ Table \* ARABIC": Table), if it is one that just
+-- counts (not one that repeats, resets or hides the number).
+function M.seq_name(instr)
+  local name, rest = (instr or ""):match("^%s*SEQ%s+([^%s\\]+)(.*)$")
+  return name and not rest:find("\\[rcsh]") and name or nil
 end
 
 -- A footnote's text (one line: its paragraphs joined by spaces).
@@ -308,7 +322,8 @@ local function read_para(ctx, p)
           xml.append(group, xml.copy(parent.children[j]))
         end
         local result = table.concat(vim.tbl_map(xml.text, xml.collect(group, { ["w:t"] = true })))
-        add({ object = group, visible = true, field = { text = result } })
+        local instr = table.concat(vim.tbl_map(xml.text, xml.collect(group, { ["w:instrText"] = true })))
+        add({ object = group, visible = true, field = { text = result, seq = M.seq_name(instr) } })
         k = stop
       elseif tag == "w:pPr" then
         block = block_of(ctx, el)
@@ -358,7 +373,8 @@ local function read_para(ctx, p)
         comment_marker(el, "comment_end")
       elseif tag and not DROP[tag] then
         local text = visible(el) and xml.text(el) or ""
-        add({ object = el, visible = visible(el), field = text ~= "" and { text = text } or nil })
+        local seq = tag == "w:fldSimple" and M.seq_name(xml.attr(el, "w:instr"))
+        add({ object = el, visible = visible(el), field = text ~= "" and { text = text, seq = seq or nil } or nil })
       end
     end
   end
@@ -457,6 +473,8 @@ function M.load(path)
     comment_of = {}, -- <w:comment> -> comment
     title_styles = {}, -- paragraph style ids of titles
     quote_styles = {}, -- ... and of quotes
+    caption_styles = {}, -- ... and of captions
+    caption_style = {}, -- the id of the styles "caption", "table caption" and "image caption"
     footnote_ids = {}, -- the footnotes referenced when opened
     style_numbering = {}, -- paragraph style id -> its <w:numPr> (list styles, numbered headings)
     equations = {}, -- the spans of equations, in order
@@ -477,6 +495,9 @@ function M.load(path)
     if name == "title" and id then -- (Word's "Title" style)
       ctx.title_styles[id] = true
       ctx.title_style = ctx.title_style or id
+    elseif (name == "caption" or name == "table caption" or name == "image caption") and id then
+      ctx.caption_styles[id] = true
+      ctx.caption_style[name] = id
     elseif (name == "quote" or name == "block text" or name == "intense quote") and id then
       ctx.quote_styles[id] = true
       ctx.quote_style = name == "quote" and id or ctx.quote_style or id
@@ -573,7 +594,7 @@ local function text_run(piece)
   local have = flags(rpr)
   for flag, tag in pairs({ b = "w:b", i = "w:i", u = "w:u", s = "w:strike", h = "w:highlight" }) do
     if have[flag] ~= (piece[flag] or false) then
-      set_flag(rpr, tag, piece[flag] and (flag == "u" and "single" or flag == "h" and "yellow" or true))
+      set_flag(rpr, tag, piece[flag] and (flag == "u" and "single" or flag == "h" and word_color(markup.named_color(piece.h)) or true))
     end
   end
   if have.sup ~= piece.sup or have.sub ~= piece.sub then
@@ -794,6 +815,81 @@ local function heading_style(ctx, level)
   return ctx.style_of[level] or "Heading" .. level
 end
 
+-- The style id of a caption of this kind ("table", "figure"): the document's "table caption" or
+-- "image caption" (pandoc's), else its "caption", else a "caption" style added.
+local function caption_style(ctx, kind)
+  local id = ctx.caption_style[kind == "table" and "table caption" or "image caption"] or ctx.caption_style.caption
+  local styles = xml.find(part(ctx, STYLES) or {}, "w:styles")
+  if not id and styles then
+    id = "Caption"
+    xml.append(styles, xml.elem("w:style", { { "w:type", "paragraph" }, { "w:styleId", id } }, {
+      xml.elem("w:name", { { "w:val", "caption" } }),
+      xml.elem("w:basedOn", { { "w:val", "Normal" } }),
+      xml.elem("w:next", { { "w:val", "Normal" } }),
+      xml.elem("w:qFormat"),
+      xml.elem("w:pPr", {}, { xml.elem("w:spacing", { { "w:before", "120" }, { "w:after", "120" } }) }),
+    }))
+    ctx.caption_style.caption, ctx.caption_styles[id], ctx.dirty[STYLES] = id, true, true
+  end
+  return id or "Caption"
+end
+
+-- A caption's number: a field counting the captions of its word ("SEQ Table"), showing `n`.
+function M.caption_number(_, label, n)
+  return xml.elem("w:fldSimple", { { "w:instr", " SEQ " .. label .. " \\* ARABIC " } }, {
+    xml.elem("w:r", {}, { xml.elem("w:rPr", {}, { xml.elem("w:noProof") }), xml.elem("w:t", {}, { { text = tostring(n or 1) } }) }),
+  })
+end
+
+-- Every caption's number as it is in the document's order (Table 1, 2...: each word counts its
+-- own), in the fields' shown results. Whether any changed.
+function M.number_captions(ctx)
+  local count, changed = {}, false
+  local function show(name, texts)
+    local key = name:lower()
+    count[key] = (count[key] or 0) + 1
+    local n = tostring(count[key])
+    for k, t in ipairs(texts) do
+      local want = k == 1 and n or ""
+      if xml.text(t) ~= want then
+        t.children, changed = { { text = want } }, true
+      end
+    end
+  end
+  for _, p in ipairs(xml.collect(xml.find(ctx.root, "w:body") or {}, { ["w:p"] = true })) do
+    local state, name, texts = nil, nil, nil -- (in a field: "instr", then "result")
+    for _, el in ipairs(xml.collect(p, { ["w:fldSimple"] = true, ["w:fldChar"] = true, ["w:instrText"] = true, ["w:t"] = true })) do
+      if el.tag == "w:fldSimple" then
+        local seq = M.seq_name(xml.attr(el, "w:instr"))
+        if seq then
+          show(seq, xml.collect(el, { ["w:t"] = true }))
+        end
+      elseif el.tag == "w:fldChar" then
+        local kind = xml.attr(el, "w:fldCharType")
+        if kind == "begin" then
+          state, name, texts = "instr", "", {}
+        elseif kind == "separate" and state then
+          state = "result"
+        elseif kind == "end" and state then
+          local seq = M.seq_name(name)
+          if seq then
+            show(seq, texts)
+          end
+          state = nil
+        end
+      elseif el.tag == "w:instrText" and state == "instr" then
+        name = name .. xml.text(el)
+      elseif el.tag == "w:t" and state == "result" then
+        texts[#texts + 1] = el
+      end
+    end
+  end
+  if changed then
+    ctx.dirty[M.MAIN] = true
+  end
+  return changed
+end
+
 -- The style id of a quote, adding a "Quote" style if the document has none.
 local function quote_style(ctx)
   local styles = xml.find(part(ctx, STYLES) or {}, "w:styles")
@@ -815,6 +911,21 @@ end
 local PPR_ORDER = {}
 for i, tag in ipairs(vim.split("pStyle keepNext keepLines pageBreakBefore framePr widowControl numPr suppressLineNumbers pBdr shd tabs suppressAutoHyphens kinsoku wordWrap overflowPunct topLinePunct autoSpaceDE autoSpaceDN bidi adjustRightInd snapToGrid spacing ind contextualSpacing mirrorIndents suppressOverlap jc textDirection textAlignment textboxTightWrap outlineLvl divId cnfStyle rPr sectPr pPrChange", " ")) do
   PPR_ORDER["w:" .. tag] = i
+end
+
+-- Kept on the same page as the paragraph after it (a table's caption, a figure).
+function M.keep_with_next(_, p)
+  local ppr = xml.child(p, "w:pPr") or xml.append(p, xml.elem("w:pPr"), 1)
+  if not xml.child(ppr, "w:keepNext") then
+    local at = #ppr.children + 1
+    for k, c in ipairs(ppr.children) do
+      if (PPR_ORDER[c.tag] or 0) > PPR_ORDER["w:keepNext"] then
+        at = k
+        break
+      end
+    end
+    xml.append(ppr, xml.elem("w:keepNext"), at)
+  end
 end
 
 local function set_align(ppr, align) -- (only when it changed: "start", "left", "both"... stay as they are)
@@ -849,15 +960,18 @@ end
 
 -- ── Tables (see tables.lua) ─────────────────────────────────────────────────
 
-function M.new_table() -- one cell, with borders (rows and cells are added by copying)
-  local borders = xml.elem("w:tblBorders")
-  for _, side in ipairs({ "top", "left", "bottom", "right", "insideH", "insideV" }) do
-    xml.append(borders, xml.elem("w:" .. side, { { "w:val", "single" }, { "w:sz", "4" }, { "w:space", "0" }, { "w:color", "auto" } }))
-  end
+function M.new_table(ctx) -- one cell (rows and cells are added by copying; borders: see tables.lua)
+  -- its paragraphs: compact (pandoc's style for them, if the document has it; else no spacing)
+  local compact = vim.iter(xml.collect(part(ctx, STYLES) or {}, { ["w:style"] = true })):any(function(s)
+    return xml.attr(s, "w:styleId") == "Compact" and xml.attr(s, "w:type") == "paragraph"
+  end)
+  local ppr = xml.elem("w:pPr", {}, {
+    compact and xml.elem("w:pStyle", { { "w:val", "Compact" } }) or xml.elem("w:spacing", { { "w:before", "0" }, { "w:after", "0" } }),
+  })
   return xml.elem("w:tbl", {}, {
-    xml.elem("w:tblPr", {}, { xml.elem("w:tblW", { { "w:w", "0" }, { "w:type", "auto" } }), borders }),
+    xml.elem("w:tblPr", {}, { xml.elem("w:tblW", { { "w:w", "0" }, { "w:type", "auto" } }) }),
     xml.elem("w:tblGrid", {}, { xml.elem("w:gridCol", { { "w:w", "2000" } }) }),
-    xml.elem("w:tr", {}, { xml.elem("w:tc", {}, { xml.elem("w:tcPr", {}, { xml.elem("w:tcW", { { "w:w", "0" }, { "w:type", "auto" } }) }), xml.elem("w:p") }) }),
+    xml.elem("w:tr", {}, { xml.elem("w:tc", {}, { xml.elem("w:tcPr", {}, { xml.elem("w:tcW", { { "w:w", "0" }, { "w:type", "auto" } }) }), xml.elem("w:p", {}, { ppr }) }) }),
   })
 end
 
@@ -881,9 +995,336 @@ function M.fix_grid(_, tbl)
   end
 end
 
-function M.after_table(tbl) -- (Word wants a paragraph after a table: once all paragraphs are in place)
+-- A table's look (see tables.lua): { rules (a preset of tables.BORDERS, if its lines are one),
+-- width, height (if its cell padding is one of neoffice's), position, typeset (by neoffice) }.
+local TBLPR_ORDER, TCPR_ORDER = {}, {}
+for i, tag in ipairs(vim.split("tblStyle tblpPr tblOverlap bidiVisual tblStyleRowBandSize tblStyleColBandSize tblW jc tblCellSpacing tblInd tblBorders shd tblLayout tblCellMar tblLook tblCaption tblDescription tblPrChange", " ")) do
+  TBLPR_ORDER["w:" .. tag] = i
+end
+for i, tag in ipairs(vim.split("cnfStyle tcW gridSpan hMerge vMerge tcBorders shd noWrap tcMar textDirection tcFitText vAlign hideMark headers cellIns cellDel cellMerge tcPrChange", " ")) do
+  TCPR_ORDER["w:" .. tag] = i
+end
+local function put(parent, el, order) -- (instead of the child with its tag, in schema order)
+  local old = xml.child(parent, el.tag)
+  if old then
+    xml.remove(old)
+  end
+  local at = #parent.children + 1
+  for k, c in ipairs(parent.children) do
+    if (order[c.tag] or 0) > order[el.tag] then
+      at = k
+      break
+    end
+  end
+  return xml.append(parent, el, at)
+end
+local function props_of(el, tag) -- (its w:tblPr or w:tcPr, made if needed: the first child)
+  return xml.child(el, tag) or xml.append(el, xml.elem(tag), 1)
+end
+local function grid_of(tbl) -- its rows of cells
+  return vim.tbl_map(function(tr) return xml.collect(tr, { ["w:tc"] = true }) end, xml.collect(tbl, { ["w:tr"] = true }))
+end
+
+local function line_width(borders, names) -- (0 if none, 1 thin, 2 thick; nil if not said)
+  for _, name in ipairs(names) do
+    local el = xml.child(borders, "w:" .. name)
+    if el then
+      local val = xml.attr(el, "w:val")
+      local sz = tonumber(xml.attr(el, "w:sz") or "") or 4 -- (in eighths of a point)
+      return (val == "nil" or val == "none") and 0 or sz >= 6 and 2 or 1 -- (thick from 3/4 of a point)
+    end
+  end
+end
+-- A table's style and those it is based on (the most specific first): the document's default
+-- table style if it names none.
+local function style_chain(ctx, tbl)
+  if not ctx.table_styles then
+    ctx.table_styles = {}
+    for _, style in ipairs(xml.collect(part(ctx, STYLES) or {}, { ["w:style"] = true })) do
+      if xml.attr(style, "w:type") == "table" then
+        ctx.table_styles[xml.attr(style, "w:styleId") or ""] = style
+        if xml.attr(style, "w:default") == "1" then
+          ctx.table_styles[false] = style
+        end
+      end
+    end
+  end
+  local ref = xml.child(xml.child(tbl, "w:tblPr") or {}, "w:tblStyle")
+  local style, chain = ctx.table_styles[ref and xml.attr(ref, "w:val") or false], {}
+  while style and #chain < 10 do
+    chain[#chain + 1] = style
+    local based = xml.child(style, "w:basedOn")
+    style = based and ctx.table_styles[xml.attr(based, "w:val") or ""]
+  end
+  return chain
+end
+local function look(tbl, name, bit) -- (whether a table shows its style's formatting for its first row...)
+  local el = xml.child(xml.child(tbl, "w:tblPr") or {}, "w:tblLook")
+  local on = el and xml.attr(el, "w:" .. name)
+  if on then
+    return on == "1" or on == "true" or on == "on"
+  end
+  local val = el and tonumber(xml.attr(el, "w:val") or "", 16)
+  return val ~= nil and math.floor(val / bit) % 2 == 1
+end
+
+function M.table_format(ctx, tbl)
+  local tables = require("neoffice.tables")
+  -- a cell's borders: its own; else its style's for the first or last row; else the table's (its
+  -- own, then its style's)
+  local chain = style_chain(ctx, tbl)
+  local own = { xml.child(xml.child(tbl, "w:tblPr") or {}, "w:tblBorders") or {} }
+  for _, style in ipairs(chain) do
+    own[#own + 1] = xml.child(xml.child(style, "w:tblPr") or {}, "w:tblBorders") or {}
+  end
+  local function conditional(kind)
+    local out = {}
+    for _, style in ipairs(chain) do
+      for _, pr in ipairs(xml.collect(style, { ["w:tblStylePr"] = true })) do
+        if xml.attr(pr, "w:type") == kind then
+          out[#out + 1] = xml.child(xml.child(pr, "w:tcPr") or {}, "w:tcBorders") or {}
+        end
+      end
+    end
+    return out
+  end
+  local first = look(tbl, "firstRow", 0x20) and conditional("firstRow") or {}
+  local last = look(tbl, "lastRow", 0x40) and conditional("lastRow") or {}
+  local rows = grid_of(tbl)
+  local grid = {}
+  for r, row in ipairs(rows) do
+    grid[r] = {}
+    for c, tc in ipairs(row) do
+      local list = { xml.child(xml.child(tc, "w:tcPr") or {}, "w:tcBorders") or {} }
+      vim.list_extend(list, r == 1 and first or {})
+      vim.list_extend(list, r == #rows and last or {})
+      local function side(names, outer, edge, inner)
+        for _, borders in ipairs(list) do
+          local w = line_width(borders, names)
+          if w then
+            return w
+          end
+        end
+        for _, borders in ipairs(own) do
+          local w = line_width(borders, edge and outer or inner)
+          if w then
+            return w
+          end
+        end
+        return 0 -- (said nowhere: none)
+      end
+      grid[r][c] = {
+        top = side({ "top" }, { "top" }, r == 1, { "insideH" }),
+        bottom = side({ "bottom" }, { "bottom" }, r == #rows, { "insideH" }),
+        left = side({ "left", "start" }, { "left", "start" }, c == 1, { "insideV" }),
+        right = side({ "right", "end" }, { "right", "end" }, c == #row, { "insideV" }),
+      }
+    end
+  end
+  local tblpr = xml.child(tbl, "w:tblPr") or {}
+  local format = { rules = tables.borders_of(grid), width = "auto", position = "left" }
+  local width = xml.child(tblpr, "w:tblW")
+  local w, kind = width and xml.attr(width, "w:w") or "0", width and xml.attr(width, "w:type")
+  if kind == "pct" then
+    local percent = w:match("%%$") and tonumber(w:sub(1, -2)) or (tonumber(w) or 0) / 50
+    format.width = percent >= 100 and "full" or percent > 0 and ("%g%%"):format(percent) or "auto"
+  elseif kind == "dxa" and (tonumber(w) or 0) > 0 then
+    format.width = markup.width(tonumber(w) * 2.54 / 1440)
+  end
+  local jc = xml.child(tblpr, "w:jc")
+  local align = jc and xml.attr(jc, "w:val")
+  format.position = align == "center" and "center" or (align == "right" or align == "end") and "right" or "left"
+  if format.width == "full" then -- (where it is doesn't matter)
+    format.position = tables.defaults().position
+  end
+  local margins = xml.child(tblpr, "w:tblCellMar") or {}
+  local function margin(side)
+    local el = xml.child(margins, "w:" .. side)
+    return el and (xml.attr(el, "w:type") or "dxa") == "dxa" and (tonumber(xml.attr(el, "w:w") or "") or 0) * 2.54 / 1440 or nil
+  end
+  local top, bottom = margin("top"), margin("bottom")
+  format.height = top and bottom and math.abs(top - bottom) < 0.006 and tables.height_of(top) or nil
+  format.typeset = format.rules ~= nil and format.height ~= nil -- (by neoffice: it keeps it so)
+  return format
+end
+
+-- The size of the document's text (pt): its Normal style's, or its default.
+local function font_size(ctx)
+  local styles = part(ctx, STYLES) or {}
+  for _, style in ipairs(xml.collect(styles, { ["w:style"] = true })) do
+    if xml.attr(style, "w:type") == "paragraph" and xml.attr(style, "w:default") == "1" then
+      local sz = xml.find(style, "w:sz")
+      if sz and tonumber(xml.attr(sz, "w:val") or "") then
+        return tonumber(xml.attr(sz, "w:val")) / 2
+      end
+    end
+  end
+  local defaults = xml.find(styles, "w:rPrDefault")
+  local sz = defaults and xml.find(defaults, "w:sz")
+  return sz and tonumber(xml.attr(sz, "w:val") or "") and tonumber(xml.attr(sz, "w:val")) / 2 or 10
+end
+
+local function twips(cm)
+  return tostring(math.floor(cm / 2.54 * 1440 + 0.5))
+end
+
+-- Typeset a table with these options (see tables.lua; those not given stay as they are): its rules
+-- (on every cell, and the table), column widths (from its content), row height (cell padding,
+-- and paragraphs without spacing), position; and with `typeset`, its first row repeated on each
+-- page and at the bottom of its cells, and rows that don't break across pages.
+local SIZE = { "4", "8" } -- (thin and thick lines: half a point and a point)
+local function border(tag, w)
+  return xml.elem(tag, w > 0 and { { "w:val", "single" }, { "w:sz", SIZE[w] }, { "w:space", "0" }, { "w:color", "auto" } } or { { "w:val", "nil" } })
+end
+function M.set_table_format(ctx, tbl, set)
+  local tables = require("neoffice.tables")
+  local tblpr = props_of(tbl, "w:tblPr")
+  local grid = grid_of(tbl)
+  if set.rules then
+    local preset = tables.BORDERS[set.rules]
+    local borders = xml.elem("w:tblBorders")
+    for _, side in ipairs({ "top", "left", "bottom", "right", "insideH", "insideV" }) do
+      xml.append(borders, border("w:" .. side, preset[side] or 0)) -- (the line under the first row: the cells')
+    end
+    put(tblpr, borders, TBLPR_ORDER)
+    for r, row in ipairs(grid) do
+      for c, tc in ipairs(row) do
+        local sides = tables.cell_borders(set.rules, r, #grid, c, #row)
+        put(props_of(tc, "w:tcPr"), xml.elem("w:tcBorders", {}, {
+          border("w:top", sides.top), border("w:left", sides.left), border("w:bottom", sides.bottom), border("w:right", sides.right),
+        }), TCPR_ORDER)
+      end
+    end
+  end
+  if set.position then
+    put(tblpr, xml.elem("w:jc", { { "w:val", set.position } }), TBLPR_ORDER)
+  end
+  if set.height then
+    local tb, lr = twips(tables.HEIGHT[set.height]), twips(tables.PADDING)
+    put(tblpr, xml.elem("w:tblCellMar", {}, {
+      xml.elem("w:top", { { "w:w", tb }, { "w:type", "dxa" } }), xml.elem("w:left", { { "w:w", lr }, { "w:type", "dxa" } }),
+      xml.elem("w:bottom", { { "w:w", tb }, { "w:type", "dxa" } }), xml.elem("w:right", { { "w:w", lr }, { "w:type", "dxa" } }),
+    }), TBLPR_ORDER)
+    -- the height is the padding's: paragraphs without spacing or indentation, single-spaced
+    for _, p in ipairs(xml.collect(tbl, { ["w:p"] = true }, { ["w:tbl"] = true })) do
+      local ppr = props_of(p, "w:pPr")
+      put(ppr, xml.elem("w:spacing", { { "w:before", "0" }, { "w:after", "0" }, { "w:line", "240" }, { "w:lineRule", "auto" } }), PPR_ORDER)
+      if not xml.child(ppr, "w:numPr") then
+        put(ppr, xml.elem("w:ind", { { "w:left", "0" }, { "w:right", "0" }, { "w:firstLine", "0" } }), PPR_ORDER)
+      end
+    end
+  end
+  if set.width then
+    -- the columns: as wide as their content (each cell spanning one column counts)
+    local cols = xml.collect(xml.child(tbl, "w:tblGrid") or {}, { ["w:gridCol"] = true })
+    local columns = {}
+    for c = 1, #cols do
+      columns[c] = {}
+    end
+    for _, row in ipairs(grid) do
+      local c = 1
+      for _, tc in ipairs(row) do
+        local span = xml.child(xml.child(tc, "w:tcPr") or {}, "w:gridSpan")
+        span = tonumber(span and xml.attr(span, "w:val") or "") or 1
+        if span == 1 and columns[c] then
+          columns[c][#columns[c] + 1] = vim.tbl_map(function(p)
+            return table.concat(vim.tbl_map(xml.text, xml.collect(p, { ["w:t"] = true })))
+          end, xml.collect(tc, { ["w:p"] = true }, { ["w:tbl"] = true }))
+        end
+        c = c + span
+      end
+    end
+    local widths = tables.widths(columns, set.width, font_size(ctx) / 72 * 2.54, M.text_width(ctx))
+    for c, col in ipairs(cols) do
+      xml.set_attr(col, "w:w", twips(widths[c]))
+    end
+    for _, row in ipairs(grid) do
+      local c = 1
+      for _, tc in ipairs(row) do
+        local span = xml.child(xml.child(tc, "w:tcPr") or {}, "w:gridSpan")
+        span = tonumber(span and xml.attr(span, "w:val") or "") or 1
+        local w = 0
+        for k = c, math.min(c + span - 1, #widths) do
+          w = w + widths[k]
+        end
+        put(props_of(tc, "w:tcPr"), xml.elem("w:tcW", { { "w:w", twips(w) }, { "w:type", "dxa" } }), TCPR_ORDER)
+        c = c + span
+      end
+    end
+    local percent = tonumber(set.width:match("^([%d.]+)%%$") or "")
+    local cm = not percent and markup.cm(set.width)
+    local w, kind = "0", "auto" -- (auto: Word's AutoFit to the content, from these widths)
+    if set.width == "full" then
+      w, kind = "5000", "pct"
+    elseif percent then
+      w, kind = tostring(math.floor(percent * 50 + 0.5)), "pct"
+    elseif cm then
+      w, kind = twips(cm), "dxa"
+    end
+    put(tblpr, xml.elem("w:tblW", { { "w:w", w }, { "w:type", kind } }), TBLPR_ORDER)
+    local layout = xml.child(tblpr, "w:tblLayout") -- (AutoFit)
+    if layout then
+      xml.remove(layout)
+    end
+  end
+  if set.typeset then
+    local before = tbl.parent and tbl.parent.children[xml.index(tbl) - 1] -- (its caption: kept with it)
+    if before and before.tag == "w:p" then
+      put(props_of(before, "w:pPr"), xml.elem("w:keepNext"), PPR_ORDER)
+    end
+    for r, row in ipairs(grid) do
+      local tr = row[1] and row[1].parent or nil
+      if tr then
+        local trpr = xml.child(tr, "w:trPr")
+        if not trpr then
+          local ex = xml.child(tr, "w:tblPrEx")
+          trpr = xml.append(tr, xml.elem("w:trPr"), ex and xml.index(ex) + 1 or 1)
+        end
+        for _, tag in ipairs({ "w:tblHeader", "w:cantSplit" }) do
+          local el = xml.child(trpr, tag)
+          if el then
+            xml.remove(el)
+          end
+        end
+        xml.append(trpr, xml.elem("w:cantSplit"))
+        if r == 1 then
+          xml.append(trpr, xml.elem("w:tblHeader"))
+        end
+      end
+      -- (a short table on one page: each row's paragraphs kept with the next row)
+      local keep = #grid <= tables.KEEP_ROWS and r < #grid
+      for _, tc in ipairs(row) do
+        for _, p in ipairs(xml.collect(tc, { ["w:p"] = true }, { ["w:tbl"] = true })) do
+          local ppr = props_of(p, "w:pPr")
+          local old = xml.child(ppr, "w:keepNext")
+          if old then
+            xml.remove(old)
+          end
+          if keep then
+            put(ppr, xml.elem("w:keepNext"), PPR_ORDER)
+          end
+        end
+        local tcpr = props_of(tc, "w:tcPr")
+        local v = xml.child(tcpr, "w:vAlign")
+        if v then
+          xml.remove(v)
+        end
+        if r == 1 and #grid > 1 then
+          put(tcpr, xml.elem("w:vAlign", { { "w:val", "bottom" } }), TCPR_ORDER)
+        end
+      end
+    end
+  end
+end
+
+function M.after_table(tbl) -- (Word wants a paragraph after a table: once all paragraphs are in place;
+  -- also between two tables, which would otherwise be one)
   local after = tbl.parent and tbl.parent.children[xml.index(tbl) + 1]
-  if tbl.parent and (not after or after.tag == "w:sectPr") then
+  local before = tbl.parent and tbl.parent.children[xml.index(tbl) - 1]
+  if before and before.tag == "w:tbl" then
+    xml.append(tbl.parent, xml.elem("w:p"), xml.index(tbl))
+  end
+  if tbl.parent and (not after or after.tag == "w:sectPr" or after.tag == "w:tbl") then
     xml.append(tbl.parent, xml.elem("w:p"), xml.index(tbl) + 1)
   end
 end
@@ -1014,6 +1455,10 @@ end
 
 function M.fill(ctx, p, block, pieces)
   local ppr = xml.child(p, "w:pPr")
+  local was_caption = false -- (it had a caption's number: its caption style goes if it no longer is one)
+  for _, f in ipairs(xml.collect(p, { ["w:fldSimple"] = true, ["w:instrText"] = true })) do
+    was_caption = was_caption or M.seq_name(f.tag == "w:fldSimple" and xml.attr(f, "w:instr") or xml.text(f)) ~= nil
+  end
   p.children = {}
   -- comment references a deletion written back as it was holds (a reference run, deleted): not
   -- written again for its comment
@@ -1029,9 +1474,10 @@ function M.fill(ctx, p, block, pieces)
   -- what kind of paragraph it is: a heading or title (by its style), a list item, or plain
   local style = ppr and xml.child(ppr, "w:pStyle")
   local current = style and xml.attr(style, "w:val")
-  local styled = current and (ctx.level_of[current] or ctx.title_styles[current] or ctx.quote_styles[current])
+  local styled = current and (ctx.level_of[current] or ctx.title_styles[current] or ctx.quote_styles[current]
+    or was_caption and ctx.caption_styles[current])
   local want = block.heading and heading_style(ctx, block.heading) or block.title and title_style(ctx)
-    or block.quote and quote_style(ctx)
+    or block.quote and quote_style(ctx) or block.caption and caption_style(ctx, block.caption)
   if want then
     local was_item = not styled and list_of(ctx, ppr)
     ppr = ppr or xml.elem("w:pPr")

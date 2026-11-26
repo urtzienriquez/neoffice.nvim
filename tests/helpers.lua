@@ -47,6 +47,23 @@ function H.lines()
   return api.nvim_buf_get_lines(0, 0, -1, false)
 end
 
+-- A table's line as it would be written unaligned ("| a | b |", "|---|---:|"), others as they are.
+function H.compact(line)
+  local markup = require("neoffice.markup")
+  local format = line:match("^|") and line:find("---", 1, true) and markup.table_format(line) -- (not "| - |")
+  if format then
+    return markup.format_line(format, select(2, line:gsub("|", "")) - 1)
+  end
+  local spans = line:match("^|") and markup.cell_spans(line) or {}
+  if #spans == 0 then
+    return line
+  end
+  return "| " .. table.concat(vim.tbl_map(function(sp) return line:sub(sp.s, sp.e) end, spans), " | ") .. " |"
+end
+function H.compact_lines()
+  return vim.tbl_map(H.compact, H.lines())
+end
+
 function H.paras() -- the paragraphs' texts
   return vim.tbl_map(function(p) return p.text end, neo.blocks(api.nvim_get_current_buf()))
 end

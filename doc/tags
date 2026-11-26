@@ -2,8 +2,10 @@
 neoffice	neoffice.txt	/*neoffice*
 neoffice-accept-reject	neoffice.txt	/*neoffice-accept-reject*
 neoffice-align	neoffice.txt	/*neoffice-align*
+neoffice-attributes	neoffice.txt	/*neoffice-attributes*
 neoffice-blocks	neoffice.txt	/*neoffice-blocks*
 neoffice-breaks	neoffice.txt	/*neoffice-breaks*
+neoffice-captions	neoffice.txt	/*neoffice-captions*
 neoffice-changes	neoffice.txt	/*neoffice-changes*
 neoffice-comments	neoffice.txt	/*neoffice-comments*
 neoffice-comments-panel	neoffice.txt	/*neoffice-comments-panel*
@@ -19,6 +21,7 @@ neoffice-marks	neoffice.txt	/*neoffice-marks*
 neoffice-options	neoffice.txt	/*neoffice-options*
 neoffice-read	neoffice.txt	/*neoffice-read*
 neoffice-safety	neoffice.txt	/*neoffice-safety*
+neoffice-table-format	neoffice.txt	/*neoffice-table-format*
 neoffice-tables	neoffice.txt	/*neoffice-tables*
 neoffice-text	neoffice.txt	/*neoffice-text*
 neoffice-tracking	neoffice.txt	/*neoffice-tracking*

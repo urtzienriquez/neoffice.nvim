@@ -110,6 +110,32 @@ for _, name in ipairs({ "layout.docx", "layout.odt" }) do
       assert.equals("~~Some~~ struck and lit ==words==.", H.paras()[8])
     end)
 
+    it("highlights in colours, and underlines with ++", function()
+      H.set(8, "Some ==green=={green}, ==dark=={darkblue}, ==hex=={#00ff00} and ++under++ words.")
+      H.reopen()
+      -- (#00ff00 is green; in .docx an unnamed colour becomes the nearest of Word's)
+      assert.equals("Some ==green=={green}, ==dark=={darkblue}, ==hex=={green} and ++under++ words.", H.paras()[8])
+      local main = zip.read(H.doc().path, H.MAIN[ext])
+      if ext == "docx" then
+        assert.truthy(main:find('<w:highlight w:val="darkBlue"/>', 1, true))
+      else
+        assert.truthy(main:find('fo:background-color="#000080"', 1, true))
+      end
+      require("neoffice").decorate(0) -- (shown in their colours; underlines by the syntax)
+      local shown = {}
+      for _, m in ipairs(vim.api.nvim_buf_get_extmarks(0, -1, { H.row(8) - 1, 0 }, { H.row(8) - 1, -1 }, { details = true })) do
+        local group = m[4].hl_group
+        if group and group:match("^Neoffice[HU]") then
+          shown[#shown + 1] = group .. ":" .. H.lines()[H.row(8)]:sub(m[3] + 1, m[4].end_col)
+        end
+      end
+      table.sort(shown)
+      assert.same({ "NeofficeHighlight_000080:dark", "NeofficeHighlight_00ff00:green", "NeofficeHighlight_00ff00:hex" }, shown)
+      H.set(8, "Some ==green== words.") -- (back to yellow)
+      H.reopen()
+      assert.equals("Some ==green== words.", H.paras()[8])
+    end)
+
     it("edits, adds and deletes footnotes", function()
       H.set(9, "A claim^[The first note, edited.] and another. New^[A new note].")
       H.reopen()

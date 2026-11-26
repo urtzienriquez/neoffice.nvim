@@ -25,6 +25,10 @@ M.config = {
   comment_text = false, -- each comment's author and text at the end of its line (:Neoffice comments text)
   image_width = 60, -- at most this many columns wide
   image_height = 20, -- and this many lines high
+  -- captions ("Table: ...", "Figure: ..."): their words, and what goes between the number and the text
+  captions = { table = "Table", figure = "Figure", separator = ". " },
+  -- how tables look, unless the line above one says otherwise ("{width = full}"; :help neoffice-table-format)
+  tables = { rules = "booktabs", width = "auto", height = "compact", position = "center" },
   panel_keys = { -- in the comments panel (false disables one)
     reply = "r", resolve = "<CR>", delete = "d", jump = "o", close = "q", next = "]]", prev = "[[",
   },
@@ -64,11 +68,13 @@ end
 -- can follow each other without blank lines). Further blank lines are empty paragraphs (as are
 -- blank lines at the start or end). Each is { first, last, owns (last row whose marks belong to it), text }.
 -- A table row line holds a paragraph for each paragraph of each cell, with { col, stop } (its text's
--- byte columns) and cell = { table, row, col } (the rows where its table and row start, its column).
+-- byte columns) and cell = { table, row, col } (the rows where its table and row start, its column),
+-- with its column's alignment, from the table's line of dashes (align: see markup.table_format),
+-- and the options on the line above the table (format: "width = full, height = tall", see tables.lua), if it has one.
 -- alone: rows that are a paragraph of their own (an empty paragraph you typed in: see M.blocks).
 function M.paragraphs(lines, alone)
   alone = alone or {}
-  local out, blanks, table_start = {}, {}, nil
+  local out, blanks, table_start, formats, options = {}, {}, nil, {}, {}
   local function empty_paragraphs(from)
     for k = from, #blanks do
       out[#out + 1] = { first = blanks[k], last = blanks[k], text = "" }
@@ -77,6 +83,12 @@ function M.paragraphs(lines, alone)
   end
   for row, line in ipairs(lines) do
     local prev = out[#out]
+    local option_line = markup.table_options(line)
+    if option_line and (lines[row + 1] or ""):match("^|") then -- (the options of the table below it)
+      empty_paragraphs(prev and 2 or 1)
+      options[row + 1], table_start = option_line, nil
+      goto continue
+    end
     table_start = line:match("^|") and (#blanks == 0 and table_start or row) or nil
     local cells = table_start and markup.cells(line, row == table_start + 1) -- (dashes: under the first row)
     if cells and #cells == 0 then -- (a "|" alone: text)
@@ -86,6 +98,7 @@ function M.paragraphs(lines, alone)
       blanks[#blanks + 1] = row
     elseif cells ~= false and table_start then -- a table row (or the line of dashes under its first row)
       empty_paragraphs(prev and 2 or 1)
+      formats[table_start] = not cells and markup.table_format(line) or formats[table_start]
       for c, cell in ipairs(cells or {}) do
         for _, para in ipairs(cell) do
           out[#out + 1] = {
@@ -101,12 +114,21 @@ function M.paragraphs(lines, alone)
       empty_paragraphs(prev and 2 or 1) -- (the first blank line after a paragraph separates)
       out[#out + 1] = { first = row, last = row, text = line, alone = alone[row] }
     end
+    ::continue::
   end
   empty_paragraphs(1)
   local next_first = #lines + 1
   for k = #out, 1, -1 do
-    out[k].owns = out[k].cell and out[k].first or next_first - 1
+    local cell = out[k].cell
+    out[k].owns = cell and out[k].first or next_first - 1
     next_first = out[k].first
+    local format = cell and formats[cell.table]
+    if format then
+      cell.align = format.align[cell.col]
+    end
+    if cell then
+      cell.format = options[cell.table]
+    end
   end
   return out
 end
@@ -135,6 +157,9 @@ local function pieces(buf, para)
   local doc = M.docs[buf]
   local block, chars = markup.parse(para.text)
   block.cell = para.cell and true or nil
+  if para.cell and not block.align and para.cell.align ~= "left" then -- (its column's, unless it has its own)
+    block.align = para.cell.align
+  end
   -- where each character is in the buffer (the paragraph's lines were joined with spaces)
   local lines = api.nvim_buf_get_lines(buf, para.first - 1, para.last, true)
   local function position(offset) -- (of a byte of the paragraph's text: row, column)
@@ -289,7 +314,7 @@ local function pieces(buf, para)
     if ch.image then -- unchanged, edited (another path or alt text) or new
       local same = object and object.image and object.image.path == ch.image.path and object.image.alt == ch.image.alt
         and object.image.width == ch.image.width
-      assert(not ch.image.width or markup.cm(ch.image.width, 1), "image width: write it in cm, mm, in or % (of the text's width), as in {width=12cm} or {width=50%}")
+      assert(not ch.image.width or markup.cm(ch.image.width, 1), "image width: write it in cm, mm, in or % (of the text's width), as in {width = 12cm} or {width = 50%}")
       local where = { mark = mark and mark[1], row = ch.row, col = ch.col, end_row = ch.end_row, end_col = ch.end_col }
       out[#out + 1] = same and { object = object.node } or { image = vim.tbl_extend("force", ch.image, where, { original = object }) }
     elseif ch.math then -- an equation: unchanged, or (re)written from its LaTeX
@@ -365,7 +390,7 @@ end
 -- A fingerprint of a paragraph's pieces: equal fingerprints mean the paragraph's XML is still right.
 local function signature(block, list)
   local l = block.list
-  local out = { table.concat({ tostring(block.heading), tostring(block.title), tostring(block.quote), tostring(block.align),
+  local out = { table.concat({ tostring(block.heading), tostring(block.title), tostring(block.quote), tostring(block.align), tostring(block.caption),
     tostring(block.cell), l and table.concat({ l.kind, l.level, tostring(l.n), tostring(l.id) }, ",") or "" }, "|") }
   for _, piece in ipairs(list) do
     local keys = vim.tbl_keys(piece)
@@ -462,6 +487,63 @@ local function stamp(path)
   return s and ("%d:%d.%d"):format(s.size, s.mtime.sec, s.mtime.nsec)
 end
 
+-- Captions: a paragraph that starts with a caption's word, its number (a numbering field of that
+-- name, or, in a caption style, the number written) and a separator ("Table 1. ", "Figure 2: ")
+-- shows as "Table: ..." (block.caption = "table" | "figure"): the word, number and separator are
+-- written again when it is (see M.save), the separator as it was (block.caption_sep).
+local SEPARATORS = { ": ", ". ", " | ", " – ", " — ", " - ", ":", ".", " " }
+local function separator(text)
+  for _, s in ipairs(SEPARATORS) do
+    if text:sub(1, #s) == s then
+      return s
+    end
+  end
+  return ""
+end
+local function find_captions(paras)
+  for _, para in ipairs(paras) do
+    local block, spans = para.block, para.spans
+    if not (block.heading or block.title or block.quote or block.list) then
+      -- the text before the first thing that isn't text, and that thing
+      local lead, k = "", 1
+      while spans[k] and spans[k].text and not spans[k].deletion and not spans[k].object do
+        lead, k = lead .. spans[k].text, k + 1
+      end
+      local word, rest = lead:match("^%s*(%S+)%s+(.*)$")
+      local kind = word and markup.caption_kind(word)
+      local field = spans[k] and spans[k].field
+      local cut -- (how many bytes of text to take away from the start, the field included or not)
+      if kind and rest == "" and field and field.seq and markup.caption_kind(field.seq) == kind then
+        -- "Table " + its number + the separator, in the text after
+        local after, j = "", k + 1
+        while spans[j] and spans[j].text and not spans[j].object and not spans[j].deletion do
+          after, j = after .. spans[j].text, j + 1
+        end
+        local sep = separator(after)
+        block.caption, block.caption_sep = kind, sep ~= "" and sep or nil
+        for _ = 1, k do
+          table.remove(spans, 1)
+        end
+        cut = #sep
+      elseif kind and block.caption_style and rest:match("^%d+") then -- "Table 1. ", written
+        local number = rest:match("^%d+")
+        local sep = separator(rest:sub(#number + 1))
+        if sep ~= "" or #rest == #number then
+          block.caption, block.caption_sep = kind, sep ~= "" and sep or nil
+          cut = #lead - #rest + #number + #sep
+        end
+      end
+      while cut and cut > 0 and spans[1] and spans[1].text and not spans[1].object do -- (from the text spans)
+        local n = math.min(cut, #spans[1].text)
+        spans[1].text, cut = spans[1].text:sub(n + 1), cut - n
+        if spans[1].text == "" then
+          table.remove(spans, 1)
+        end
+      end
+    end
+  end
+end
+
 -- neoffice works on its own copy of the document (the base: a .docx for .doc files, the template
 -- for a new one), and copies it to the file when writing. So saving never depends on the file
 -- staying where it was, and a file deleted meanwhile is simply written again.
@@ -479,8 +561,9 @@ local function open(buf, path)
   end
   local fmt = require("neoffice." .. (ext == "doc" and "docx" or ext))
   local ctx, paras = fmt.load(base)
+  find_captions(paras)
   ctx.dirty, ctx.files = {}, {} -- parts to write on save (name -> true, or content for new files)
-  local doc = { path = path, base = base, is_doc = ext == "doc", fmt = fmt, ctx = ctx, paras = {}, run = {}, object = {}, comment = {}, change = {} }
+  local doc = { path = path, base = base, is_doc = ext == "doc", fmt = fmt, ctx = ctx, paras = {}, run = {}, object = {}, comment = {}, change = {}, caption_seps = {} }
   doc.stamp, doc.synced = stamp(path), not new -- (synced: the file has the base's content)
   doc.tracking = M.config.track_changes
   if doc.tracking == nil then
@@ -506,9 +589,36 @@ local function open(buf, path)
     end
   end
 
-  local texts, cols, last_text, cells = {}, {}, 0, {}
+  -- Each table's format, shown in its line of dashes (see markup.table_format): its attributes,
+  -- and a column's alignment when all its paragraphs have it (then not shown in each).
+  local texts, cols, last_text, cells, formats, column = {}, {}, 0, {}, {}, {}
+  do
+    local aligns = {}
+    for k, para in ipairs(paras) do
+      local cell, before = M.cell_of(para.node), nil
+      cells[k], before = cell, cells[k - 1]
+      if cell then
+        column[k] = before and before.tr == cell.tr and column[k - 1] + (before.tc == cell.tc and 0 or 1) or 1
+        aligns[cell.tbl] = aligns[cell.tbl] or {}
+        local have, align = aligns[cell.tbl][column[k]], para.block.align or "left"
+        aligns[cell.tbl][column[k]] = (have == nil or have == align) and align or false
+      end
+    end
+    for k, para in ipairs(paras) do
+      local cell = cells[k]
+      if cell and not formats[cell.tbl] then
+        local have = doc.fmt.table_format and doc.fmt.table_format(doc.ctx, cell.tbl) or {}
+        formats[cell.tbl] = { align = {}, options = require("neoffice.tables").line(have) }
+        for col, align in pairs(aligns[cell.tbl]) do
+          formats[cell.tbl].align[col] = (align == "center" or align == "right") and align or nil
+        end
+      end
+      if cell and formats[cell.tbl].align[column[k]] then
+        para.block.align = nil
+      end
+    end
+  end
   for k, para in ipairs(paras) do
-    cells[k] = M.cell_of(para.node)
     para.block.cell = cells[k] and true or nil
     if cells[k] then -- (spaces at the edges of a cell's text: not shown, as the table can't show them)
       local text = vim.tbl_filter(function(sp) return sp.text and not sp.deletion and not sp.object end, para.spans)
@@ -543,8 +653,40 @@ local function open(buf, path)
     texts[k], cols[k] = markup.render(para.spans, para.block)
     last_text = (texts[k] ~= "" or cells[k]) and k or last_text
     doc.paras[k] = para.node
+    doc.caption_seps[k] = para.block.caption_sep
   end
   doc.texts = texts
+
+  -- Aligned tables: each cell's text padded to its column's width (see tables.text_widths).
+  local pad_before, pad_after = {}, {}
+  do
+    local tables, by_table = require("neoffice.tables"), {}
+    for k in ipairs(paras) do
+      local cell, before = cells[k], cells[k - 1]
+      if cell then
+        local t = by_table[cell.tbl] or { rows = {}, cells = {} }
+        by_table[cell.tbl] = t
+        if not (before and before.tr == cell.tr) then
+          t.rows[#t.rows + 1] = {}
+        end
+        local row = t.rows[#t.rows]
+        if before and before.tc == cell.tc then -- (another paragraph of the cell)
+          row[#row] = row[#row] .. " <br> " .. texts[k]
+          t.cells[#t.cells].last = k
+        else
+          row[#row + 1] = texts[k]
+          t.cells[#t.cells + 1] = { first = k, last = k, row = row, col = #row }
+        end
+      end
+    end
+    for tbl, t in pairs(by_table) do
+      local widths = tables.text_widths(t.rows)
+      formats[tbl].widths = widths
+      for _, c in ipairs(t.cells) do
+        pad_before[c.first], pad_after[c.last] = tables.padding(c.row[c.col], widths and widths[c.col], formats[tbl].align[c.col])
+      end
+    end
+  end
 
   -- Lay paragraphs out as in Markdown (see M.paragraphs): a blank line after each paragraph that
   -- has text and is followed by more text (but not between list items); an empty paragraph is a
@@ -560,17 +702,21 @@ local function open(buf, path)
         lines[#lines] = lines[#lines] .. (before.tc == cell.tc and " <br> " or " | ")
         columns = columns + (before.tc == cell.tc and 0 or 1)
       else
-        lines[#lines + 1], columns = "| ", 1
         rows[cell.tbl] = (rows[cell.tbl] or 0) + 1
+        if rows[cell.tbl] == 1 and formats[cell.tbl].options ~= "" then -- (its options, above it)
+          lines[#lines + 1] = "{" .. formats[cell.tbl].options .. "}"
+        end
+        lines[#lines + 1], columns = "| ", 1
       end
       r = #lines - 1
+      lines[#lines] = lines[#lines] .. (pad_before[k] or "")
       local offset = #lines[#lines]
-      lines[#lines] = lines[#lines] .. texts[k]
+      lines[#lines] = lines[#lines] .. texts[k] .. (pad_after[k] or "")
       at = function(col) return r, offset + col end
       if not (after and after.tr == cell.tr) then -- the row ends
         lines[#lines] = lines[#lines] .. " |"
         if rows[cell.tbl] == 1 then
-          lines[#lines + 1] = "|" .. ("---|"):rep(columns)
+          lines[#lines + 1] = markup.format_line(formats[cell.tbl], columns, formats[cell.tbl].widths)
         end
         if not (after and after.tbl == cell.tbl) and k < last_text then
           lines[#lines + 1] = ""
@@ -725,7 +871,15 @@ function M.decorate(buf)
       end
     end
   end
+  for r, line in ipairs(lines) do -- a table's options (above it)
+    if line:sub(1, 1) == "{" and markup.table_options(line) and (lines[r + 1] or ""):match("^|") then
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = #line, hl_group = "NeofficeTableOptions", priority = 150 })
+    end
+  end
   for _, para in ipairs(M.blocks(buf)) do
+    if para.text:find("==", 1, true) then
+      M.decorate_marks(buf, para, lines)
+    end
     local block, text_start = markup.block(lines[para.first])
     -- the alignment mark (above Markdown's highlighting, which takes ">..." for a quote)
     local own, own_start, _, align_at = markup.block(para.text)
@@ -735,7 +889,16 @@ function M.decorate(buf)
         end_col = (para.col or 0) + own_start - 2, hl_group = "NeofficeAlign", priority = 250,
       })
     end
-    if block.title then
+    if block.caption and not para.cell then -- its number (as the document shows it): "Table 1: ..."
+      local key = "caption." .. block.caption
+      count[key] = (count[key] or 0) + 1
+      api.nvim_buf_set_extmark(buf, NS_DECOR, para.first - 1, #markup.captions()[block.caption], {
+        virt_text = { { " " .. count[key], "NeofficeNumber" } }, virt_text_pos = "inline",
+      })
+      api.nvim_buf_set_extmark(buf, NS_DECOR, para.first - 1, 0, {
+        end_col = text_start - 1, hl_group = "NeofficeCaption", priority = 200,
+      })
+    elseif block.title then
       api.nvim_buf_set_extmark(buf, NS_DECOR, para.first - 1, 0, {
         end_row = para.last - 1, end_col = #lines[para.last], hl_group = "NeofficeTitle", priority = 200,
       })
@@ -751,6 +914,49 @@ function M.decorate(buf)
       api.nvim_buf_set_extmark(buf, NS_DECOR, para.first - 1, text_start - 1, {
         virt_text = { { table.concat(number, ".") .. " ", "NeofficeNumber" } }, virt_text_pos = "inline",
       })
+    end
+  end
+end
+
+-- Highlighted text shown in its colour.
+local function highlight_group(color)
+  local hex = markup.COLORS[color] or color:gsub("^#", "")
+  local name = "NeofficeHighlight_" .. hex
+  if vim.tbl_isempty(api.nvim_get_hl(0, { name = name })) then
+    local r, g, b = tonumber(hex:sub(1, 2), 16), tonumber(hex:sub(3, 4), 16), tonumber(hex:sub(5, 6), 16)
+    local light = 0.299 * r + 0.587 * g + 0.114 * b > 140
+    api.nvim_set_hl(0, name, { bg = "#" .. hex, fg = light and "#000000" or "#ffffff", default = true })
+  end
+  return name
+end
+function M.decorate_marks(buf, para, lines)
+  local _, chars = markup.parse(para.text)
+  local function position(offset) -- (the paragraph's lines were joined by one character)
+    if para.cell then
+      return para.first - 1, para.col + offset
+    end
+    local row = para.first
+    while row < para.last and offset > #lines[row] do
+      offset, row = offset - #lines[row] - 1, row + 1
+    end
+    return row - 1, offset
+  end
+  local function mark(from, to, group) -- (chars from..to)
+    local r1, c1 = position(chars[from].col)
+    local r2, c2 = position(chars[to].col + (chars[to].len or #chars[to].ch))
+    api.nvim_buf_set_extmark(buf, NS_DECOR, r1, c1, { end_row = r2, end_col = c2, hl_group = group, priority = 150 })
+  end
+  for _, key in ipairs({ "h" }) do -- (underlines: by the syntax, syntax/neoffice.vim)
+    local from
+    for k = 1, #chars + 1 do
+      local c, prev = chars[k], chars[k - 1]
+      if from and not (c and c[key] == prev[key]) then
+        mark(from, k - 1, highlight_group(prev[key]))
+        from = nil
+      end
+      if c and c[key] and not from then
+        from = k
+      end
     end
   end
 end
@@ -845,7 +1051,7 @@ function M.cut(buf, a, b)
   local function reads(c) -- (all of a character that the text shows)
     local key = { c.ch, c.link or "" }
     for _, flag in ipairs(markup.FLAGS) do
-      key[#key + 1] = c[flag] and flag or ""
+      key[#key + 1] = c[flag] and flag .. tostring(c[flag]) or ""
     end
     return table.concat(key, "\0")
   end
@@ -1090,6 +1296,71 @@ local function checkpoint(ctx, notes)
   end
 end
 
+-- Tables typeset now (new ones, and those whose options line changed) get their columns of
+-- numbers aligned right, unless their line of dashes says how: { [the row of a table's first
+-- line] = { [column] = true } } (rows: of the buffer, 1-based), and its paragraphs (blocks) in
+-- `blocks_of`. (On save they are aligned so, and the line of dashes says so: "---:"; formatting
+-- does the same.)
+function M.number_columns(buf, blocks, old_of)
+  local doc = M.docs[buf]
+  if not doc then
+    return {}, {}
+  end
+  if not blocks then
+    blocks = M.blocks(buf)
+    old_of = match_lines(doc.texts, vim.tbl_map(function(p) return p.text end, blocks))
+  end
+  local tables, by_table, out, blocks_of = require("neoffice.tables"), {}, {}, {}
+  for k, block in ipairs(blocks) do
+    if block.cell then
+      local t = by_table[block.cell.table] or { list = {} }
+      by_table[block.cell.table] = t
+      t.list[#t.list + 1] = block
+      local node = old_of[k] and doc.paras[old_of[k]]
+      t.existing = t.existing or (node and M.cell_of(node) or {}).tbl
+    end
+  end
+  for start, t in pairs(by_table) do
+    local retyped = not t.existing
+    if t.existing and doc.fmt.table_format then
+      local ok, want = pcall(tables.parse, t.list[1].cell.format)
+      retyped = ok and tables.line(vim.tbl_extend("force", tables.defaults(), want)) ~= tables.line(doc.fmt.table_format(doc.ctx, t.existing))
+    end
+    local numbers, said, columns = {}, {}, 0
+    for _, block in ipairs(retyped and t.list or {}) do
+      local col = block.cell.col
+      columns, said[col] = math.max(columns, col), said[col] or block.cell.align ~= nil
+      if block.cell.row ~= start then -- (not the first row: the header)
+        local is = tables.is_number(block.text:sub(select(2, markup.block(block.text))))
+        if is ~= nil then
+          numbers[col] = is and numbers[col] ~= false
+        end
+      end
+    end
+    local right = {}
+    for col, yes in pairs(numbers) do
+      right[col] = yes and not said[col] or nil
+    end
+    if next(right) then
+      out[start], blocks_of[start] = right, t.list
+    end
+  end
+  return out, blocks_of
+end
+local function align_numbers(buf, blocks, old_of)
+  for start, right in pairs((M.number_columns(buf, blocks, old_of))) do
+    local line = api.nvim_buf_get_lines(buf, start, start + 1, true)[1]
+    if markup.table_format(line) then -- (a table without its line of dashes is formatted first)
+      for _, block in ipairs(blocks) do
+        if block.cell and block.cell.table == start and right[block.cell.col] then
+          block.cell.align = "right"
+        end
+      end
+      api.nvim_buf_set_lines(buf, start, start + 1, true, { markup.realign(line, vim.tbl_map(function() return "right" end, right)) })
+    end
+  end
+end
+
 function M.save(buf, target)
   local doc = M.docs[buf]
   if not doc then
@@ -1114,6 +1385,7 @@ function M.save(buf, target)
     end
     local texts = vim.tbl_map(function(p) return p.text end, blocks)
     local old_of, deleted = match_lines(doc.texts, texts)
+    align_numbers(buf, blocks, old_of)
 
     -- 1. Work out every paragraph first: if anything is wrong (a missing image, an equation that
     -- can't be converted), nothing changes.
@@ -1144,7 +1416,7 @@ function M.save(buf, target)
 
     -- 2. Rewrite only the paragraphs that changed. (If anything fails before the file is written,
     -- the document's XML is put back as it was: see checkpoint.)
-    local ctx, paras, prev, plain, kept, placements = doc.ctx, {}, nil, nil, {}, {}
+    local ctx, paras, prev, plain, kept, placements, seps = doc.ctx, {}, nil, nil, {}, {}, {}
     local notes = vim.list_extend(vim.tbl_values(doc.change), vim.tbl_values(doc.comment))
     for _, c in pairs(doc.comment) do
       vim.list_extend(notes, c.replies)
@@ -1169,7 +1441,7 @@ function M.save(buf, target)
     end
     for k, plan in ipairs(plans) do
       local node = plan.old and doc.paras[plan.old]
-      local placed = layout:node({ cell = plan.cell, node = node }, prev)
+      local placed = layout:node({ cell = plan.cell, node = node, edited = not plan.old or plan.sig ~= doc.sigs[plan.old] }, prev)
       if node and (placed and placed ~= node or not placed and M.cell_of(node)) then
         deleted[#deleted + 1], plan.old, node = plan.old, nil, nil -- (moved into or out of a table cell)
       end
@@ -1182,9 +1454,29 @@ function M.save(buf, target)
         xml.append(anchor.parent, node, xml.index(anchor) + (prev and 1 or 0))
       end
       plain = not plan.cell and node or plain
+      seps[k] = plan.old and doc.caption_seps[plan.old] or nil
       if not plan.old or plan.sig ~= doc.sigs[plan.old] then
         plan.written = true
-        doc.fmt.fill(ctx, node, plan.block, plan.pieces)
+        local list = plan.pieces
+        local kind = plan.block.caption
+        if kind and doc.fmt.caption_number then -- a caption: its word, number and separator first
+          local label, plainly = markup.captions()[kind], { b = false, i = false, u = false, s = false, h = false, sup = false, sub = false }
+          local first = vim.iter(plan.pieces):find(function(p) return p.text end)
+          plainly.insert = first and first.insert -- (a tracked insertion, as its text)
+          seps[k] = seps[k] or (M.config.captions or {}).separator or ". "
+          list = vim.list_extend({
+            vim.tbl_extend("force", plainly, { text = label .. " " }),
+            { object = doc.fmt.caption_number(ctx, label), visible = true },
+            vim.tbl_extend("force", plainly, { text = seps[k] }),
+          }, plan.pieces)
+        end
+        doc.fmt.fill(ctx, node, plan.block, list)
+        if kind and doc.fmt.keep_with_next then -- (a table's caption with its table; a figure with its caption)
+          local keep = kind == "table" and node or kind == "figure" and prev and not M.cell_of(prev) and prev
+          if keep then
+            doc.fmt.keep_with_next(ctx, keep)
+          end
+        end
         ctx.dirty[doc.fmt.MAIN] = true
         for _, piece in ipairs(plan.pieces) do -- images written now: they are the document's from now on
           local new = piece.image or piece.math or piece.footnote
@@ -1206,6 +1498,9 @@ function M.save(buf, target)
     if #deleted > 0 then
       remove_paragraphs(doc.fmt, vim.tbl_map(function(old) return doc.paras[old] end, deleted))
       ctx.dirty[doc.fmt.MAIN] = true
+    end
+    if ctx.dirty[doc.fmt.MAIN] and doc.fmt.number_captions then -- (captions added, removed, moved)
+      doc.fmt.number_captions(ctx)
     end
 
     -- 3. Write the parts that changed (nothing at all if nothing did).
@@ -1232,7 +1527,7 @@ function M.save(buf, target)
       end
       M.place(buf, "object", p.data, p.new.row, p.new.col, p.new.end_row, p.new.end_col)
     end
-    doc.paras, doc.texts, doc.sigs = paras, texts, {}
+    doc.paras, doc.texts, doc.sigs, doc.caption_seps = paras, texts, {}, seps
     for k, block in ipairs(blocks) do -- (those written may have new marks: new images, equations...)
       doc.sigs[k] = plans[k].written and signature(pieces(buf, block)) or plans[k].sig
     end

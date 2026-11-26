@@ -37,14 +37,22 @@ Formatting ~
                                                               *neoffice-marks*
   `**bold**`              bold
   `*italic*`              italic
-  `<u>underline</u>`      underlined
+  `++underline++`         underlined
   `~~struck~~`            struck through
   `==marked==`            highlighted (yellow)
+  `==marked=={green}`     highlighted in another colour
   `cm^{2}`                superscript (as in LaTeX)
   `W_{food}`              subscript
   `[text](https://...)`   a link
 
 Text typed after a word takes that word's formatting, as in a word processor.
+
+Highlight colours are Word's: `yellow` (the default, not written), `green`,
+`cyan`, `magenta`, `blue`, `red`, `darkblue`, `darkcyan`, `darkgreen`,
+`darkmagenta`, `darkred`, `darkyellow`, `darkgray`, `lightgray`, `black`,
+`white`; or any colour as `#rrggbb` (in a .docx it becomes the nearest of
+Word's). Highlights show in their colour in the buffer. `=={color = green}`
+works too; neoffice writes `=={green}` (a colour is all a highlight has).
 
 Paragraphs ~
                                                              *neoffice-blocks*
@@ -55,6 +63,7 @@ A paragraph's kind is written at the start of its line:
   `> `                    a quote (its Quote style)
   `- `                    a bullet list item
   `1. `                   a numbered list item
+  `Table: `, `Figure: `   a caption (|neoffice-captions|)
 
 List items are indented two spaces per level, and can follow each other with
 no blank line between them. The numbers shown are those the document shows:
@@ -84,7 +93,7 @@ of its paragraph.
 Escapes ~
                                                             *neoffice-escapes*
 A `\` makes the next character plain text when it could be read as a mark:
-`\*`, `\[`, `\#`, `\$`, `\_{`, `\-`, `\>`, `\|`, `\=`, `\~`, `\\`, ...
+`\*`, `\[`, `\#`, `\$`, `\_{`, `\-`, `\>`, `\|`, `\=`, `\+`, `\~`, `\\`, ...
 Before any other character it is just a backslash (`C:\Users` stays as it
 is), and a mark that is never closed is just text (`if a == b`). Text that
 would read as something else is written escaped, so what you see is always
@@ -98,7 +107,10 @@ delete them.
 TABLES                                                       *neoffice-tables*
 
 Tables are Markdown pipe tables: a line per row, `|` between cells, a line of
-dashes after the first row, and `<br>` between the paragraphs of a cell: >
+dashes after the first row, and `<br>` between the paragraphs of a cell. Their
+columns are aligned when the table fits in 120 columns (else one space on each
+side of a cell); after typing, |vim.lsp.buf.format()| aligns them again
+(|neoffice-lsp|): >
 
   | Species | Mass (g) |
   |---|---|
@@ -110,6 +122,64 @@ New rows and cells are formatted like the ones next to them; those you don't
 touch keep their exact XML. To make a new table, type one, with a blank line
 before and after it. Cells merged across columns show as one cell (those rows
 have fewer cells), and a line break inside a cell shows as `￼`.
+
+                                                       *neoffice-table-format*
+Tables typeset themselves. Write only the cells; when you write the file, a
+new table gets a look that suits a paper:
+
+- booktabs rules: a thick line above and below, a thin one under the header
+- columns as wide as their content: short ones (numbers, labels) never wrap;
+  when the table doesn't fit, the widest columns give way and wrap (as
+  LaTeX's tabularx)
+- compact rows: little space above and below the text, and cell paragraphs
+  without spacing or indentation, single-spaced
+- centred on the page
+- columns of numbers ("12", "4.3 ± 0.2", "< 0.001", "98 (12)") aligned right,
+  their header too
+- the header row repeated on every page, rows that never break across pages,
+  a table of up to 20 rows kept on one page, and the paragraph just before it
+  (its caption) kept with it
+
+To change its look, put its options in braces right above the table, as
+`name = value`, separated by commas (|neoffice-attributes|): >
+
+  {width = full, height = tall}
+  | Site | Samples | Mean |
+  |---|---|---|
+<
+The options you leave out keep their defaults:
+
+  rules      `booktabs` (default), `header` (only a line under the header),
+             `rows` (lines above, below and between the rows), `grid` (every
+             line), `none`
+  width      `auto` (default: as narrow as the content), `full` (the width of
+             the text), a percentage of it (`80%`), or a length (`12cm`,
+             `80mm`, `5in`)
+  height     `compact` (default), `normal`, `tall`: 0.05, 0.1 or 0.2 cm above
+             and below the text of each cell
+  position   `center` (default), `left`, `right`
+
+A value alone is enough (`{full, tall}`): it says which option it is. An
+option or value neoffice doesn't know is an error in the language server as
+you type, and makes the write fail, saying which it knows; the file isn't
+changed. Your own defaults go in |neoffice-options| (`tables = { width =
+"full" }`).
+
+The line shows how a table differs from the defaults: neoffice reads it from
+the table (its lines, width, position and cell padding), so tables from
+anyone show theirs (pandoc's tables, for one, show `{rules = header,
+position = left}`). A table
+neoffice typeset is typeset again whenever it changes (a row added, a cell
+edited): its widths and rules follow. Anyone else's table is left as it is
+until you change its line; then neoffice typesets it. Deleting the line goes
+back to the defaults.
+
+Colons in the line of dashes align a column by hand, as in Markdown:
+`|:---:|` centered, `|---:|` right-aligned, `|:---|` left. Every paragraph of
+the column takes it, also those of rows you add, and it wins over the
+automatic alignment of numbers; a cell can still have its own alignment mark
+(|neoffice-align|). A column shows its alignment there when all its cells
+have it; otherwise each cell shows its own.
 
 ==============================================================================
 FOOTNOTES AND FIELDS                                      *neoffice-footnotes*
@@ -126,10 +196,55 @@ numbers, ...) show their text between `⟦ ⟧`. Their text can't be edited, as
 Word or Zotero would overwrite it: an edited field is kept as it was, and you
 are told so when writing. Delete the whole `⟦...⟧` to delete it.
 
+                                                         *neoffice-attributes*
+Attributes in braces, a table's options and an image's width, are written
+`name = value`, separated by commas: `{rules = grid, width = full}`,
+`{width = 12cm}` (a highlight's colour is written alone: `=={green}`).
+`name=value` (no spaces) and other separators work too; the
+language server (|neoffice-lsp|) then hints the tidy form, and its code
+action (|vim.lsp.buf.code_action()|) writes it so.
+
+==============================================================================
+CAPTIONS                                                   *neoffice-captions*
+
+A table's or a figure's caption is a paragraph that starts with `Table: ` or
+`Figure: ` (as pandoc writes a table's caption): >
+
+  Table: Sprint speed of lizards at three sites.
+
+  | Site | Lizards | Mean speed (m/s) |
+  |---|---|---|
+  ...
+
+  ![A lizard on a wall](figures/lizard.png){width = 8cm}
+
+  Figure: A lizard on a granite wall.
+<
+In the document it is a real caption: in the caption style ("Caption", or
+pandoc's "Table Caption" and "Image Caption", LibreOffice's "Table" and
+"Figure", whichever the document has), with its word, its number (a field
+that counts the captions of its kind: Word's "SEQ Table", LibreOffice's
+sequences, so Word and LibreOffice number them, and cross-reference them, as
+their own) and a separator before the text: "Table 1. Sprint speed...". The
+number shows in the buffer too, after the word, as heading numbers do; it
+isn't typed. Captions are numbered again in order whenever you write.
+
+Put a table's caption above it and a figure's below it (or as your journal
+wants): a table's caption is kept on the same page as its table, and a
+figure (the paragraph before its caption) with its caption. Captions are also
+listed with the headings (|gO|, |neoffice-lsp|).
+
+Captions made in Word (Insert Caption) or LibreOffice show the same way, and
+keep their separator (`:`, `.`, ` – `...) when you edit them. Deleting
+`Table: ` makes it a plain paragraph again. The words, and the separator of
+new captions, are options (|neoffice-options|): `captions = { table =
+"Tabla", figure = "Figura", separator = ": " }`. A paragraph that only
+starts like a caption is written `\Table: ...`.
+
 ==============================================================================
 IMAGES                                                       *neoffice-images*
 
-Images show as `![alt](path){width=12.5cm}`, where the path is the image's
+Images show as `![alt](path){width = 12.5cm}`, where the path is the image's
 file inside the document (`word/media/image1.png`, `Pictures/...`).
 
 - To replace one, write the path of a file on disk instead (absolute, `~/...`,
@@ -137,8 +252,8 @@ file inside the document (`word/media/image1.png`, `Pictures/...`).
 - To add one, type `![alt](file.png)` anywhere (PNG, JPEG or GIF).
 - To remove one, delete its text. The alt text can be edited too.
 - To resize one, change its width (the height follows): in `cm`, `mm`, `in`,
-  or `%` of the text's width (the page's, without its margins: `{width=100%}`
-  fills it). Opened again, the width shows in cm.
+  or `%` of the text's width (the page's, without its margins: `{width =
+  100%}` fills it). Opened again, the width shows in cm.
 
 A new image gets the width you write, or else its own size, up to 6 inches; a
 replaced one keeps the width of the image it replaces. When written, a new
@@ -247,7 +362,8 @@ only affects your session (the document's own setting is not changed).
 LANGUAGE SERVER                                                 *neoffice-lsp*
 
 neoffice runs a small language server for documents, inside Nvim (nothing to
-install), attached to each document as `neoffice`. It answers:
+install), attached to each document as `neoffice_ls` (the plugin is
+neoffice, and so is the documents' filetype). It answers:
 
 - Document symbols: the title and the headings, nested by level (numbered
   when the document numbers them), each over its section. |gO| lists them,
@@ -257,6 +373,20 @@ install), attached to each document as `neoffice`. It answers:
     vim.wo.foldmethod, vim.wo.foldexpr = "expr", "v:lua.vim.lsp.foldexpr()"
 <- Hover (|K|): on commented text, the comment and its replies; on a tracked
   change, who made it and when.
+- Diagnostics on attributes in braces (|neoffice-attributes|): an error for a
+  table option that isn't one, a hint when they aren't written `name =
+  value, ...`; a code action (|vim.lsp.buf.code_action()|) rewrites them so.
+- Formatting (|vim.lsp.buf.format()|, also of a range): tables aligned, with
+  their line of dashes (added if missing) and a cell for every column, as
+  neoffice shows them when it opens a document; attributes in braces tidy.
+  Only the spaces and `|` between the cells' text change, and what is inside
+  braces: the text keeps its formatting, comments and tracked changes.
+  conform.nvim uses it with `lsp_format = "fallback"` (or `"prefer"`): >lua
+    require("conform").format({ lsp_format = "fallback" })
+<- Captions are document symbols too, in the section they are in.
+- Completion: on a table's options line, the options not given yet with
+  their values (and after `name =`, that option's values); after
+  `){width =`, image widths; after `=={`, highlight colours.
 
 `lsp = false` (|neoffice-options|) turns it off.
 
@@ -361,6 +491,12 @@ setup() is optional. Every field is optional too; these are the defaults: >lua
     comment_text = false,  -- each comment's text at the end of its line
     image_width = 60,      -- at most this many columns wide
     image_height = 20,     -- and this many lines high
+    captions = {           -- their words, and what goes after the number
+      table = "Table", figure = "Figure", separator = ". ",
+    },
+    tables = {             -- how tables look (|neoffice-table-format|)
+      rules = "booktabs", width = "auto", height = "compact", position = "center",
+    },
     panel_keys = {         -- in the comments panel (false drops one)
       reply = "r", resolve = "<CR>", delete = "d", jump = "o", close = "q",
       next = "]]", prev = "[[",
@@ -381,6 +517,9 @@ Highlight groups (all `default`, so your colour scheme can set them):
   NeofficeTitle             the title
   NeofficeNumber            heading numbers
   NeofficeAlign             the alignment marks
+  NeofficeUnderline         underlined text (`++...++`)
+  NeofficeHighlight_rrggbb  highlighted text, by colour (`==...==`)
+  NeofficeTableOptions      a table's options line (`{width = full}`)
 
 ==============================================================================
 WHAT IS (AND ISN'T) CHANGED                                  *neoffice-safety*

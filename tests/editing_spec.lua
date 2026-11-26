@@ -5,7 +5,7 @@ local api = vim.api
 
 local ORIGINAL = {
   "# Introduction",
-  "This is **bold**, *italic*, <u>underlined</u> and a [link](https://example.org). Tom & Jerry <3, 2\\*3.",
+  "This is **bold**, *italic*, ++underlined++ and a [link](https://example.org). Tom & Jerry <3, 2\\*3.",
   "Commented text and more.",
   "Text with inserted words and deleted words inside.",
   "An image ![](IMAGE) here.",
@@ -25,20 +25,21 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
 
     local function paras()
-      return vim.tbl_map(function(t) return (t:gsub("{width=[^}]*}", ""):gsub("!%[%]%(.-%)", "![](IMAGE)")) end, H.paras())
+      return vim.tbl_map(function(t) return (t:gsub("{width = [^}]*}", ""):gsub("!%[%]%(.-%)", "![](IMAGE)")) end, H.paras())
     end
 
     it("opens as text with marks, paragraphs separated by blank lines", function()
       assert.same(ORIGINAL, paras())
       assert.equals("", H.lines()[2])
-      assert.equals(#ORIGINAL * 2 - 6, #H.lines()) -- (none between list items; a table row per line)
+      -- (none between list items; a table row per line, and the line of its look above it)
+      assert.equals(#ORIGINAL * 2 - 5, #H.lines())
     end)
 
     it("keeps run properties when editing inside a run", function()
       H.replace(2, "link", "linky")
       H.replace(2, "bold", "strong")
       H.reopen()
-      assert.equals("This is **strong**, *italic*, <u>underlined</u> and a [linky](https://example.org). Tom & Jerry <3, 2\\*3.", H.paras()[2])
+      assert.equals("This is **strong**, *italic*, ++underlined++ and a [linky](https://example.org). Tom & Jerry <3, 2\\*3.", H.paras()[2])
     end)
 
     it("text typed at the end of a word takes its formatting", function()
@@ -48,12 +49,12 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
 
     it("writes formatting typed as marks, and removes it when the marks are deleted", function()
-      H.set(3, "Plain **bold *both*** <u>under</u> [x](https://x.org/a) \\*literal\\*")
+      H.set(3, "Plain **bold *both*** ++under++ [x](https://x.org/a) \\*literal\\*")
       H.replace(2, "**bold**", "bold")
       H.replace(2, "*italic*", "italic")
       H.reopen()
-      assert.equals("Plain **bold *both*** <u>under</u> [x](https://x.org/a) \\*literal\\*", H.paras()[3])
-      assert.truthy(H.paras()[2]:find("This is bold, italic, <u>", 1, true))
+      assert.equals("Plain **bold *both*** ++under++ [x](https://x.org/a) \\*literal\\*", H.paras()[3])
+      assert.truthy(H.paras()[2]:find("This is bold, italic, ++", 1, true))
     end)
 
     it("changes, adds and removes links", function()
@@ -194,9 +195,9 @@ describe("odt", function()
 
   it("makes a style when bold is added to text with another style", function()
     H.open(H.copy("rich.odt"))
-    H.replace(2, "<u>underlined</u>", "**<u>underlined</u>**")
+    H.replace(2, "++underlined++", "**++underlined++**")
     H.reopen()
-    assert.truthy(H.paras()[2]:find("**<u>underlined</u>**", 1, true))
+    assert.truthy(H.paras()[2]:find("**++underlined++**", 1, true))
   end)
 end)
 
@@ -214,7 +215,7 @@ describe("titles", function()
       H.open(path)
       assert.equals("% Introduction", H.paras()[1])
       local ns = api.nvim_get_namespaces().neoffice_decorations
-      local marks = api.nvim_buf_get_extmarks(0, ns, 0, -1, { details = true })
+      local marks = api.nvim_buf_get_extmarks(0, ns, 0, 0, { details = true }) -- (on its line)
       assert.equals(1, #marks)
       assert.equals("NeofficeTitle", marks[1][4].hl_group)
       assert.same({ 0, 0, 0, #"% Introduction" }, { marks[1][2], marks[1][3], marks[1][4].end_row, marks[1][4].end_col })

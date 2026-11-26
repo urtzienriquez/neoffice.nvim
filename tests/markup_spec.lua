@@ -46,12 +46,12 @@ end
 describe("markup", function()
   it("renders formatting as marks", function()
     local line = markup.render({ span("a "), span("bold", { b = true }), span(" "), span("it", { i = true }), span(" "), span("u", { u = true }), span(" "), span("site", { link = "https://x.org" }) })
-    assert.equals("a **bold** *it* <u>u</u> [site](https://x.org)", line)
+    assert.equals("a **bold** *it* ++u++ [site](https://x.org)", line)
   end)
 
   it("nests marks that open together", function()
-    assert.equals("***<u>all</u>***", markup.render({ span("all", { b = true, i = true, u = true }) }))
-    assert.equals("**<u>x</u>**", markup.render({ span("x", { b = true, u = true }) }))
+    assert.equals("***++all++***", markup.render({ span("all", { b = true, i = true, u = true }) }))
+    assert.equals("**++x++**", markup.render({ span("x", { b = true, u = true }) }))
   end)
 
   it("round-trips overlapping formatting, links and escapes", function()
@@ -107,13 +107,52 @@ describe("markup", function()
     assert.same({ alt = "a ] b", path = "dir/x" }, chars[5].image)
   end)
 
+  it("reads an image's width with or without spaces, and writes it with them", function()
+    for _, text in ipairs({ "![a](x.png){width=3cm}", "![a](x.png){width = 3cm}", "![a](x.png){ width= 3cm }" }) do
+      local _, chars = markup.parse(text)
+      assert.equals("3cm", chars[1].image.width, text)
+    end
+    assert.equals("![a](x.png){width = 3cm}", markup.render({ { image = { alt = "a", path = "x.png", width = "3cm" } } }))
+  end)
+
+  it("reads attributes: name = value or name=value, separated by commas, or values alone", function()
+    local list, tidy = markup.attributes("width=full,height = tall  grid", function(v) return v == "grid" and "rules" or nil end)
+    assert.same({ "width", "height", nil }, { list[1].name, list[2].name, list[3].name })
+    assert.same({ "full", "tall", "grid" }, { list[1].value, list[2].value, list[3].value })
+    assert.equals("width = full, height = tall, rules = grid", tidy)
+  end)
+
   it("reports the columns of each span", function()
     local _, cols = markup.render({ span("a"), span("b", { b = true }) })
     assert.same({ { 0, 1 }, { 3, 4 } }, cols)
   end)
 
+  it("highlights in colours: ==text== is yellow, ==text=={green} green", function()
+    local line = markup.render({ span("a"), span("lit", { h = "yellow" }), span("b"), span("g", { h = "green" }), span("r", { h = "#a1b2c3" }) })
+    assert.equals("a==lit==b==g=={green}==r=={#a1b2c3}", line)
+    local _, chars = markup.parse(line)
+    assert.same({ false, "yellow", "yellow", "yellow", false, "green", "#a1b2c3" }, vim.tbl_map(function(c) return c.h end, chars))
+    local _, upper = markup.parse("==x=={Green}")
+    assert.equals("green", upper[1].h)
+    local _, unknown = markup.parse("==x=={nope}") -- (not a colour: yellow, then text)
+    assert.same({ "yellow", false, false }, { unknown[1].h, unknown[2].h, unknown[#unknown].h })
+    -- text that reads as a colour after a highlight is escaped
+    local escaped = markup.render({ span("x", { h = "yellow" }), span("{green}") })
+    local _, back = markup.parse(escaped)
+    assert.same({ "yellow", false }, { back[1].h, back[2].h })
+    assert.equals("x{green}", table.concat(vim.tbl_map(function(c) return c.ch end, back)))
+  end)
+
+  it("underlines with ++, and keeps a lone ++ as text", function()
+    assert.equals("C++ is fine", markup.render({ span("C++ is fine") }))
+    assert.equals("++fine++, in C++", markup.render({ span("fine", { u = true }), span(", in C++") }))
+    roundtrip({ span("C++ is "), span("fine", { u = true }) }) -- (escaped: C\+\+)
+    roundtrip({ span("C++ and C++ again") })
+    roundtrip({ span("a "), span("u", { u = true }), span(" ++ b") })
+  end)
+
   it("reads unbalanced marks without failing", function()
-    for _, line in ipairs({ "**", "*", "<u>", "[x](", "[x]", "![", "![a](", "\\", "# ", "#", "a **b", "[a](b" }) do
+    for _, line in ipairs({ "**", "*", "++", "==x=={", "<u>", "[x](", "[x]", "![", "![a](", "\\", "# ", "#", "a **b", "[a](b" }) do
       assert.has_no.errors(function() markup.parse(line) end)
     end
   end)

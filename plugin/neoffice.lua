@@ -43,6 +43,8 @@ local function highlights()
     NeofficeTitle = { link = "Title" },
     NeofficeNumber = { link = "Number" },
     NeofficeAlign = { link = "@punctuation.special" },
+    NeofficeTableOptions = { link = "@attribute" },
+    NeofficeCaption = { link = "@label" },
     NeofficeChangeInfo = { link = "Comment" },
     NeofficeFormat = { underdashed = true, sp = "#61afef" },
     NeofficeComment = { underdotted = true, sp = "#e5c07b" },

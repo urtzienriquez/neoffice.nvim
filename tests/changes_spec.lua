@@ -303,7 +303,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
       changes.after_edit(api.nvim_get_current_buf())
       assert.same({}, owners({ r, r }))
       H.reopen()
-      assert.truthy(H.paras()[5]:match("^An image !%[A dot%]%([^)]*%){width=3cm} here%.$"), H.paras()[5])
+      assert.truthy(H.paras()[5]:match("^An image !%[A dot%]%([^)]*%){width = 3cm} here%.$"), H.paras()[5])
     end)
 
     it("tells, while you type, that what you just typed is yours", function()
@@ -361,10 +361,10 @@ for _, ext in ipairs({ "docx", "odt" }) do
       changes.resolve("accept", false, true)
       local p = H.paras()
       assert.equals("Text with inserted words and deleted words inside.", p[4])
-      assert.truthy(p[5]:match("^!%[%]%(.-%){width=[^}]*}$"))
+      assert.truthy(p[5]:match("^!%[%]%(.-%){width = [^}]*}$"))
       assert.equals("- first item", p[6])
       H.reopen()
-      assert.truthy(H.paras()[5]:match("^!%[%]%(.-%){width=[^}]*}$"))
+      assert.truthy(H.paras()[5]:match("^!%[%]%(.-%){width = [^}]*}$"))
     end)
 
     it("records a new paragraph, and rejecting it removes it", function()

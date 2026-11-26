@@ -20,6 +20,8 @@ end
 local FLAGS = { "b", "i", "u", "s", "h", "sup", "sub" } -- (see markup.FLAGS)
 local ALIGN = { center = "center", ["end"] = "right", right = "right", justify = "justify" } -- fo:text-align
 local QUOTES = { Quotations = true, Block_20_Text = true, Quote = true, Intense_20_Quote = true }
+local CAPTIONS = { Caption = true, Table = true, Figure = true, Illustration = true, Drawing = true }
+local caption_style -- (below)
 
 -- The formatting { b, i, u, sup, sub } of a text style, following its parent styles, starting
 -- from `inherited` (that of the enclosing text).
@@ -41,7 +43,7 @@ local function flags(ctx, name, inherited)
     f.s = strike ~= "none"
   end
   if background then
-    f.h = background ~= "transparent"
+    f.h = background ~= "transparent" and (markup.color_of_rgb(background) or "yellow")
   end
   if weight then
     f.b = weight == "bold" or (tonumber(weight) or 0) >= 600
@@ -153,6 +155,7 @@ local function block_of(ctx, p)
     block = { list = list }
   end
   block.align = layout(ctx, p)
+  block.caption_style = based_on(ctx, p, CAPTIONS) or nil -- (see captions in init.lua)
   return block
 end
 
@@ -269,7 +272,8 @@ local function read_para(ctx, p)
       elseif tag then
         local image = tag == "draw:frame" and image_of(el) or nil
         local text = not tag:match("^draw:") and plain(el) or ""
-        add({ object = el, visible = VISIBLE[tag] or xml.text(el) ~= "", image = image, field = text ~= "" and { text = text } or nil })
+        local seq = tag == "text:sequence" and xml.attr(el, "text:name") or nil -- (a caption's number)
+        add({ object = el, visible = VISIBLE[tag] or xml.text(el) ~= "", image = image, field = text ~= "" and { text = text, seq = seq } or nil })
         after_space = after_space and not spans[#spans].visible
       end
     end
@@ -557,7 +561,7 @@ local function style_for(ctx, piece)
     xml.set_attr(props, "style:text-position", piece.sup and "super 58%" or piece.sub and "sub 58%" or "0% 100%")
     xml.set_attr(props, "style:text-line-through-style", piece.s and "solid" or "none")
     xml.set_attr(props, "style:text-line-through-type", piece.s and "single" or nil)
-    xml.set_attr(props, "fo:background-color", piece.h and "#ffff00" or "transparent")
+    xml.set_attr(props, "fo:background-color", piece.h and "#" .. (markup.COLORS[piece.h] or piece.h:gsub("^#", "")) or "transparent")
     xml.append(ctx.auto, style)
     ctx.styles[name], ctx.made[key] = style, name
   end
@@ -728,6 +732,62 @@ local function set_layout(ctx, p, align, page)
   xml.set_attr(p, "text:style-name", ctx.made[key])
 end
 
+-- The style of a caption of this kind ("table", "figure"): LibreOffice's "Table" or "Figure"
+-- (or "Illustration") if the document has it, else its "Caption", else a "Caption" style added.
+caption_style = function(ctx, kind)
+  for _, name in ipairs(kind == "table" and { "Table", "Caption" } or { "Figure", "Illustration", "Caption" }) do
+    if ctx.parent_style[name] ~= nil then
+      return name
+    end
+  end
+  local styles = xml.find(ctx.styles_doc, "office:styles")
+  if styles then
+    xml.append(styles, xml.elem("style:style", { { "style:name", "Caption" }, { "style:family", "paragraph" }, { "style:parent-style-name", "Standard" }, { "style:class", "extra" } }, {
+      xml.elem("style:paragraph-properties", { { "fo:margin-top", "0.212cm" }, { "fo:margin-bottom", "0.212cm" } }),
+    }))
+    ctx.parent_style.Caption, ctx.dirty[STYLES] = "Standard", true
+  end
+  return "Caption"
+end
+
+-- A caption's number: a sequence counting the captions of its word, showing `n` (declared in the
+-- document's sequences if it isn't).
+function M.caption_number(ctx, label, n)
+  local text = xml.find(ctx.root, "office:text")
+  local decls = text and xml.child(text, "text:sequence-decls")
+  if text and not decls then
+    decls = xml.append(text, xml.elem("text:sequence-decls"), 1)
+  end
+  local declared = decls and vim.iter(xml.collect(decls, { ["text:sequence-decl"] = true })):any(function(d)
+    return xml.attr(d, "text:name") == label
+  end)
+  if decls and not declared then
+    xml.append(decls, xml.elem("text:sequence-decl", { { "text:display-outline-level", "0" }, { "text:name", label } }))
+  end
+  ctx.sequences_made = (ctx.sequences_made or 0) + 1
+  return xml.elem("text:sequence", {
+    { "text:ref-name", ("refNeo%s%d_%d"):format(label, os.time(), ctx.sequences_made) }, { "text:name", label },
+    { "text:formula", "ooow:" .. label .. "+1" }, { "style:num-format", "1" },
+  }, { { text = tostring(n or 1) } })
+end
+
+-- Every caption's number as it is in the document's order (each word counts its own). Whether
+-- any changed.
+function M.number_captions(ctx)
+  local count, changed = {}, false
+  for _, seq in ipairs(xml.collect(xml.find(ctx.root, "office:text") or {}, { ["text:sequence"] = true })) do
+    local name = xml.attr(seq, "text:name") or ""
+    count[name] = (count[name] or 0) + 1
+    if xml.text(seq) ~= tostring(count[name]) then
+      seq.children, changed = { { text = tostring(count[name]) } }, true
+    end
+  end
+  if changed then
+    ctx.dirty[M.MAIN] = true
+  end
+  return changed
+end
+
 -- A footnote piece: the same <text:note> with new text, or a new one.
 local function footnote_node(ctx, piece)
   local original = piece.original and piece.original.footnote and piece.original.node
@@ -765,20 +825,331 @@ end
 
 -- ── Tables (see tables.lua) ─────────────────────────────────────────────────
 
-function M.new_table(ctx) -- one cell, with borders (rows and cells are added by copying)
+function M.new_table(ctx) -- one cell (rows and cells are added by copying; borders: see tables.lua)
   if not ctx.styles_made_cell then
     xml.append(automatic(ctx), xml.elem("style:style", { { "style:name", "NeoCell" }, { "style:family", "table-cell" } }, {
-      xml.elem("style:table-cell-properties", { { "fo:padding", "0.04in" }, { "fo:border", "0.5pt solid #000000" } }),
+      xml.elem("style:table-cell-properties", { { "fo:padding", "0.04in" } }),
     }))
+    if ctx.named then -- (see style_named)
+      ctx.named["table-cell|NeoCell"] = { el = ctx.auto.children[#ctx.auto.children], automatic = true }
+    end
     ctx.styles_made_cell = true
   end
   ctx.tables_made = (ctx.tables_made or 0) + 1
   return xml.elem("table:table", { { "table:name", ("NeoTable%d_%d"):format(os.time(), ctx.tables_made) } }, {
     xml.elem("table:table-column"),
     xml.elem("table:table-row", {}, {
-      xml.elem("table:table-cell", { { "table:style-name", "NeoCell" }, { "office:value-type", "string" } }, { xml.elem("text:p") }),
+      xml.elem("table:table-cell", { { "table:style-name", "NeoCell" }, { "office:value-type", "string" } }, {
+        -- (in LibreOffice's style for them, if the document has it)
+        xml.elem("text:p", ctx.parent_style.Table_20_Contents ~= nil and { { "text:style-name", "Table_20_Contents" } } or {}),
+      }),
     }),
   })
+end
+
+-- The style of a family ("table", "table-cell") with this name: { el, automatic = bool }, or nil.
+local function style_named(ctx, family, name)
+  if not ctx.named then
+    ctx.named = {}
+    for _, root in ipairs({ ctx.styles_doc, ctx.root }) do
+      for _, style in ipairs(xml.collect(root, { ["style:style"] = true }, { ["office:body"] = true })) do
+        ctx.named[xml.attr(style, "style:family") .. "|" .. (xml.attr(style, "style:name") or "")] = { el = style, automatic = root == ctx.root }
+      end
+    end
+  end
+  return name and ctx.named[family .. "|" .. name]
+end
+-- A new automatic style for an element, from its own: a copy if that one is automatic, else based
+-- on it. Returns its properties element (`props`), and sets it as the element's style.
+local function own_style(ctx, el, family, props)
+  local base = style_named(ctx, family, xml.attr(el, "table:style-name"))
+  local style
+  if base and base.automatic then
+    style = xml.copy(base.el)
+  else
+    style = xml.elem("style:style", { { "style:family", family } })
+    xml.set_attr(style, "style:parent-style-name", base and xml.attr(base.el, "style:name") or nil)
+  end
+  local name, n = nil, 1
+  repeat
+    name, n = (({ table = "NeoTableStyle", ["table-column"] = "NeoColumn", ["table-row"] = "NeoRow" })[family] or "NeoCell") .. n, n + 1
+  until not style_named(ctx, family, name)
+  xml.set_attr(style, "style:name", name)
+  xml.append(automatic(ctx), style)
+  ctx.named[family .. "|" .. name] = { el = style, automatic = true }
+  xml.set_attr(el, "table:style-name", name)
+  return xml.child(style, props) or xml.append(style, xml.elem(props))
+end
+
+local function grid_of(tbl) -- its rows of cells
+  return vim.tbl_map(function(tr) return xml.collect(tr, { ["table:table-cell"] = true }) end, xml.collect(tbl, { ["table:table-row"] = true }))
+end
+
+-- The texts of a table's columns, for their widths: for each column, its cells' paragraphs (cells
+-- spanning one column); and how many columns it has.
+local function column_texts(tbl)
+  local columns, n = {}, 0
+  for _, row in ipairs(grid_of(tbl)) do
+    local c = 1
+    for _, cell in ipairs(row) do
+      local span = tonumber(xml.attr(cell, "table:number-columns-spanned") or "") or 1
+      if span == 1 then
+        columns[c] = columns[c] or {}
+        table.insert(columns[c], vim.tbl_map(xml.text, xml.collect(cell, { ["text:p"] = true, ["text:h"] = true }, { ["table:table"] = true })))
+      end
+      c = c + span
+    end
+    n = math.max(n, c - 1)
+  end
+  for c = 1, n do
+    columns[c] = columns[c] or {}
+  end
+  return columns, n
+end
+
+local function font_size(ctx) -- the size of the document's text (pt)
+  for _, style in ipairs(xml.collect(ctx.styles_doc, { ["style:default-style"] = true, ["style:style"] = true })) do
+    local name = xml.attr(style, "style:name")
+    if xml.attr(style, "style:family") == "paragraph" and (style.tag == "style:default-style" or name == "Standard") then
+      local props = xml.child(style, "style:text-properties")
+      local size = props and xml.attr(props, "fo:font-size")
+      local pt = size and tonumber(size:match("^([%d.]+)pt$") or "")
+      if pt then
+        return pt
+      end
+    end
+  end
+  return 12
+end
+local function auto_widths(ctx, tbl, width)
+  return require("neoffice.tables").widths((column_texts(tbl)), width, font_size(ctx) / 72 * 2.54, M.text_width(ctx))
+end
+
+-- A table's look (see tables.lua): { rules (a preset of tables.BORDERS, if its lines are one),
+-- width, height (if its cell padding is one of neoffice's), position, typeset (by neoffice) }.
+function M.table_format(ctx, tbl)
+  local tables = require("neoffice.tables")
+  local paddings = {}
+  local grid = vim.tbl_map(function(row)
+    return vim.tbl_map(function(cell)
+      local style = style_named(ctx, "table-cell", xml.attr(cell, "table:style-name"))
+      local props = style and xml.child(style.el, "style:table-cell-properties") or { attrs = {} }
+      local sides = {}
+      for _, side in ipairs({ "top", "bottom", "left", "right" }) do
+        local value = xml.attr(props, "fo:border-" .. side) or xml.attr(props, "fo:border") or "none"
+        local width = markup.cm(value:match("^%s*([%d.]+%a+)") or "")
+        sides[side] = (value == "none" or not width or width == 0) and 0 or width >= 0.026 and 2 or 1 -- (thick from 3/4 pt)
+      end
+      for _, side in ipairs({ "top", "bottom" }) do
+        paddings[#paddings + 1] = markup.cm(xml.attr(props, "fo:padding-" .. side) or xml.attr(props, "fo:padding") or "") or -1
+      end
+      return sides
+    end, row)
+  end, grid_of(tbl))
+  local format = { rules = tables.borders_of(grid), width = "auto", position = "left" }
+  local same = #paddings > 0
+  for _, p in ipairs(paddings) do
+    same = same and math.abs(p - paddings[1]) < 0.006
+  end
+  format.height = same and tables.height_of(paddings[1]) or nil
+  local style = style_named(ctx, "table", xml.attr(tbl, "table:style-name"))
+  local props = style and xml.child(style.el, "style:table-properties")
+  if props then
+    local align, rel, width = xml.attr(props, "table:align"), xml.attr(props, "style:rel-width"), markup.cm(xml.attr(props, "style:width"))
+    format.position = (align == "center" or align == "right") and align or "left"
+    if align == "margins" or rel == "100%" then
+      format.width, format.position = "full", tables.defaults().position -- (where it is doesn't matter)
+    elseif rel then
+      format.width = rel
+    elseif width then -- (as wide as its content: auto; else that wide)
+      local sum = 0
+      for _, w in ipairs(auto_widths(ctx, tbl, "auto")) do
+        sum = sum + w
+      end
+      format.width = math.abs(sum - width) < 0.02 * width + 0.05 and "auto" or markup.width(width)
+    end
+  end
+  format.typeset = format.rules ~= nil and format.height ~= nil -- (by neoffice: it keeps it so)
+  return format
+end
+
+-- An element's style changed: these properties (of `tag`, the style's properties element) set, or
+-- removed (false). The same change of the same style makes one style.
+local function restyle(ctx, el, family, tag, attrs)
+  ctx.restyled = ctx.restyled or {}
+  local parts = {}
+  for _, a in ipairs(attrs) do
+    parts[#parts + 1] = a[1] .. "=" .. tostring(a[2])
+  end
+  local key = family .. "|" .. (xml.attr(el, "table:style-name") or "") .. "|" .. table.concat(parts, ";")
+  if ctx.restyled[key] then
+    return xml.set_attr(el, "table:style-name", ctx.restyled[key])
+  end
+  local props = own_style(ctx, el, family, tag)
+  for _, a in ipairs(attrs) do
+    xml.set_attr(props, a[1], a[2] or nil)
+  end
+  ctx.restyled[key] = xml.attr(el, "table:style-name")
+end
+
+-- A paragraph's style with these paragraph properties: "compact" (without spacing or indentation,
+-- single-spaced: in a typeset table's cell) or "keep" (kept with the next: a table's caption).
+local PARA_PROPS = {
+  compact = { ["fo:margin-top"] = "0cm", ["fo:margin-bottom"] = "0cm", ["fo:margin-left"] = "0cm", ["fo:margin-right"] = "0cm", ["fo:text-indent"] = "0cm", ["fo:line-height"] = "100%" },
+  keep = { ["fo:keep-with-next"] = "always" },
+}
+local function para_style(ctx, p, kind)
+  local name = xml.attr(p, "text:style-name")
+  local key = kind .. "|" .. (name or "")
+  if not ctx.made[key] then
+    local auto = ctx.auto_paras[name or ""]
+    local style = auto and xml.copy(auto) or xml.elem("style:style", { { "style:family", "paragraph" } })
+    if not auto and name then
+      xml.set_attr(style, "style:parent-style-name", name)
+    end
+    local new, n = nil, 1
+    repeat
+      new, n = "NeoP" .. n, n + 1
+    until ctx.parent_style[new] == nil
+    xml.set_attr(style, "style:name", new)
+    local props = xml.child(style, "style:paragraph-properties") or xml.append(style, xml.elem("style:paragraph-properties"), 1)
+    for attr, value in pairs(PARA_PROPS[kind]) do
+      xml.set_attr(props, attr, value)
+    end
+    xml.append(automatic(ctx), style)
+    ctx.made[key], ctx.auto_paras[new] = new, style
+    ctx.parent_style[new] = xml.attr(style, "style:parent-style-name") or false
+    ctx.made[kind .. "|" .. new] = new -- (already so)
+  end
+  xml.set_attr(p, "text:style-name", ctx.made[key])
+end
+
+-- Kept on the same page as the paragraph after it (a table's caption, a figure).
+function M.keep_with_next(ctx, p)
+  para_style(ctx, p, "keep")
+end
+
+-- Typeset a table with these options (see tables.lua; those not given stay as they are): its rules
+-- (on every cell), column widths (from its content), row height (cell padding, and paragraphs
+-- without spacing), position; and with `typeset`, its first row repeated on each page and at the
+-- bottom of its cells, and rows that don't break across pages.
+local LINE = { [0] = "none", "0.5pt solid #000000", "1pt solid #000000" }
+local function cm(n) -- (a length, to a hundredth of a millimetre)
+  return (("%.3f"):format(n):gsub("0+$", ""):gsub("%.$", "")) .. "cm"
+end
+function M.set_table_format(ctx, tbl, set)
+  local tables = require("neoffice.tables")
+  local grid = grid_of(tbl)
+  for r, row in ipairs(grid) do
+    for c, cell in ipairs(row) do
+      local attrs = {}
+      if set.rules then
+        local sides = tables.cell_borders(set.rules, r, #grid, c, #row)
+        attrs[#attrs + 1] = { "fo:border", false }
+        for _, side in ipairs({ "top", "bottom", "left", "right" }) do
+          attrs[#attrs + 1] = { "fo:border-" .. side, LINE[sides[side]] }
+        end
+      end
+      if set.height then
+        local tb, lr = cm(tables.HEIGHT[set.height]), cm(tables.PADDING)
+        vim.list_extend(attrs, { { "fo:padding", false }, { "fo:padding-top", tb }, { "fo:padding-bottom", tb }, { "fo:padding-left", lr }, { "fo:padding-right", lr } })
+      end
+      if set.typeset then
+        attrs[#attrs + 1] = { "style:vertical-align", r == 1 and #grid > 1 and "bottom" or false }
+      end
+      if #attrs > 0 then
+        restyle(ctx, cell, "table-cell", "style:table-cell-properties", attrs)
+      end
+    end
+  end
+  if set.height then
+    for _, p in ipairs(xml.collect(tbl, { ["text:p"] = true }, { ["table:table"] = true })) do
+      para_style(ctx, p, "compact")
+    end
+  end
+  if set.width or set.position then
+    local width = set.width or M.table_format(ctx, tbl).width
+    local widths = auto_widths(ctx, tbl, width)
+    local sum = 0
+    for _, w in ipairs(widths) do
+      sum = sum + w
+    end
+    local percent = tonumber(width:match("^([%d.]+)%%$") or "")
+    restyle(ctx, tbl, "table", "style:table-properties", {
+      { "style:width", cm(sum) },
+      { "style:rel-width", width == "full" and "100%" or percent and width or false },
+      { "table:align", width == "full" and "margins" or set.position or M.table_format(ctx, tbl).position },
+      { "fo:margin-left", false }, { "fo:margin-right", false },
+    })
+    if set.width then -- the columns: one each, as wide as computed
+      local old = xml.collect(tbl, { ["table:table-column"] = true }, { ["table:table-row"] = true, ["table:table-rows"] = true, ["table:table-header-rows"] = true })
+      local parent = old[1] and old[1].parent or tbl
+      local at = old[1] and xml.index(old[1]) or 1
+      for _, col in ipairs(old) do
+        xml.remove(col)
+      end
+      for k, w in ipairs(widths) do
+        local col = xml.append(parent, xml.elem("table:table-column"), at + k - 1)
+        restyle(ctx, col, "table-column", "style:table-column-properties", { { "style:column-width", cm(w) } })
+      end
+    end
+  end
+  -- the table styles neoffice made that nothing uses any more (those of earlier saves)
+  local used = {}
+  local function walk(n)
+    for _, c in ipairs(n.children or {}) do
+      if c.tag then
+        if c.tag:match("^table:") then
+          used[xml.attr(c, "table:style-name") or ""] = true
+        end
+        walk(c)
+      end
+    end
+  end
+  walk(xml.find(ctx.root, "office:body") or {})
+  for _, style in ipairs(vim.tbl_filter(function(c) return c.tag == "style:style" end, automatic(ctx).children)) do
+    local name, family = xml.attr(style, "style:name") or "", xml.attr(style, "style:family") or ""
+    if family:match("^table") and name:match("^Neo%a+%d+$") and not used[name] then
+      xml.remove(style)
+      ctx.named[family .. "|" .. name] = nil
+    end
+  end
+  ctx.restyled = nil
+  if set.typeset then
+    -- the first row in the header rows (repeated on each page), and only it
+    local rows = xml.collect(tbl, { ["table:table-row"] = true })
+    local first = rows[1]
+    if first then
+      local head = xml.child(tbl, "table:table-header-rows")
+      if not head then
+        local anchor = first.parent == tbl and first or first.parent
+        head = xml.append(tbl, xml.elem("table:table-header-rows"), xml.index(anchor))
+      end
+      if first.parent ~= head then
+        xml.remove(first)
+        xml.append(head, first, 1)
+      end
+      local moved = vim.tbl_filter(function(r) return r ~= first and r.parent == head end, rows)
+      for k = #moved, 1, -1 do -- (after it, in order)
+        xml.remove(moved[k])
+        local nxt = tbl.children[xml.index(head) + 1]
+        if nxt and nxt.tag == "table:table-rows" then
+          xml.append(nxt, moved[k], 1)
+        else
+          xml.append(tbl, moved[k], xml.index(head) + 1)
+        end
+      end
+      for _, row in ipairs(rows) do -- (rows that don't break across pages)
+        restyle(ctx, row, "table-row", "style:table-row-properties", { { "fo:keep-together", "always" } })
+      end
+      local before = tbl.parent and tbl.parent.children[xml.index(tbl) - 1] -- (its caption: kept with it)
+      if before and (before.tag == "text:p" or before.tag == "text:h") then
+        para_style(ctx, before, "keep")
+      end
+      -- (a short table on one page)
+      restyle(ctx, tbl, "table", "style:table-properties", { { "style:may-break-between-rows", #rows > tables.KEEP_ROWS and "true" or "false" } })
+    end
+  end
 end
 
 -- As many columns as the widest row has (after rows or cells were added or removed).
@@ -829,6 +1200,13 @@ function M.fill(ctx, p, block, pieces)
   end
   if not not block.quote ~= based_on(ctx, p, QUOTES) and not (level or block.title) then
     xml.set_attr(p, "text:style-name", block.quote and (ctx.quote_style or "Quotations") or nil)
+  end
+  -- a caption: in a caption style (and no longer, if it had a caption's number and isn't one now)
+  local in_caption = based_on(ctx, p, CAPTIONS)
+  if block.caption and not in_caption then
+    xml.set_attr(p, "text:style-name", caption_style(ctx, block.caption))
+  elseif not block.caption and in_caption and #xml.collect(p, { ["text:sequence"] = true }) > 0 and not (level or block.title or block.quote) then
+    xml.set_attr(p, "text:style-name", nil)
   end
   local page = vim.iter(pieces):any(function(piece) return piece.page_break end) -- (.odt: before it)
   set_layout(ctx, p, block.align, page)

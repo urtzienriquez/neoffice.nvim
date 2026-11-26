@@ -1,41 +1,91 @@
 -- One paragraph <-> one line of text with Markdown-style marks:
---   **bold**  *italic*  <u>underline</u>  ~~strikethrough~~  ==highlight==
+--   **bold**  *italic*  ++underline++  ~~strikethrough~~  ==highlight== (yellow; another colour:
+--   ==highlight=={green}, see M.COLORS)
 --   superscript^{2}  subscript_{food} (as in LaTeX)
---   [text](url)  ![alt](image path){width=12cm}  $inline equation$  $$display equation$$  ^[a footnote]
+--   [text](url)  ![alt](image path){width = 12cm}  $inline equation$  $$display equation$$  ^[a footnote]
 --   ⟦a field⟧ (a citation, date, reference... : shown, not edited)
 --   \ at the end of a line: a line break    \newpage: a page break
 -- and, starting a line, what kind of paragraph it is (its "block"):
 --   "# " heading (## level 2, ...)   "% " title   "> " quote   "- " bullet item   "1. " numbered item
+--   "Table: " a table's caption   "Figure: " a figure's caption (numbered by the document: see
+--   M.captions; the words are the option `captions`)
 --   (list items indented by two spaces per level)
 --   then its alignment, if not left:  "<|> centered"   "->> right"   "<=> justified"
 -- Tables are Markdown pipe tables: "| cell | cell |", one line per row (a line of dashes after the
--- first); paragraphs in one cell are separated by "<br>", and "|" in text is written "\|".
+-- first); paragraphs in one cell are separated by "<br>", and "|" in text is written "\|". The line
+-- of dashes says its columns' alignment ("|:---:|---:|": centered, right), and a line above it the
+-- options of its look ("{width = full, height = tall}": see M.table_options and tables.lua).
 -- Escapes: \* \$ \# ...
--- A span is { text = "...", b, i, u, s, h, sup, sub = bool, link = url|nil, raw = bool (no escaping) },
+-- A span is { text = "...", b, i, u, s, sup, sub = bool, h = false|colour, link = url|nil,
+-- raw = bool (no escaping) },
 -- or one of: { image = { alt, path, width = "12cm" | nil } }, { math = { tex, display } }, { footnote = { text } },
 -- { field = { text } }, { line_break = true }, { page_break = true }.
 local M = {}
 
 -- The formatting a span can have. To support another, add it here (and to the reader/writer of
 -- each format).
+-- h (highlight) is a colour: false, or one of M.COLORS (Word's highlight colours) or "#rrggbb".
 M.FLAGS = { "b", "i", "u", "s", "h", "sup", "sub" }
 local MARK = {
   b = { "**", "**" },
   i = { "*", "*" },
-  u = { "<u>", "</u>" },
+  u = { "++", "++" },
   s = { "~~", "~~" },
   h = { "==", "==" },
   sup = { "^{", "}" },
   sub = { "_{", "}" },
 }
 
+-- Highlight colours, as written after a highlight ("==text=={green}"; yellow, the default, isn't
+-- written): Word's (its names, in lower case) with their RGB values (for .odt).
+M.COLORS = {
+  yellow = "ffff00", green = "00ff00", cyan = "00ffff", magenta = "ff00ff", blue = "0000ff", red = "ff0000",
+  darkblue = "000080", darkcyan = "008080", darkgreen = "008000", darkmagenta = "800080", darkred = "800000",
+  darkyellow = "808000", darkgray = "808080", lightgray = "c0c0c0", black = "000000", white = "ffffff",
+}
+-- A colour as written ("Green", "#A1B2C3"...) -> as stored ("green", "#a1b2c3"), or nil if it isn't one.
+function M.color(s)
+  s = (s or ""):lower()
+  return (M.COLORS[s] or s:match("^#%x%x%x%x%x%x$")) and s or nil
+end
+-- The highlight colour of a hex value: its name if it has one.
+function M.color_of_rgb(hex)
+  hex = (hex or ""):lower():gsub("^#", "")
+  for name, value in pairs(M.COLORS) do
+    if value == hex then
+      return name
+    end
+  end
+  return hex:match("^%x%x%x%x%x%x$") and "#" .. hex or nil
+end
+-- The named colour nearest to a highlight colour (for .docx, whose highlights are named).
+function M.named_color(c)
+  if M.COLORS[c] then
+    return c
+  end
+  local function rgb(hex) return tonumber(hex:sub(1, 2), 16), tonumber(hex:sub(3, 4), 16), tonumber(hex:sub(5, 6), 16) end
+  local r, g, b = rgb(c:sub(2))
+  local best, distance = "yellow", math.huge
+  for name, value in pairs(M.COLORS) do
+    local r2, g2, b2 = rgb(value)
+    local d = (r - r2) ^ 2 + (g - g2) ^ 2 + (b - b2) ^ 2
+    if d < distance or d == distance and name < best then
+      best, distance = name, d
+    end
+  end
+  return best
+end
+local function closing(k, value) -- (a highlight's colour after it)
+  return MARK[k][2] .. (k == "h" and type(value) == "string" and value ~= "yellow" and "{" .. value .. "}" or "")
+end
+
 -- (braced: inside ^{...} or _{...}, where "}" closes; strict: every character that could start a
 -- mark, for text next to marks: see M.render)
 local function escape(s, braced, cell, strict)
   if strict then -- (a "\" too; otherwise one is written as it is, as it escapes nothing)
-    s = s:gsub("[\\~=<^_!]", "\\%0")
+    s = s:gsub("[\\~=+{^_!]", "\\%0")
   end
-  s = s:gsub("[*%[%]$]", "\\%0"):gsub("<(/?u>)", "\\<%1"):gsub("([%^_]){", "\\%1{")
+  s = s:gsub("[*%[%]$]", "\\%0"):gsub("([%^_]){", "\\%1{")
   s = s:gsub("⟦", "\\⟦"):gsub("⟧", "\\⟧"):gsub("¶", "\\¶")
   if cell then -- (in a table cell, "|" and "<br>" separate)
     s = s:gsub("|", "\\|"):gsub("<br>", "\\<br>")
@@ -50,9 +100,27 @@ M.escape = escape
 -- number } } | {} (a plain one); with align = "center" | "right" | "justify" (or nil: left).
 local ALIGN = { center = "<|> ", right = "->> ", justify = "<=> " }
 
+-- The words that start captions ("Table: ", "Figure: "): { table = "Table", figure = "Figure" }
+-- (the option `captions`), and the kind of caption a word is.
+function M.captions()
+  local config = require("neoffice").config.captions or {}
+  return { table = config.table or "Table", figure = config.figure or "Figure" }
+end
+local function caption_kind(word)
+  word = word:lower()
+  for kind, label in pairs(M.captions()) do
+    if label:lower() == word then
+      return kind
+    end
+  end
+end
+M.caption_kind = caption_kind
+
 function M.prefix(block)
   local list, kind = block.list, ""
-  if block.heading then
+  if block.caption then
+    kind = M.captions()[block.caption] .. ": "
+  elseif block.heading then
     kind = ("#"):rep(block.heading) .. " "
   elseif block.title then
     kind = "% "
@@ -72,7 +140,11 @@ function M.block(line)
   local hashes = line:match("^(#+) ")
   local indent, after = line:match("^( *)%- ()")
   local number, dot, after_dot = line:match("^( *)%d+()%. ()")
-  if hashes then
+  local word, after_word = line:match("^([^%s:\\]+): ()")
+  local caption = word and caption_kind(word)
+  if caption then
+    block, start, kind_at = { caption = caption }, after_word, 1
+  elseif hashes then
     block, start, kind_at = { heading = #hashes }, #hashes + 2, 1
   elseif line:match("^%% ") then
     block, start, kind_at = { title = true }, 3, 1
@@ -97,7 +169,7 @@ function M.block(line)
 end
 
 local function kind(block)
-  return block.heading or block.title or block.quote or block.list or block.row
+  return block.heading or block.title or block.quote or block.list or block.row or block.caption
 end
 
 local math_at, enclosed, link_at -- (below)
@@ -120,11 +192,103 @@ local function skip(line, p)
   return after
 end
 
+-- A table's line of dashes: { align = { [column] = "center" | "right" | "left" | nil } }, or nil
+-- if the line isn't one. "|:---:|---:|:---|---|": centered, right, left, and left too (not said).
+function M.table_format(line)
+  local dashes = line
+  if not dashes:match("^|[%s:|%-]*%-[%s:|%-]*$") then
+    return nil
+  end
+  local format = { align = {} }
+  local col = 0
+  for cell in dashes:sub(2):gmatch("([^|]*)|?") do
+    cell = vim.trim(cell)
+    if cell ~= "" then
+      col = col + 1
+      local left, right = cell:sub(1, 1) == ":", cell:sub(-1) == ":"
+      format.align[col] = left and right and "center" or right and "right" or left and "left" or nil
+    end
+  end
+  return format
+end
+
+-- The line of dashes of a table of `columns` columns with this format (see M.table_format); with
+-- `widths` (of the columns' text: an aligned table), as wide as each column.
+function M.format_line(format, columns, widths)
+  local cells = {}
+  for col = 1, columns do
+    local align = format and format.align[col]
+    local left, right = (align == "left" or align == "center") and 1 or 0, (align == "right" or align == "center") and 1 or 0
+    -- (aligned: as wide as the cells' text and the spaces around it; else three dashes)
+    local n = widths and (widths[col] or 3) + 2 or 3 + left + right
+    cells[col] = (":"):rep(left) .. ("-"):rep(n - left - right) .. (":"):rep(right)
+  end
+  return "|" .. table.concat(cells, "|") .. "|"
+end
+
+-- A line of dashes with these columns aligned so ({ [column] = "right" | ... }), as wide as it was.
+function M.realign(line, aligns)
+  local col = 0
+  return (line:gsub("([^|]+)", function(seg)
+    col = col + 1
+    local align = aligns[col]
+    if not align then
+      return seg
+    end
+    local n = math.max(#vim.trim(seg), 3)
+    local left, right = (align == "left" or align == "center") and 1 or 0, (align == "right" or align == "center") and 1 or 0
+    return (":"):rep(left) .. ("-"):rep(n - left - right) .. (":"):rep(right)
+  end))
+end
+
+-- The cells of a table row line, as written: for each, { s, e } (1-based bytes of its text without
+-- the spaces around it; e = s - 1 for an empty one).
+function M.cell_spans(line)
+  local out = {}
+  for _, paras in ipairs(M.cells(line) or {}) do
+    local first, last = paras[1], paras[#paras]
+    out[#out + 1] = { s = first.col + 1, e = last.col + #last.text }
+  end
+  return out
+end
+
+-- The options on the line above a table ("{width = full, height = tall}"): the text inside the
+-- braces, or nil if the line isn't one.
+function M.table_options(line)
+  return line:match("^{([^{}]*)}%s*$")
+end
+
+-- Attributes, as written in braces: "name = value" (or "name=value"), separated by commas; a value
+-- alone stands for itself ("full": its name is the one it belongs to). Returns a list of
+-- { name (or nil), value, s, e (bytes of `text`, 1-based) }, and the way to write them: "name =
+-- value, name = value" (`names(value)` gives a lone value's name).
+function M.attributes(text, names)
+  local list, p = {}, 1
+  while p <= #text do
+    local s, name, value, e = text:match("^%s*()([%a_][%w_%-]*)%s*=%s*([^%s,;=]+)()", p)
+    if not s then
+      s, value, e = text:match("^%s*()([^%s,;=]+)()", p)
+    end
+    if s then
+      list[#list + 1] = { name = name and name:lower(), value = value, s = s, e = e - 1 }
+      p = e
+    else
+      p = p + 1 -- (a separator, or an "=" alone)
+    end
+  end
+  local tidy = {}
+  for _, a in ipairs(list) do
+    local name = a.name or names and names(a.value)
+    tidy[#tidy + 1] = name and name .. " = " .. a.value or a.value
+  end
+  return list, table.concat(tidy, ", ")
+end
+
 -- The cells of a table row line: for each, { col = where its text starts (0-based), text }, with
 -- the paragraphs of the cell, split at "<br>". nil for the line of dashes (`dashes`: this line may
 -- be it, being the one under a table's first row).
 function M.cells(line, dashes)
-  if dashes and line:match("^|[%s:|%-]*%-[%s:|%-]*$") then
+  if dashes and M.table_format(line) then
     return nil
   end
   local cells, start, p = {}, 2, 2
@@ -185,12 +349,13 @@ function M.render(spans, block, strict)
       put("](" .. cur.link:gsub("%)", "%%29") .. ")")
     end
     for k = #M.FLAGS, 1, -1 do -- (closing in the reverse order of opening, so marks nest)
-      if cur[M.FLAGS[k]] and not to[M.FLAGS[k]] then
-        put(MARK[M.FLAGS[k]][2])
+      local flag = M.FLAGS[k]
+      if cur[flag] and cur[flag] ~= to[flag] then -- (off, or a highlight of another colour)
+        put(closing(flag, cur[flag]))
       end
     end
     for _, k in ipairs(M.FLAGS) do
-      if to[k] and not cur[k] then
+      if to[k] and to[k] ~= cur[k] then
         put(MARK[k][1])
       end
     end
@@ -209,7 +374,7 @@ function M.render(spans, block, strict)
     local token -- (images, equations, footnotes, fields and breaks: written as they are)
     if s.image then
       token = "![" .. escape(s.image.alt, false, block.cell) .. "](" .. s.image.path:gsub("%)", "%%29") .. ")"
-        .. (s.image.width and "{width=" .. s.image.width .. "}" or "")
+        .. (s.image.width and "{width = " .. s.image.width .. "}" or "")
     elseif s.math then -- (on one line)
       local tex = s.math.tex:gsub("%s*\n%s*", " ")
       token = (s.math.display and "$$" or "$") .. tex .. (s.math.display and "$$" or "$")
@@ -266,7 +431,7 @@ function M.render(spans, block, strict)
   -- what is written must read back as the same text: if not (marks next to text that looks like
   -- marks), it is written again escaping every character that could start a mark
   -- (only text with characters that could be read as marks can read back otherwise)
-  if not strict and line:find("[=~_^<\\!]") and not M.same(line, spans) then
+  if not strict and line:find("[=~+{_^\\!]") and not M.same(line, spans) then
     return M.render(spans, block, true)
   end
   return line, cols
@@ -279,7 +444,7 @@ local function signature(entry, token)
   end
   local flags = {}
   for _, k in ipairs(M.FLAGS) do
-    flags[#flags + 1] = entry[k] and k or ""
+    flags[#flags + 1] = entry[k] and k .. (entry[k] == true and k == "h" and "yellow" or tostring(entry[k])) or ""
   end
   return table.concat(flags, ",") .. "|" .. (entry.link or "") .. "|" .. entry.ch
 end
@@ -313,13 +478,15 @@ function M.same(line, spans)
   return true
 end
 
--- An image "![alt](path)" or "![alt](path){width=12cm}" at `pos`: alt, path, position after it,
--- width (or nil).
+-- An image "![alt](path)" or "![alt](path){width = 12cm}" at `pos`: alt, path, position after it,
+-- width (or nil), and where its attributes are ({ s, e, text: inside the braces }, or nil).
 function M.image_at(line, pos)
   local alt, path, after = line:match("^!%[(.-)%]%(([^)]*)%)()", pos)
   if alt then
-    local width, after_width = line:match("^{width=([^}]*)}()", after)
-    return (alt:gsub("\\(.)", "%1")), (path:gsub("%%29", ")")), after_width or after, width
+    local s, inside, after_width = line:match("^(){(%s*width%s*=%s*[^}]-)}()", after)
+    local width = inside and vim.trim(inside:match("=%s*(.-)%s*$"))
+    return (alt:gsub("\\(.)", "%1")), (path:gsub("%%29", ")")), after_width or after, width,
+      s and { s = s, e = after_width - 1, text = inside } or nil
   end
 end
 
@@ -391,18 +558,19 @@ end
 -- What a "\\" escapes (the characters escape() and render() escape); before anything else, it is
 -- just a backslash. (A "\\" ending the text is a line break; "\\ " starting a line, a space.)
 local ESCAPED = {}
-for c in ("\\*[]$<>^_~=|#%-.!{}\n" .. "⟦⟧¶"):gmatch("[^\128-\191][\128-\191]*") do
+for c in ("\\*[]$<>^_~=+|#%-.!{}\n" .. "⟦⟧¶"):gmatch("[^\128-\191][\128-\191]*") do
   ESCAPED[c] = true
 end
 
 -- The first bytes of everything that isn't plain text (marks, escapes, images, equations...).
 local MARKS = {}
-for c in ("\\!$^_*~=<}[" .. "\226"):gmatch(".") do -- (\226: the first byte of ⟦)
+for c in ("\\!$^_*~=+}[" .. "\226"):gmatch(".") do -- (\226: the first byte of ⟦)
   MARKS[c:byte()] = true
 end
 
 -- Returns the block (see M.prefix: list numbers aren't read) and a list of characters:
--- { col = byte column in the line (0-based), ch = "x", b, i, u, s, h, sup, sub = bool, link = url|nil }
+-- { col = byte column in the line (0-based), ch = "x", b, i, u, s, sup, sub = bool, h = false|colour,
+-- link = url|nil }
 -- A line break is the character "\n" (from "\" at the end of a line). An image, equation,
 -- footnote, field or page break is one entry { col, ch = "", len, image | math | footnote | field |
 -- page_break = ... }.
@@ -411,11 +579,12 @@ function M.parse(line)
   local text_start = pos
 
   local chars, cur, link_close, braces = {}, {}, nil, {} -- braces: the open ^{ and _{
+  local h_from -- (where the open highlight started, in chars)
   local function emit(at)
     local ch = line:match("^.[\128-\191]*", at)
     chars[#chars + 1] = { -- (the flags of M.FLAGS)
       col = at - 1, ch = ch, link = cur.link, b = cur.b == true, i = cur.i == true, u = cur.u == true,
-      s = cur.s == true, h = cur.h == true, sup = cur.sup == true, sub = cur.sub == true,
+      s = cur.s == true, h = cur.h or false, sup = cur.sup == true, sub = cur.sub == true,
     }
     return at + #ch
   end
@@ -475,7 +644,8 @@ function M.parse(line)
       pos = emit(pos)
       chars[#chars].ch = "\n"
     elseif c == "\\" and (ESCAPED[line:match("^.[\128-\191]*", pos + 1) or ""]
-      or line:sub(pos + 1, pos + 1) == " " and (pos == text_start or line:sub(pos - 1, pos - 1) == "\n")) then
+      or line:sub(pos + 1, pos + 1) == " " and (pos == text_start or line:sub(pos - 1, pos - 1) == "\n")
+      or pos == text_start and M.block(line:sub(pos + 1)).caption) then -- (\Table: is text)
       pos = emit(pos + 1)
       chars[#chars].esc = true -- (escaped: a "¶" is just a ¶)
     elseif c == "!" and M.image_at(line, pos) then
@@ -494,12 +664,22 @@ function M.parse(line)
       cur.i, pos = not cur.i, pos + 1
     elseif two == "~~" and (cur.s or later("~~", pos + 2)) then
       cur.s, pos = not cur.s, pos + 2
-    elseif two == "==" and (cur.h or later("==", pos + 2)) then
-      cur.h, pos = not cur.h, pos + 2
-    elseif line:find("^<u>", pos) and not cur.u and later("</u>", pos + 3) then
-      cur.u, pos = true, pos + 3
-    elseif line:find("^</u>", pos) and cur.u then
-      cur.u, pos = false, pos + 4
+    elseif two == "==" and cur.h then -- (its colour, if not yellow, after it: "=={green}")
+      local name, after = line:match("^{%s*([#%w]+)%s*}()", pos + 2)
+      if not name then -- ("=={color = green}" too)
+        name, after = line:match("^{%s*colou?r%s*=%s*([#%w]+)%s*}()", pos + 2)
+      end
+      local color = M.color(name)
+      if color and color ~= "yellow" then
+        for k = h_from, #chars do
+          chars[k].h = chars[k].h and color
+        end
+      end
+      cur.h, pos = false, color and after or pos + 2
+    elseif two == "==" and later("==", pos + 2) then
+      cur.h, h_from, pos = "yellow", #chars + 1, pos + 2
+    elseif two == "++" and (cur.u or later("++", pos + 2)) then
+      cur.u, pos = not cur.u, pos + 2
     elseif two == "^{" or two == "_{" then
       local flag = two == "^{" and "sup" or "sub"
       table.insert(braces, flag)

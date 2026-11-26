@@ -46,7 +46,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
       local before = H.paragraph_xml(path)[5]:match(ext == "docx" and "<w:drawing>.-</w:drawing>" or "<draw:frame.-</draw:frame>")
       H.replace(5, "An image", "A picture")
       H.reopen()
-      assert.equals("A picture ![](" .. image_path(5) .. "){width=1.4cm} here.", H.paras()[5])
+      assert.equals("A picture ![](" .. image_path(5) .. "){width = 1.4cm} here.", H.paras()[5])
       local after = H.paragraph_xml(path)[5]:match(ext == "docx" and "<w:drawing>.-</w:drawing>" or "<draw:frame.-</draw:frame>")
       assert.equals(before, after)
     end)
@@ -71,7 +71,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
       assert.equals(first, H.bytes(path))
       H.open(path)
       local inside = image_path(12)
-      assert.equals("![A red dot](" .. inside .. "){width=1.1cm}", H.paras()[12]) -- (40 pixels)
+      assert.equals("![A red dot](" .. inside .. "){width = 1.1cm}", H.paras()[12]) -- (40 pixels)
       assert.equals(H.bytes(DOT), zip.read(path, inside))
       if ext == "docx" then
         assert.truthy(zip.read(path, "[Content_Types].xml"):find('Extension="png"'))
@@ -94,7 +94,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
       local files = vim.tbl_count(zip.list(path))
       H.set(12, "Again: ![](" .. inside .. ")")
       H.reopen()
-      assert.equals("Again: ![](" .. inside .. "){width=1.1cm}", H.paras()[12])
+      assert.equals("Again: ![](" .. inside .. "){width = 1.1cm}", H.paras()[12])
       assert.equals(files, vim.tbl_count(zip.list(path)))
     end)
 
@@ -110,9 +110,9 @@ for _, ext in ipairs({ "docx", "odt" }) do
       end
       local w, h = size()
       local before = H.paragraph_xml(path)
-      H.replace(5, "{width=1.4cm}", "{width=7cm}")
+      H.replace(5, "{width = 1.4cm}", "{width = 7cm}")
       H.reopen()
-      assert.truthy(H.paras()[5]:find("{width=7cm}", 1, true))
+      assert.truthy(H.paras()[5]:find("{width = 7cm}", 1, true))
       local w2, h2 = size()
       assert.is_true(math.abs(w2 - 7) < 0.01)
       assert.is_true(math.abs(h2 / w2 - h / w) < 0.01)
@@ -120,9 +120,9 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
 
     it("gives a new image the width you write (in cm, mm or in)", function()
-      H.set(12, "![](" .. DOT .. "){width=50mm} and ![](" .. SQUARE .. "){width=2in}")
+      H.set(12, "![](" .. DOT .. "){width = 50mm} and ![](" .. SQUARE .. "){width = 2in}")
       H.reopen()
-      assert.truthy(H.paras()[12]:find("{width=5cm}.*{width=5.1cm}"))
+      assert.truthy(H.paras()[12]:find("{width = 5cm}.*{width = 5.1cm}"))
     end)
 
     it("takes a width in % of the text's width (the page's, without its margins)", function()
@@ -134,19 +134,19 @@ for _, ext in ipairs({ "docx", "odt" }) do
         end
         return require("neoffice.markup").cm(main:match("<draw:frame.-svg:width=\"([^\"]+)\""))
       end
-      H.replace(5, "{width=1.4cm}", "{width=100%}")
+      H.replace(5, "{width = 1.4cm}", "{width = 100%}")
       H.reopen()
       assert.is_true(math.abs(width() - text_width) < 0.01)
       H.paras() -- (shown in cm when opened again)
-      assert.truthy(H.paras()[5]:find("{width=" .. require("neoffice.markup").width(text_width) .. "}", 1, true))
-      H.replace(5, H.paras()[5]:match("{width=[^}]*}"), "{width=50%}")
+      assert.truthy(H.paras()[5]:find("{width = " .. require("neoffice.markup").width(text_width) .. "}", 1, true))
+      H.replace(5, H.paras()[5]:match("{width = [^}]*}"), "{width = 50%}")
       H.reopen()
       assert.is_true(math.abs(width() - text_width / 2) < 0.01)
     end)
 
     it("refuses a width it can't read, changing nothing", function()
       local before = H.bytes(path)
-      H.replace(5, "{width=1.4cm}", "{width=big}")
+      H.replace(5, "{width = 1.4cm}", "{width = big}")
       H.save()
       assert.equals(before, H.bytes(path))
       assert.is_true(vim.bo.modified)
@@ -159,7 +159,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
 
     it("removes an image when its text is deleted", function()
-      H.replace(5, "![](" .. image_path(5) .. "){width=1.4cm} ", "")
+      H.replace(5, "![](" .. image_path(5) .. "){width = 1.4cm} ", "")
       H.reopen()
       assert.equals("An image here.", H.paras()[5])
       assert.falsy(zip.read(path, H.MAIN[ext]):find(ext == "docx" and "w:drawing" or "draw:frame"))

@@ -9,18 +9,25 @@ else in the file stays exactly as it was.
 ## Features
 
 - Paragraphs separated by blank lines, as in Markdown; new documents with `nvim new.docx`.
-- Formatting: `**bold**`, `*italic*`, `<u>underline</u>`, `~~strike~~`, `==highlight==`,
-  `x^{2}`, `W_{food}`, `[links](https://…)`.
+- Formatting: `**bold**`, `*italic*`, `++underline++`, `~~strike~~`, `==highlight==` (other
+  colours: `==highlight=={green}`), `x^{2}`, `W_{food}`, `[links](https://…)`.
+- Captions: `Table: …` and `Figure: …`, real captions numbered by the document (Word's and
+  LibreOffice's own numbering, so cross-references work).
 - Paragraphs: `# ` headings (numbered on demand), `% ` title, `> ` quote, `- ` and `1. ` lists,
   and alignment `<|> centered`, `->> right`, `<=> justified`.
 - Line breaks (`\` at the end of a line) and page breaks (`\newpage`).
 - Tables as pipe tables (`| a | b |`): edit cells, add or remove rows and columns, new tables.
-- Footnotes (`^[note]`), images (`![alt](path){width=50%}`, shown with `vim.ui.img`), equations
+  Tables typeset themselves, as in LaTeX: booktabs rules, columns as wide as their content,
+  compact rows, numbers aligned right. A line above a table changes its look
+  (`{width = full, height = tall}`); colons in the line of dashes align columns (`|:---:|---:|`).
+- Footnotes (`^[note]`), images (`![alt](path){width = 50%}`, shown with `vim.ui.img`), equations
   as LaTeX (`$…$`, `$$…$$`, `.docx`), and fields and citations, shown as `⟦…⟧` and kept.
 - Comments: add, reply, resolve and delete, in a side panel.
 - Tracked changes: shown by author, accepted or rejected (at the cursor, in a selection, all, or
   someone's), and your own edits tracked. Undo works.
-- A built-in language server: headings as symbols (`gO`, pickers, outlines), sections as folds,
+- A built-in language server (`neoffice_ls`): headings as symbols (`gO`, pickers, outlines),
+  formatting (tables aligned, with conform.nvim's `lsp_format = "fallback"`), completion of
+  table options and highlight colours, sections as folds,
   hover on comments and changes.
 
 One command, `:Neoffice` (alone, it lets you pick):
@@ -58,6 +65,8 @@ require("neoffice").setup({
   conceal = false, -- hide the marks
   images = true, -- show images
   comment_text = false, -- each comment's text at the end of its line (or :Neoffice comments text)
+  captions = { table = "Table", figure = "Figure", separator = ". " }, -- caption words, and after the number
+  tables = { rules = "booktabs", width = "auto", height = "compact", position = "center" }, -- how tables look
 })
 vim.api.nvim_create_autocmd("FileType", {
   pattern = "neoffice",
