@@ -277,6 +277,28 @@ function M.box_line(line)
   end
 end
 
+-- Whether a line holds only floating images (after its paragraph's marks, if any): such a line
+-- is joined to the next with nothing between, as the floating images of the paragraph below it.
+function M.floats_only(line)
+  if not line:find("float", 1, true) then -- (quick: most lines)
+    return false
+  end
+  local _, pos = M.block(line)
+  local floats = require("neoffice.floats")
+  local any = false
+  while pos <= #line do
+    if line:sub(pos, pos + 1) ~= "![" then
+      return false
+    end
+    local _, _, after, _, attrs = M.image_at(line, pos)
+    if not (after and attrs and attrs.attrs and floats.floating(attrs.attrs)) then
+      return false
+    end
+    pos, any = after, true
+  end
+  return any
+end
+
 -- The options on the line above a table ("{width = full, height = tall}"): the text inside the
 -- braces, or nil if the line isn't one.
 function M.table_options(line)

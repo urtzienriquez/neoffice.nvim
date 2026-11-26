@@ -78,9 +78,16 @@ function H.set(n, text) -- replace paragraph n (one line) by text (which may hol
 end
 
 function H.replace(n, from, to) -- replace text inside paragraph n, as typing would (marks stay)
-  local r = H.row(n)
-  local line = H.lines()[r]
-  local s = assert(line:find(from, 1, true), "not found: " .. from)
+  local para = neo.blocks(api.nvim_get_current_buf())[n]
+  local r, s
+  for row = para.first, para.last do -- (on whichever of its lines it is)
+    s = H.lines()[row]:find(from, 1, true)
+    if s then
+      r = row
+      break
+    end
+  end
+  assert(s, "not found: " .. from)
   api.nvim_buf_set_text(0, r - 1, s - 1, r - 1, s - 1 + #from, vim.split(to, "\n"))
   require("neoffice.changes").after_edit(api.nvim_get_current_buf()) -- (what TextChanged does)
 end

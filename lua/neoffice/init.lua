@@ -128,7 +128,12 @@ function M.paragraphs(lines, alone)
       end
     elseif prev and prev.text ~= "" and not prev.cell and not prev.alone and not alone[row] and #blanks == 0 and not cut and not next((markup.block(line))) then -- continues it
       local hard = #(prev.text:match("\\*$")) % 2 == 1 -- (after a "\": a line break, else a space)
-      prev.last, prev.text = row, prev.text .. (hard and "\n" or " ") .. line
+      local floating = not hard and markup.floats_only(lines[row - 1]) -- (its floating images, on a line of their own: nothing between)
+      if floating then
+        prev.joins = prev.joins or {}
+        prev.joins[row - prev.first] = 0
+      end
+      prev.last, prev.text = row, prev.text .. (hard and "\n" or floating and "" or " ") .. line
     else
       empty_paragraphs(prev and 2 or 1) -- (the first blank line after a paragraph separates)
       out[#out + 1] = { first = row, last = row, text = line, alone = alone[row] }
@@ -174,6 +179,12 @@ local function covers(mark, row, col)
   return (mark[2] < row or mark[2] == row and mark[3] <= col) and (d.end_row > row or d.end_row == row and d.end_col > col)
 end
 
+-- How many characters join a paragraph's line `i` (of its lines) to the next in its text: one (a
+-- space or a line break), or none (after a line of floating images: see M.paragraphs).
+function M.join(para, i)
+  return para.joins and para.joins[i] or 1
+end
+
 -- Cut a paragraph into pieces: text with uniform formatting, objects, images, and comment/change
 -- markers. Reads the buffer and its marks only.
 local function pieces(buf, para)
@@ -185,10 +196,10 @@ local function pieces(buf, para)
   end
   -- where each character is in the buffer (the paragraph's lines were joined with spaces)
   local lines = api.nvim_buf_get_lines(buf, para.first - 1, para.last, true)
-  local function position(offset) -- (of a byte of the paragraph's text: row, column)
+  local function position(offset) -- (of a byte of the paragraph's text, ending something: row, column)
     local row, start = 1, -(para.col or 0)
     while row < #lines and offset > start + #lines[row] do
-      start, row = start + #lines[row] + 1, row + 1
+      start, row = start + #lines[row] + M.join(para, row), row + 1
     end
     return para.first - 2 + row, offset - start
   end
@@ -197,8 +208,9 @@ local function pieces(buf, para)
     if ch.len then -- (an image, equation... may go on in the next line)
       ch.end_row, ch.end_col = position(ch.col + ch.len)
     end
-    while row < #lines and ch.col > start + #lines[row] do
-      start, row = start + #lines[row] + 1, row + 1
+    -- (a character right after a line joined with nothing is on the next line)
+    while row < #lines and (ch.col > start + #lines[row] or ch.col == start + #lines[row] and M.join(para, row) == 0) do
+      start, row = start + #lines[row] + M.join(para, row), row + 1
     end
     ch.row, ch.col = para.first - 2 + row, ch.col - start
   end
@@ -790,13 +802,30 @@ local function open(buf, path)
       end
       local ends_box = box and (not paras[k + 1] or paras[k + 1].box ~= box)
       r = #lines -- (a paragraph with line breaks takes several lines)
-      local starts, offset = {}, 0
-      for _, line in ipairs(vim.split(texts[k], "\n", { plain = true })) do
-        lines[#lines + 1], starts[#starts + 1], offset = line, offset, offset + #line + 1
+      -- its floating images first, on a line of their own, joined to the text with nothing (see
+      -- M.paragraphs), unless the text would then read as something else
+      local text, parts, joins = texts[k], {}, {}
+      local floating = 0
+      while para.spans[floating + 1] and para.spans[floating + 1].image and floats.floating(para.spans[floating + 1].image) do
+        floating = floating + 1
       end
-      at = function(col) -- the position of a byte column of the paragraph's text
+      local split = floating > 0 and cols[k][floating] and cols[k][floating][2]
+      local rest = split and text:sub(split + 1)
+      if rest and not rest:match("^%s*$") and not rest:match("^%s*\n") and not next((markup.block(rest))) and not rest:match("^|")
+        and not markup.box_line(rest) and not markup.table_options(rest) then
+        parts[1], joins[1], text = text:sub(1, split), 0, rest
+      end
+      for _, line in ipairs(vim.split(text, "\n", { plain = true })) do
+        parts[#parts + 1] = line
+      end
+      local starts, offset = {}, 0
+      for i, line in ipairs(parts) do
+        lines[#lines + 1], starts[#starts + 1], offset = line, offset, offset + #line + (joins[i] or 1)
+      end
+      at = function(col, ends) -- the position of a byte column of the paragraph's text
         local row = #starts
-        while starts[row] > col do
+        -- (what ends where a line joined with nothing ends: on that line)
+        while starts[row] > col or ends and row > 1 and starts[row] == col and joins[row - 1] == 0 do
           row = row - 1
         end
         return r + row - 1, col - starts[row]
@@ -819,7 +848,7 @@ local function open(buf, path)
     local seen_text = false
     for s_index, s in ipairs(para.spans) do
       local ra, ca = at(cols[k][s_index][1])
-      local rb, cb = at(cols[k][s_index][2])
+      local rb, cb = at(cols[k][s_index][2], true)
       local range_start = s.comment_start or s.insert_start
       local range_end = s.comment_end or s.insert_end
       if range_end and not seen_text and started[range_end] and started[range_end][1] < r then
@@ -1009,7 +1038,7 @@ function M.decorate_marks(buf, para, lines)
     end
     local row = para.first
     while row < para.last and offset > #lines[row] do
-      offset, row = offset - #lines[row] - 1, row + 1
+      offset, row = offset - #lines[row] - M.join(para, row - para.first + 1), row + 1
     end
     return row - 1, offset
   end

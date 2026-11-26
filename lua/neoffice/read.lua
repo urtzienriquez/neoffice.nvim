@@ -42,8 +42,9 @@ local function versions(buf, block)
   local lines = api.nvim_buf_get_lines(buf, block.first - 1, block.last, true)
   local row, start = 1, -(block.col or 0)
   for _, ch in ipairs(chars) do
-    while row < #lines and ch.col > start + #lines[row] do
-      start, row = start + #lines[row] + 1, row + 1
+    local join = require("neoffice").join
+    while row < #lines and (ch.col > start + #lines[row] or ch.col == start + #lines[row] and join(block, row) == 0) do
+      start, row = start + #lines[row] + join(block, row), row + 1
     end
     ch.row, ch.col = block.first - 2 + row, ch.col - start
   end

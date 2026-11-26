@@ -298,10 +298,15 @@ where it goes in its braces, not with coordinates (as LaTeX's wrapfigure): >
 As everywhere in braces, a value alone is enough (`{6cm, right}`). Images
 placed in Word or LibreOffice show what they mean: an image whose right edge
 is the column's shows `float = right`; only a place that is none of these
-shows numbers. A floating image shows at the start of its paragraph, wherever
-its anchor is in the text, and goes there when written (its place is measured
-from its paragraph: it stays where it was on the page). A floating image and
-its caption go together in a box (|neoffice-boxes|).
+shows numbers. A floating image shows on a line of its own, right above its
+paragraph's text (after the paragraph's marks, if it has any: `<=> `), wherever
+its anchor is in the text; written, it goes at the start of its paragraph (its
+place is measured from its paragraph: it stays where it was on the page). A
+line that holds only floating images is joined to the next with nothing
+between: the text is the paragraph's as it was. (Without `float`, an image on
+its own line is in the line, and joined to the text with a space, as lines
+are.) A floating image and its caption go together in a box
+(|neoffice-boxes|).
 
 ==============================================================================
 BOXES                                                         *neoffice-boxes*

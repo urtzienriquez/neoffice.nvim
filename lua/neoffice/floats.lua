@@ -119,24 +119,19 @@ function M.render(attrs)
   return table.concat(parts, ", ")
 end
 
--- What can change of an image, as a string (to tell whether it did).
+-- What can change of an image, as a string (to tell whether it did): its attributes as they are
+-- written (so what isn't shown, as a default, or a gap that shows as the default, is no change).
 function M.key(img)
-  local parts = {}
-  for _, key in ipairs(M.KEYS) do
-    parts[#parts + 1] = img and img[key] or ""
-  end
-  return table.concat(parts, "|")
+  return M.render(img or {})
 end
 
--- What can change of where it goes (its width and place: not its crop), as a string.
+-- What can change of where it goes (its width and place: not its crop), the same way.
 function M.place_key(img)
-  local parts = {}
-  for _, key in ipairs(M.KEYS) do
-    if not key:match("^crop%-") then
-      parts[#parts + 1] = img and img[key] or ""
-    end
+  local copy = {}
+  for key, value in pairs(img or {}) do
+    copy[key] = not key:match("^crop%-") and value or nil
   end
-  return table.concat(parts, "|")
+  return M.render(copy)
 end
 
 -- Whether attributes place it out of the line.
