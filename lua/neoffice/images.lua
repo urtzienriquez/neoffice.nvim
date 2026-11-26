@@ -33,6 +33,29 @@ function M.info(data)
   end
 end
 
+-- Its resolution, in dots per inch (from a JPEG's JFIF header or a PNG's pHYs chunk; 96 if it
+-- doesn't say, as Word and LibreOffice take it).
+function M.dpi(data)
+  if data:sub(1, 2) == "\255\216" then
+    local at = data:find("JFIF\0", 1, true)
+    if at and at < 40 then
+      local units, x = data:byte(at + 7), be(data, at + 8, 2)
+      if x > 0 and (units == 1 or units == 2) then
+        return units == 1 and x or x * 2.54
+      end
+    end
+  elseif data:sub(1, 8) == "\137PNG\r\n\26\n" then
+    local at = data:find("pHYs", 1, true)
+    if at and data:byte(at + 12) == 1 then
+      local per_metre = be(data, at + 4, 4)
+      if per_metre > 0 then
+        return per_metre * 0.0254
+      end
+    end
+  end
+  return 96
+end
+
 -- ── Showing them ────────────────────────────────────────────────────────────
 
 local cache = {} -- path (and modification time, for files on disk) -> PNG bytes, or false
@@ -131,8 +154,30 @@ local function run_office()
 end
 
 -- Turn an image's bytes (of a file with extension `ext`) into a preview: PNG bytes, or nil if it
--- can't be; `finish` gets them (in the background, but for a small PNG: at once).
-function M.preview(data, ext, finish)
+-- can't be; `finish` gets them (in the background, but for a small PNG: at once). `crop`: { top,
+-- right, bottom, left } fractions cut off (see floats.crop), shown so (with ImageMagick).
+function M.preview(data, ext, finish, crop)
+  if crop and has("magick") then -- (first the whole preview, then that part of it)
+    return M.preview(data, ext, function(png)
+      if not png then
+        return finish(nil)
+      end
+      local src = vim.fn.tempname() .. ".png"
+      local f = io.open(src, "wb")
+      if not f then
+        return finish(png)
+      end
+      f:write(png)
+      f:close()
+      local t, r, b, l = unpack(crop)
+      local function pc(n) return ("%.4f%%"):format(n * 100) end -- (chops in turn: each of what is left)
+      vim.system({ "magick", src, "-gravity", "North", "-chop", "0x" .. pc(t), "-gravity", "South", "-chop", "0x" .. pc(b / math.max(1 - t, 0.01)),
+        "-gravity", "West", "-chop", pc(l) .. "x0", "-gravity", "East", "-chop", pc(r / math.max(1 - l, 0.01)) .. "x0", "+repage", "png:" .. src },
+        { timeout = 30000 }, function(res)
+          vim.schedule(function() finish(res.code == 0 and read(src) or png) end)
+        end)
+    end)
+  end
   local kind = M.info(data)
   if kind == "png" and #data < 1500000 then -- (as it is: nothing to wait for)
     return finish(data)
@@ -163,13 +208,14 @@ end
 
 -- PNG bytes of an image of the document (as written in the buffer), if it is ready: if not, it is
 -- read and converted in the background, and shown when it is (nil meanwhile).
-local function png(buf, path)
+local function png(buf, path, crop)
   local doc = require("neoffice").docs[buf]
   local inside = doc.ctx.entries[path]
   local file = vim.fs.normalize(path)
   file = file:match("^/") and file or vim.fs.joinpath(vim.fs.dirname(doc.path), file)
   local stat = not inside and vim.uv.fs_stat(file)
-  local key = inside and doc.path .. "//" .. path or file .. "@" .. (stat and stat.mtime.sec or "")
+  local key = (inside and doc.path .. "//" .. path or file .. "@" .. (stat and stat.mtime.sec or ""))
+    .. (crop and "#" .. table.concat(crop, ",") or "")
   if cache[key] == nil and not pending[key] then
     pending[key] = true
     local ext = (path:match("%.(%w+)$") or ""):lower()
@@ -177,7 +223,7 @@ local function png(buf, path)
       vim.system({ "unzip", "-p", doc.base, path }, {}, function(r)
         vim.schedule(function()
           if r.code == 0 and r.stdout and #r.stdout > 0 then
-            M.preview(r.stdout, ext, function(data) done(key, data) end)
+            M.preview(r.stdout, ext, function(data) done(key, data) end, crop)
           else
             done(key, nil)
           end
@@ -186,7 +232,7 @@ local function png(buf, path)
     else
       local data = stat and read(file)
       if data then
-        M.preview(data, ext, function(png_data) done(key, png_data) end)
+        M.preview(data, ext, function(png_data) done(key, png_data) end, crop)
       else
         done(key, nil)
       end
@@ -223,8 +269,8 @@ local function draw(buf)
   for row, line in ipairs(api.nvim_buf_get_lines(buf, 0, -1, false)) do
     local pos = line:find("![", 1, true)
     while pos do
-      local _, path, after = require("neoffice.markup").image_at(line, pos)
-      local data = path and png(buf, path)
+      local _, path, after, _, attrs = require("neoffice.markup").image_at(line, pos)
+      local data = path and png(buf, path, attrs and attrs.attrs and require("neoffice.floats").crop(attrs.attrs))
       if data then
         local _, w, h = M.info(data)
         local cols, rows = M.cells(w, h, config.image_width, config.image_height)

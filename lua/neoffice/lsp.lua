@@ -148,7 +148,7 @@ local function attribute_diagnostics(buf)
   for r, line in ipairs(lines) do
     local fence, fence_attrs = markup.box_line(line) -- a box's line: its attributes (as an image's)
     if fence and fence_attrs then
-      local attrs, bad = require("neoffice.floats").parse(fence_attrs)
+      local attrs, bad = require("neoffice.floats").parse_box(fence_attrs)
       local tidy = attrs and "::: {" .. require("neoffice.floats").render(attrs) .. "}"
       if not attrs then
         add(r, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Error, bad)
@@ -225,19 +225,24 @@ local function completion(buf, pos)
     end
     local item = braces:match("([^,;]*)$")
     local name, value = item:match("^%s*([%a_]+)%s*=%s*(%S*)$")
+    local box = before:match("^:::") ~= nil
     local function values(key)
-      return floats.VALUES[key] or key == "width" and { "100%", "50%", "6cm", "8cm", "12cm" } or { "0.3cm", "0.5cm", "1cm" }
+      return floats.VALUES[key] or key == "width" and { "100%", "50%", "6cm", "8cm", "12cm" }
+        or key:match("^crop%-") and { "5%", "10%", "25%" } or { "0.3cm", "0.5cm", "1cm" }
+    end
+    local function describe(key, v)
+      return floats.DESCRIBE[key .. "." .. v] or key:match("^crop%-") and floats.DESCRIBE.crop or nil
     end
     if name then
       for _, v in ipairs(values(name:lower())) do
-        add(v, #before - #value, KIND.EnumMember, floats.DESCRIBE[name:lower() .. "." .. v])
+        add(v, #before - #value, KIND.EnumMember, describe(name:lower(), v))
       end
     else
       local typed = item:match("^%s*(.-)$")
       for _, key in ipairs(floats.KEYS) do
-        if not used[key] and key ~= "x" and key ~= "y" then
+        if not used[key] and key ~= "x" and key ~= "y" and not (box and key:match("^crop%-")) then
           for _, v in ipairs(values(key)) do
-            add(key .. " = " .. v, #before - #typed, KIND.Property, floats.DESCRIBE[key .. "." .. v])
+            add(key .. " = " .. v, #before - #typed, KIND.Property, describe(key, v))
           end
         end
       end

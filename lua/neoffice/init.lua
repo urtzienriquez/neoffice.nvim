@@ -1477,7 +1477,7 @@ function M.save(buf, target)
       end
       plans[k] = { old = old_of[k], block = kind, pieces = list, sig = signature(kind, list), cell = block.cell, box = block.box }
       if block.box and not block.box.parsed then -- its box's attributes (an error if they aren't right)
-        local attrs, bad = floats.parse(block.box.attrs)
+        local attrs, bad = floats.parse_box(block.box.attrs)
         assert(attrs, bad)
         block.box.parsed = attrs
       end

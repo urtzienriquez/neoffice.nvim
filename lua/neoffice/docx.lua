@@ -267,9 +267,15 @@ local function read_para(ctx, p)
       width = cx and markup.width(cx / 360000) or nil,
     }
     if image then
-      local place = require("neoffice.floats").classify(M.drawing_geometry(el), M.page(ctx))
+      local floats = require("neoffice.floats")
+      local place = floats.classify(M.drawing_geometry(el), M.page(ctx))
       for key, value in pairs(place) do
         image[key] = value
+      end
+      -- its crop (thousandths of a percent cut off; below 0, space added: not shown, kept)
+      local rect = xml.find(el, "a:srcRect")
+      for k, side in ipairs({ "t", "r", "b", "l" }) do
+        image[floats.CROP[k]] = floats.percent((tonumber(rect and xml.attr(rect, side) or "") or 0) / 100000)
       end
     end
     return image
@@ -1788,7 +1794,31 @@ local function image_node(ctx, img)
   end
   local drawing = xml.find(node, "w:drawing")
   local floats = require("neoffice.floats")
-  if drawing and (not original or floats.key(original.image) ~= floats.key(img)) then -- (moved, or new)
+  local before = original and floats.crop(original.image) or nil
+  local after = floats.crop(img)
+  if drawing and vim.inspect(before) ~= vim.inspect(after) then -- its crop changed
+    local fill = xml.find(drawing, "pic:blipFill")
+    local rect = fill and xml.child(fill, "a:srcRect")
+    if fill and after then
+      rect = rect or xml.append(fill, xml.elem("a:srcRect"), (xml.index(xml.child(fill, "a:blip") or fill.children[1] or fill) or 0) + 1)
+      for k, side in ipairs({ "t", "r", "b", "l" }) do
+        xml.set_attr(rect, side, tostring(math.floor(after[k] * 100000 + 0.5)))
+      end
+    elseif rect then
+      xml.remove(rect)
+    end
+    -- the same width; the height of what is shown
+    local b, a = before or { 0, 0, 0, 0 }, after or { 0, 0, 0, 0 }
+    local factor = (1 - a[1] - a[3]) / math.max(1 - b[1] - b[3], 0.01) * (1 - b[2] - b[4]) / math.max(1 - a[2] - a[4], 0.01)
+    for _, tag in ipairs({ "wp:extent", "a:ext" }) do
+      local el = xml.find(drawing, tag)
+      local cy = el and tonumber(xml.attr(el, "cy") or "")
+      if cy then
+        xml.set_attr(el, "cy", tostring(math.floor(cy * factor + 0.5)))
+      end
+    end
+  end
+  if drawing and (not original or floats.place_key(original.image) ~= floats.place_key(img)) then -- (moved, or new)
     place_drawing(ctx, drawing, img)
   end
   local doc_pr = xml.find(node, "wp:docPr")

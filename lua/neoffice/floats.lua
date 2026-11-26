@@ -12,7 +12,8 @@
 --   gap    the space between it and the text (default 0.3cm)
 --   x, y   an exact place: from the column's left edge and the paragraph's top (or, with place =
 --          page, the page's corner), when it isn't one of those
--- (and width, as for any image)
+-- (and width, as for any image; and crop-top, crop-right, crop-bottom, crop-left: how much of the
+-- image is cut off at each side, as a percentage of it: "crop-top = 39%")
 --
 -- A geometry: { h = { rel = "column" | "page", align = "left" | "center" | "right" | nil,
 -- offset = cm | nil }, v = { rel = "paragraph" | "margin" | "page", align = "top" | "bottom" | nil,
@@ -21,7 +22,8 @@
 local markup = require("neoffice.markup")
 local M = {}
 
-M.KEYS = { "width", "float", "wrap", "place", "gap", "x", "y" } -- (in the order they are written)
+M.KEYS = { "width", "crop-top", "crop-right", "crop-bottom", "crop-left", "float", "wrap", "place", "gap", "x", "y" } -- (in the order they are written)
+M.CROP = { "crop-top", "crop-right", "crop-bottom", "crop-left" }
 M.VALUES = {
   float = { "left", "right", "center" },
   wrap = { "square", "tight", "none", "front", "behind" },
@@ -41,7 +43,26 @@ M.DESCRIBE = {
   ["place.top"] = "at the top of the page",
   ["place.bottom"] = "at the bottom of the page",
   ["place.page"] = "at x, y from the page's corner",
+  ["crop"] = "how much of the image is cut off at that side (a percentage of it)",
 }
+
+-- An image's crop: { top, right, bottom, left } as fractions (0 when not cut), or nil if it isn't.
+function M.crop(img)
+  local out, any = {}, false
+  for k, key in ipairs(M.CROP) do
+    out[k] = tonumber(((img or {})[key] or ""):match("^([%d.]+)%%$") or "") or 0
+    out[k] = out[k] / 100
+    any = any or out[k] > 0
+  end
+  return any and out or nil
+end
+-- (a fraction as written: "39.3%", nil for none)
+function M.percent(fraction)
+  if not fraction or fraction < 0.005 then
+    return nil
+  end
+  return (("%.1f"):format(fraction * 100):gsub("%.0$", "")) .. "%"
+end
 
 local function is_length(v)
   return markup.cm(v or "") ~= nil
@@ -69,12 +90,15 @@ function M.parse(text)
     if not name or not vim.tbl_contains(M.KEYS, name) then
       return nil, ("not an image's attribute: %s (they are %s)"):format(a.name or a.value, table.concat(M.KEYS, ", "))
     end
+    local percent = tonumber(value:match("^([%d.]+)%%$") or "")
     local ok = M.VALUES[name] and vim.tbl_contains(M.VALUES[name], value)
       or (name == "width") and (is_length(value) or value:match("^[%d.]+%%$"))
+      or name:match("^crop%-") and percent and percent < 100
       or (name == "gap" or name == "x" or name == "y") and is_length(value)
     if not ok then
       return nil, ("not a value of %s: %s (%s)"):format(name, a.value,
-        M.VALUES[name] and table.concat(M.VALUES[name], ", ") or "a length: 12cm, 80mm, 3in" .. (name == "width" and ", or a percentage" or ""))
+        M.VALUES[name] and table.concat(M.VALUES[name], ", ") or name:match("^crop%-") and "a percentage of the image, under 100%"
+          or "a length: 12cm, 80mm, 3in" .. (name == "width" and ", or a percentage" or ""))
     end
     out[name] = value
   end
@@ -87,7 +111,8 @@ function M.render(attrs)
   for _, key in ipairs(M.KEYS) do
     local v = attrs[key]
     local default = key == "wrap" and (attrs.float == "center" and "none" or "square") or key == "place" and "here"
-    if v and v ~= default and not (key == "gap" and markup.cm(v) and math.abs(markup.cm(v) - M.GAP) < 0.005) then
+    local none = key:match("^crop%-") and (tonumber((v or ""):match("^([%d.]+)%%$") or "") or 0) < 0.05
+    if v and v ~= default and not none and not (key == "gap" and markup.cm(v) and math.abs(markup.cm(v) - M.GAP) < 0.005) then
       parts[#parts + 1] = key .. " = " .. v
     end
   end
@@ -99,6 +124,17 @@ function M.key(img)
   local parts = {}
   for _, key in ipairs(M.KEYS) do
     parts[#parts + 1] = img and img[key] or ""
+  end
+  return table.concat(parts, "|")
+end
+
+-- What can change of where it goes (its width and place: not its crop), as a string.
+function M.place_key(img)
+  local parts = {}
+  for _, key in ipairs(M.KEYS) do
+    if not key:match("^crop%-") then
+      parts[#parts + 1] = img and img[key] or ""
+    end
   end
   return table.concat(parts, "|")
 end
@@ -194,6 +230,17 @@ function M.geometry(attrs, page, width)
     geo.v = { rel = "paragraph", offset = y or 0 }
   end
   return geo
+end
+
+-- A box's attributes (as an image's, but a box can't be cropped): { name = value }, or nil and why.
+function M.parse_box(text)
+  local attrs, bad = M.parse(text)
+  for _, key in ipairs(attrs and M.CROP or {}) do
+    if attrs[key] then
+      return nil, "a box can't be cropped (" .. key .. "): only its images"
+    end
+  end
+  return attrs, bad
 end
 
 -- An error if an image's attributes aren't right (as written: see M.parse).

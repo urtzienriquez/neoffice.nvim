@@ -93,6 +93,9 @@ local function image_of(ctx, frame)
     for key, value in pairs(require("neoffice.floats").classify(M.frame_geometry(ctx, frame), M.page(ctx))) do
       out[key] = value
     end
+    for key, value in pairs(M.frame_crop(ctx, frame, path)) do
+      out[key] = value
+    end
     return out
   end
 end
@@ -725,7 +728,11 @@ local function image_node(ctx, img)
   desc.children = {}
   xml.append(desc, { text = img.alt })
   local floats = require("neoffice.floats")
-  if not original or floats.key(original.image) ~= floats.key(img) then -- (moved, or new)
+  local before = original and floats.crop(original.image) or nil
+  if vim.inspect(before) ~= vim.inspect(floats.crop(img)) then -- its crop changed
+    M.crop_frame(ctx, frame, img, before)
+  end
+  if not original or floats.place_key(original.image) ~= floats.place_key(img) then -- (moved, or new)
     M.place_frame(ctx, frame, img)
   end
   img.node = frame
@@ -967,6 +974,60 @@ function M.frame_geometry(ctx, frame)
   return { h = h, v = v, wrap = wrap, gap = gap, width = markup.cm(xml.attr(frame, "svg:width")) or 0 }
 end
 
+-- An image's size before it is cropped (cm: from its pixels and resolution, as LibreOffice takes
+-- it), which its crop (fo:clip) is measured on.
+local function natural(data)
+  local images = require("neoffice.images")
+  local _, w, h = images.info(data or "")
+  local dpi = w and images.dpi(data)
+  return w and w / dpi * 2.54, h and h / dpi * 2.54
+end
+
+-- A frame's crop (its style's fo:clip: "rect(top, right, bottom, left)"), as attributes:
+-- { ["crop-top"] = "39.3%", ... } (only the sides cut).
+function M.frame_crop(ctx, frame, path)
+  local clip = graphic_prop(ctx, xml.attr(frame, "draw:style-name"), "fo:clip") or ""
+  local sides = {}
+  for value in (clip:match("^rect%((.*)%)$") or ""):gmatch("[^,%s]+") do
+    sides[#sides + 1] = markup.cm(value) or 0
+  end
+  if #sides ~= 4 or (sides[1] + sides[2] + sides[3] + sides[4]) <= 0 then
+    return {}
+  end
+  local w, h = natural(zip.read(ctx.path, path)) -- (read only for a cropped image)
+  if not w then
+    return {}
+  end
+  local floats, out = require("neoffice.floats"), {}
+  for k, side in ipairs({ sides[1] / h, sides[2] / w, sides[3] / h, sides[4] / w }) do
+    out[floats.CROP[k]] = floats.percent(side)
+  end
+  return out
+end
+
+-- A frame cropped as its attributes say (keeping its width: its height, that of what is shown).
+function M.crop_frame(ctx, frame, img, before)
+  local function length_cm(n) return ("%.5fcm"):format(n) end -- (precise: a crop is a share of it)
+  local floats = require("neoffice.floats")
+  local after = floats.crop(img)
+  local image = xml.child(frame, "draw:image")
+  local path = image and xml.attr(image, "xlink:href")
+  local w, h = natural(img.bytes or (path and zip.read(ctx.path, path)))
+  if not w then
+    return
+  end
+  local a = after or { 0, 0, 0, 0 }
+  M.style_frame(ctx, frame, {
+    ["fo:clip"] = after and ("rect(%s, %s, %s, %s)"):format(length_cm(a[1] * h), length_cm(a[2] * w), length_cm(a[3] * h), length_cm(a[4] * w)) or false,
+  })
+  local b = before or { 0, 0, 0, 0 }
+  local factor = (1 - a[1] - a[3]) / math.max(1 - b[1] - b[3], 0.01) * (1 - b[2] - b[4]) / math.max(1 - a[2] - a[4], 0.01)
+  local height = markup.cm(xml.attr(frame, "svg:height"))
+  if height then
+    xml.set_attr(frame, "svg:height", length_cm(height * factor))
+  end
+end
+
 -- A frame placed as its attributes say (see floats.lua): in the line, or anchored, floating.
 local function length_cm(n)
   return ("%.3fcm"):format(n)
@@ -993,7 +1054,12 @@ function M.place_frame(ctx, frame, attrs, extra)
   }
   xml.set_attr(frame, "svg:x", not geo.h.align and length_cm(geo.h.offset or 0) or nil)
   xml.set_attr(frame, "svg:y", not geo.v.align and length_cm(geo.v.offset or 0) or nil)
-  -- (in a style of its own: a copy of its automatic style, or based on its common one)
+  M.style_frame(ctx, frame, vim.tbl_extend("force", props, extra or {}))
+end
+
+-- A frame's graphic properties set (false: removed), in a style of its own: a copy of its
+-- automatic style, or based on its common one.
+function M.style_frame(ctx, frame, props)
   local base = style_named(ctx, "graphic", xml.attr(frame, "draw:style-name"))
   local style
   if base and base.automatic then
@@ -1009,7 +1075,7 @@ function M.place_frame(ctx, frame, attrs, extra)
   until not style_named(ctx, "graphic", name)
   xml.set_attr(style, "style:name", name)
   local el = xml.child(style, "style:graphic-properties") or xml.append(style, xml.elem("style:graphic-properties"))
-  for attr, value in pairs(vim.tbl_extend("force", props, extra or {})) do
+  for attr, value in pairs(props) do
     xml.set_attr(el, attr, value or nil)
   end
   xml.append(automatic(ctx), style)

@@ -20,6 +20,7 @@ else in the file stays exactly as it was.
   Tables typeset themselves, as in LaTeX: booktabs rules, columns as wide as their content,
   compact rows, numbers aligned right. A line above a table changes its look
   (`{width = full, height = tall}`); colons in the line of dashes align columns (`|:---:|---:|`).
+- Cropped images show and change their crop: `{width = 8cm, crop-top = 39%, crop-right = 11%}`.
 - Floating images and boxes, placed by meaning, not coordinates: `{width = 6cm, float = right}`;
   a box (a text box, a frame) as `::: {float = right} … :::`, its paragraphs editable (a figure with
   its caption, a sidebar). Charts, shapes and other drawings show by name (`⟦chart⟧`) and are kept.

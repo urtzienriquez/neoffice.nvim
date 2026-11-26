@@ -153,3 +153,54 @@ describe("the language server, on floats and boxes", function()
     assert.same({ "::: {width = 4cm, float = right}", "![A dot](" .. DOT .. "){width = 4cm}", "", "Figure: A dot.", ":::" }, vim.list_slice(H.lines(), r, r + 4))
   end)
 end)
+
+describe("cropped images", function()
+  it("read a crop as percentages cut off each side, shown only where cut", function()
+    assert.same({ ["crop-top"] = "39.3%", ["crop-right"] = "11.3%" }, floats.parse("crop-top = 39.3%, crop-right = 11.3%"))
+    assert.is_nil(floats.parse("crop-top = 120%"))
+    local crop = floats.crop({ ["crop-top"] = "39.3%", ["crop-right"] = "11.3%" })
+    for k, want in ipairs({ 0.393, 0.113, 0, 0 }) do
+      assert.truthy(math.abs(crop[k] - want) < 1e-9)
+    end
+    assert.is_nil(floats.crop({ width = "3cm" }))
+    assert.equals("width = 3cm, crop-top = 25%", floats.render({ width = "3cm", ["crop-top"] = "25%", ["crop-left"] = "0%" }))
+  end)
+
+  for _, ext in ipairs({ "docx", "odt" }) do
+    it("crop an image in " .. ext .. ", keeping its width, and uncrop it", function()
+      local path = H.copy("rich." .. ext)
+      H.open(path)
+      local function height()
+        local main = zip.read(path, H.MAIN[ext])
+        return ext == "docx" and tonumber(main:match('<wp:extent cx="%d+" cy="(%d+)"')) or require("neoffice.markup").cm(main:match('<draw:frame[^>]-svg:height="([^"]+)"'))
+      end
+      local before = height()
+      H.replace(5, "{width = 1.4cm}", "{width = 1.4cm, crop-top = 25%, crop-left = 10%}")
+      H.reopen()
+      assert.truthy(H.paras()[5]:find("{width = 1.4cm, crop-top = 25%, crop-left = 10%}", 1, true), H.paras()[5])
+      local main = zip.read(path, H.MAIN[ext])
+      assert.truthy(main:find(ext == "docx" and '<a:srcRect t="25000" r="0" b="0" l="10000"/>' or 'fo:clip="rect%(', 1, ext == "docx"))
+      assert.truthy(math.abs(height() / before - 0.75 / 0.9) < 0.01) -- (as wide; as high as what is shown)
+      H.replace(5, ", crop-top = 25%, crop-left = 10%", "")
+      H.reopen()
+      assert.truthy(H.paras()[5]:find("{width = 1.4cm} here", 1, true), H.paras()[5])
+      assert.truthy(math.abs(height() / before - 1) < 0.01)
+    end)
+  end
+
+  if vim.fn.executable("magick") == 1 then
+    it("show cropped", function()
+      local images = require("neoffice.images")
+      local f = assert(io.open(H.FIXTURES .. "dot.png", "rb"))
+      local data = f:read("*a")
+      f:close()
+      local _, w, h = images.info(data)
+      local got
+      images.preview(data, "png", function(png) got = png or false end, { 0.5, 0, 0, 0.5 })
+      vim.wait(30000, function() return got ~= nil end, 20)
+      local _, w2, h2 = images.info(got or "")
+      assert.equals(math.floor(w / 2 + 0.5), w2)
+      assert.equals(math.floor(h / 2 + 0.5), h2)
+    end)
+  end
+end)

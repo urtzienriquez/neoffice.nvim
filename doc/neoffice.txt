@@ -266,6 +266,17 @@ A new image gets the width you write, or else its own size, up to 6 inches; a
 replaced one keeps the width of the image it replaces. When written, a new
 image goes into the document and its path then shows its place inside it.
 
+                                                                *neoffice-crop*
+A cropped image says how much is cut off each side, as a percentage of the
+whole image (only the sides cut show): >
+
+  ![](word/media/image6.jpeg){width = 8.3cm, crop-top = 39.3%, crop-right = 11.3%}
+<
+`crop-top`, `crop-right`, `crop-bottom`, `crop-left`. Change them, add them or
+delete them: Word and LibreOffice crop it so, and it keeps its width (its
+height is that of what is shown). Its preview shows it cropped too (with
+ImageMagick). A box can't be cropped, only its images.
+
                                                               *neoffice-floats*
 An image out of the line, with the text around it (a "floating" one), says
 where it goes in its braces, not with coordinates (as LaTeX's wrapfigure): >
