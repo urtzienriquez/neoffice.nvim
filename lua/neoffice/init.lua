@@ -1267,10 +1267,10 @@ local function open(buf, path)
   -- the text shows (see M.finish_sigs)
   doc.sigs, doc.ctx_keys, doc.touched, doc.all_dirty = {}, {}, {}, false
   doc.pending = { blocks = opened, next = 1, tick = api.nvim_buf_get_changedtick(buf) }
-  api.nvim_buf_attach(buf, false, {
+  doc.attached = api.nvim_buf_attach(buf, false, {
     on_bytes = function(_, _, _, start_row, _, _, old_end_row, _, _, new_end_row)
       local d = M.docs[buf]
-      if not d then
+      if d ~= doc then -- (this document's only: opened again, read again from disk, wiped: no more)
         return true
       end
       -- (the rows changed since the fingerprints were taken, as they move with later changes: their
@@ -1284,6 +1284,12 @@ local function open(buf, path)
         end
       end
       d.touched[#d.touched + 1] = { start_row, start_row + new_end_row }
+    end,
+    on_reload = function() end, -- (read again from disk: opened again, as a new document; this one stays attached)
+    on_detach = function() -- (no longer told what changes: every paragraph's fingerprint taken again at each save)
+      if M.docs[buf] == doc then
+        doc.untracked = true
+      end
     end,
   })
   local function step() -- (a few at a time, so typing isn't held up)
@@ -2062,11 +2068,11 @@ function M.save(buf, target)
     end
 
     local plans, equations = {}, {}
-    local reusable = not doc.all_dirty and not doc.tracking and next(restyle) == nil
+    local reusable = not doc.all_dirty and not doc.untracked and not doc.tracking and next(restyle) == nil
     for k, block in ipairs(blocks) do
       assert(not (block.format and block.format.bad), block.format and block.format.bad) -- (its format's line: right)
       local o = old_of[k]
-      if reusable and o and doc.sigs[o] and doc.ctx_keys[o] == context_key(block) and not touched(doc, block) then
+      if reusable and o and doc.texts[o] == block.text and doc.sigs[o] and doc.ctx_keys[o] == context_key(block) and not touched(doc, block) then
         -- (as it was, its text, rows and format: its fingerprint as it was; its pieces only if needed)
         plans[k] = { old = o, lazy = block, sig = doc.sigs[o], cell = block.cell, box = block.box }
         goto planned

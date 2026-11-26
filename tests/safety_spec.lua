@@ -371,3 +371,34 @@ describe("saving again and again in one session", function()
     end)
   end
 end)
+
+describe("a document changed by another program while open", function()
+  local zip = require("neoffice.zip")
+  for _, ext in ipairs({ "docx", "odt" }) do
+    it("is read again when Neovim notices (and again), showing the change (" .. ext .. ")", function()
+      local path = H.copy("rich." .. ext)
+      H.open(path)
+      for round = 1, 2 do
+        local main = zip.read(path, H.MAIN[ext])
+        local word = round == 1 and "Introduction" or "Overview"
+        zip.write(path, { [H.MAIN[ext]] = (main:gsub(word, round == 1 and "Overview" or "Summary", 1)) })
+        local errors = {}
+        local notify = vim.notify
+        vim.notify = function(msg, level) errors[#errors + 1] = level == vim.log.levels.ERROR and msg or nil end
+        local stamp = vim.uv.fs_stat(path).mtime.sec + round * 10 -- (as another program would: later)
+        vim.uv.fs_utime(path, stamp, stamp)
+        vim.o.autoread = true
+        vim.cmd("checktime") -- (Neovim reads it again, keeping the buffer: as when LibreOffice saved it)
+        vim.wait(0)
+        vim.notify = notify
+        assert.same({}, errors)
+        assert.equals(round == 1 and "# Overview" or "# Summary", H.paras()[1])
+        local was, now = round == 1 and "This" or "Now this", round == 1 and "Now this" or "Then this"
+        H.replace(2, was, now) -- (and editing, then saving, works on what was read)
+        assert.truthy(#H.doc().touched > 0 and not H.doc().untracked, "what changes is still followed after reading it again")
+        H.save()
+        assert.truthy(zip.read(path, H.MAIN[ext]):find(now, 1, true))
+      end
+    end)
+  end
+end)
