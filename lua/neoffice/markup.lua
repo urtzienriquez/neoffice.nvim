@@ -101,16 +101,23 @@ M.escape = escape
 local ALIGN = { center = "<|> ", right = "->> ", justify = "<=> " }
 
 -- The words that start captions ("Table: ", "Figure: "): { table = "Table", figure = "Figure" }
--- (the option `captions`), and the kind of caption a word is.
+-- (the option `captions`: each a word, or a list of them, the first written and the others also
+-- read, as "Fig."), and the kind of caption a word is.
+local function words(value, default)
+  return type(value) == "table" and value or { value or default }
+end
 function M.captions()
   local config = require("neoffice").config.captions or {}
-  return { table = config.table or "Table", figure = config.figure or "Figure" }
+  return { table = words(config.table, "Table")[1], figure = words(config.figure, "Figure")[1] }
 end
 local function caption_kind(word)
   word = word:lower()
-  for kind, label in pairs(M.captions()) do
-    if label:lower() == word then
-      return kind
+  local config = require("neoffice").config.captions or {}
+  for kind, default in pairs({ table = "Table", figure = "Figure" }) do
+    for _, label in ipairs(words(config[kind], default)) do
+      if label:lower() == word then
+        return kind
+      end
     end
   end
 end
@@ -142,7 +149,9 @@ function M.block(line)
   local number, dot, after_dot = line:match("^( *)%d+()%. ()")
   local word, after_word = line:match("^([^%s:\\]+): ()")
   local caption = word and caption_kind(word)
-  if caption then
+  if M.box_line(line) then -- (a box's line: text that reads as one is escaped, "\:::")
+    block, start, kind_at = { fence = true }, #line + 1, 1
+  elseif caption then
     block, start, kind_at = { caption = caption }, after_word, 1
   elseif hashes then
     block, start, kind_at = { heading = #hashes }, #hashes + 2, 1
@@ -169,7 +178,7 @@ function M.block(line)
 end
 
 local function kind(block)
-  return block.heading or block.title or block.quote or block.list or block.row or block.caption
+  return block.heading or block.title or block.quote or block.list or block.row or block.caption or block.fence
 end
 
 local math_at, enclosed, link_at -- (below)
@@ -250,6 +259,22 @@ function M.cell_spans(line)
     out[#out + 1] = { s = first.col + 1, e = last.col + #last.text }
   end
   return out
+end
+
+-- A box's line ("::: {width = 6cm, float = right}" opens a box, ":::" closes it: see floats.lua):
+-- true, and the text in its braces (or nil), if the line is one.
+function M.box_line(line)
+  if line:sub(1, 3) ~= ":::" then
+    return nil
+  end
+  local rest = line:match("^:::%s*(.-)%s*$")
+  if rest == "" then
+    return true, nil
+  end
+  local attrs = rest:match("^{([^{}]*)}$")
+  if attrs then
+    return true, attrs
+  end
 end
 
 -- The options on the line above a table ("{width = full, height = tall}"): the text inside the
@@ -373,8 +398,9 @@ function M.render(spans, block, strict)
   for k, s in ipairs(spans) do
     local token -- (images, equations, footnotes, fields and breaks: written as they are)
     if s.image then
+      local attrs = require("neoffice.floats").render(s.image)
       token = "![" .. escape(s.image.alt, false, block.cell) .. "](" .. s.image.path:gsub("%)", "%%29") .. ")"
-        .. (s.image.width and "{width = " .. s.image.width .. "}" or "")
+        .. (attrs ~= "" and "{" .. attrs .. "}" or "")
     elseif s.math then -- (on one line)
       local tex = s.math.tex:gsub("%s*\n%s*", " ")
       token = (s.math.display and "$$" or "$") .. tex .. (s.math.display and "$$" or "$")
@@ -478,15 +504,26 @@ function M.same(line, spans)
   return true
 end
 
--- An image "![alt](path)" or "![alt](path){width = 12cm}" at `pos`: alt, path, position after it,
--- width (or nil), and where its attributes are ({ s, e, text: inside the braces }, or nil).
+-- An image "![alt](path)" or "![alt](path){width = 12cm, float = right}" at `pos`: alt, path,
+-- position after it, width (or nil), and its attributes ({ s, e, text: inside the braces, attrs
+-- = { name = value } (see floats.lua) }, or nil). Braces after it that aren't right have `bad`
+-- (why) instead of attrs: writing the document then fails, saying it.
 function M.image_at(line, pos)
   local alt, path, after = line:match("^!%[(.-)%]%(([^)]*)%)()", pos)
   if alt then
-    local s, inside, after_width = line:match("^(){(%s*width%s*=%s*[^}]-)}()", after)
-    local width = inside and vim.trim(inside:match("=%s*(.-)%s*$"))
-    return (alt:gsub("\\(.)", "%1")), (path:gsub("%%29", ")")), after_width or after, width,
-      s and { s = s, e = after_width - 1, text = inside } or nil
+    alt, path = alt:gsub("\\(.)", "%1"), path:gsub("%%29", ")")
+    local s, inside, after_attrs = line:match("^(){([^{}]*)}()", after)
+    local attrs, bad
+    if inside then
+      attrs, bad = require("neoffice.floats").parse(inside)
+    end
+    if attrs then
+      return alt, path, after_attrs, attrs.width, { s = s, e = after_attrs - 1, text = inside, attrs = attrs }
+    end
+    if inside then
+      return alt, path, after_attrs, nil, { s = s, e = after_attrs - 1, text = inside, bad = bad }
+    end
+    return alt, path, after
   end
 end
 
@@ -558,7 +595,7 @@ end
 -- What a "\\" escapes (the characters escape() and render() escape); before anything else, it is
 -- just a backslash. (A "\\" ending the text is a line break; "\\ " starting a line, a space.)
 local ESCAPED = {}
-for c in ("\\*[]$<>^_~=+|#%-.!{}\n" .. "⟦⟧¶"):gmatch("[^\128-\191][\128-\191]*") do
+for c in ("\\*[]$<>^_~=+|#%-.!{}:\n" .. "⟦⟧¶"):gmatch("[^\128-\191][\128-\191]*") do
   ESCAPED[c] = true
 end
 
@@ -649,8 +686,8 @@ function M.parse(line)
       pos = emit(pos + 1)
       chars[#chars].esc = true -- (escaped: a "¶" is just a ¶)
     elseif c == "!" and M.image_at(line, pos) then
-      local alt, path, after, width = M.image_at(line, pos)
-      pos = token("image", { alt = alt, path = path, width = width }, after)
+      local alt, path, after, _, attrs = M.image_at(line, pos)
+      pos = token("image", vim.tbl_extend("force", attrs and attrs.attrs or {}, { alt = alt, path = path, bad = attrs and attrs.bad }), after)
     elseif c == "$" and (math_at(line, pos)) then
       local tex, display, after = math_at(line, pos)
       pos = token("math", { tex = tex, display = display }, after)

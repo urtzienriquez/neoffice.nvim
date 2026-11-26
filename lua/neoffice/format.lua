@@ -113,6 +113,14 @@ function M.edits(buf, first, last)
       r = r + 1
     end
   end
+  for row = first + 1, math.min(last + 1, #lines) do -- boxes' lines (no marks on them: the whole line)
+    local fence, attrs = markup.box_line(lines[row])
+    local parsed = fence and attrs and require("neoffice.floats").parse(attrs)
+    if parsed then
+      local tidy = require("neoffice.floats").render(parsed)
+      edit(out, row - 1, 0, lines[row], tidy ~= "" and "::: {" .. tidy .. "}" or ":::")
+    end
+  end
   for row = first + 1, math.min(last + 1, #lines) do -- images' widths and highlights' colours
     for s, inside in lines[row]:gmatch("=={()([^{}]*)}") do
       local name = inside:match("^%s*colou?r%s*=%s*([#%w]+)%s*$") or inside:match("^%s*([#%w]+)%s*$")
@@ -123,9 +131,10 @@ function M.edits(buf, first, last)
     end
     local line, p = lines[row], lines[row]:find("![", 1, true)
     while p do
-      local _, _, after, width, attrs = markup.image_at(line, p)
-      if attrs then -- (only inside the braces: the image's mark ends with them)
-        edit(out, row - 1, attrs.s, line:sub(attrs.s + 1, attrs.e - 1), "width = " .. width)
+      local _, _, after, _, attrs = markup.image_at(line, p)
+      local tidy = attrs and attrs.attrs and require("neoffice.floats").render(attrs.attrs)
+      if tidy and tidy ~= "" then -- (only inside the braces: the image's mark ends with them)
+        edit(out, row - 1, attrs.s, line:sub(attrs.s + 1, attrs.e - 1), tidy)
       end
       p = line:find("![", math.max(after or 0, p + 2), true)
     end

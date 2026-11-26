@@ -20,6 +20,9 @@ else in the file stays exactly as it was.
   Tables typeset themselves, as in LaTeX: booktabs rules, columns as wide as their content,
   compact rows, numbers aligned right. A line above a table changes its look
   (`{width = full, height = tall}`); colons in the line of dashes align columns (`|:---:|---:|`).
+- Floating images and boxes, placed by meaning, not coordinates: `{width = 6cm, float = right}`;
+  a box (a text box, a frame) as `::: {float = right} … :::`, its paragraphs editable (a figure with
+  its caption, a sidebar). Charts, shapes and other drawings show by name (`⟦chart⟧`) and are kept.
 - Footnotes (`^[note]`), images (`![alt](path){width = 50%}`, shown with `vim.ui.img`), equations
   as LaTeX (`$…$`, `$$…$$`, `.docx`), and fields and citations, shown as `⟦…⟧` and kept.
 - Comments: add, reply, resolve and delete, in a side panel.
@@ -65,7 +68,7 @@ require("neoffice").setup({
   conceal = false, -- hide the marks
   images = true, -- show images
   comment_text = false, -- each comment's text at the end of its line (or :Neoffice comments text)
-  captions = { table = "Table", figure = "Figure", separator = ". " }, -- caption words, and after the number
+  captions = { table = "Table", figure = { "Figure", "Fig." }, separator = ". " }, -- caption words (first written), after the number
   tables = { rules = "booktabs", width = "auto", height = "compact", position = "center" }, -- how tables look
 })
 vim.api.nvim_create_autocmd("FileType", {

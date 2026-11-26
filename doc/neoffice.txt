@@ -100,8 +100,11 @@ would read as something else is written escaped, so what you see is always
 what the document has.
 
 Objects ~
-Elements that can't be edited as text show as `￼`: delete that character to
-delete them.
+What neoffice doesn't edit shows by name, as a field does (|neoffice-footnotes|):
+`⟦chart⟧`, `⟦diagram⟧`, `⟦shape⟧`, `⟦drawing⟧`, `⟦equation⟧` (in .odt files),
+`⟦object⟧`, `⟦box⟧` (a box in a table's cell, or with a table in it). They are
+kept as they are; delete one to delete it. Other things without text show as
+`￼`.
 
 ==============================================================================
 TABLES                                                       *neoffice-tables*
@@ -235,11 +238,15 @@ figure (the paragraph before its caption) with its caption. Captions are also
 listed with the headings (|gO|, |neoffice-lsp|).
 
 Captions made in Word (Insert Caption) or LibreOffice show the same way, and
-keep their separator (`:`, `.`, ` – `...) when you edit them. Deleting
+keep their word ("Fig.") and separator (`:`, `.`, ` – `...) when you edit
+them; one numbered by hand ("Fig. 3", no field) keeps its number. Deleting
 `Table: ` makes it a plain paragraph again. The words, and the separator of
-new captions, are options (|neoffice-options|): `captions = { table =
-"Tabla", figure = "Figura", separator = ": " }`. A paragraph that only
-starts like a caption is written `\Table: ...`.
+new captions, are options (|neoffice-options|): each word, or a list of them
+(the first written, the others also read, as "Fig."): `captions = { table =
+"Tabla", figure = { "Figura", "Fig." }, separator = ": " }`. A paragraph that
+only starts like a caption is written `\Table: ...`. (A caption written in the
+same paragraph as its image, after it, stays text: put it in a paragraph of
+its own, `Figure: ...`, to make it a caption.)
 
 ==============================================================================
 IMAGES                                                       *neoffice-images*
@@ -258,6 +265,63 @@ file inside the document (`word/media/image1.png`, `Pictures/...`).
 A new image gets the width you write, or else its own size, up to 6 inches; a
 replaced one keeps the width of the image it replaces. When written, a new
 image goes into the document and its path then shows its place inside it.
+
+                                                              *neoffice-floats*
+An image out of the line, with the text around it (a "floating" one), says
+where it goes in its braces, not with coordinates (as LaTeX's wrapfigure): >
+
+  ![A burrow](figures/burrow.png){width = 6cm, float = right}
+<
+  `float`   `left`, `right`: at that side of the column, the text beside it;
+            `center`: in the middle, the text above and below it. (Without
+            it: in the line, as a character.)
+  `wrap`    `square` (the default at the left or right), `tight`, `none`
+            (the text above and below: the default in the middle), `front`
+            or `behind` (over or under the text)
+  `place`   `here` (the default: at its paragraph), `top` or `bottom` (of the
+            page), `page` (at `x`, `y` from the page's corner)
+  `gap`     the space between it and the text (default `0.3cm`)
+  `x`, `y`  an exact place (from the column's edge and the paragraph's top),
+            shown when it is none of the above
+
+As everywhere in braces, a value alone is enough (`{6cm, right}`). Images
+placed in Word or LibreOffice show what they mean: an image whose right edge
+is the column's shows `float = right`; only a place that is none of these
+shows numbers. A floating image shows at the start of its paragraph, wherever
+its anchor is in the text, and goes there when written (its place is measured
+from its paragraph: it stays where it was on the page). A floating image and
+its caption go together in a box (|neoffice-boxes|).
+
+==============================================================================
+BOXES                                                         *neoffice-boxes*
+
+A box (a text box, a frame) holds paragraphs and goes where its attributes
+say, as a floating image does (|neoffice-floats|). It is written as pandoc's
+fenced blocks: >
+
+  ::: {width = 5.5cm, float = right}
+  ![](figures/assa.png)
+
+  Figure: Extreme temperature variation in micro-habitats of gerbils.
+  :::
+
+  Gerbils (Gerbillinae) are among the most diverse rodents...
+<
+What is inside is text like any other: formatting, comments, tracked changes,
+captions. A new image in a box is as wide as the box unless it says. The box
+goes with the paragraph after it (in Word and LibreOffice, it is anchored
+there), at its place on the page; it is as tall as what it holds.
+
+This is how a figure floats with its caption (as LaTeX's
+`\begin{wrapfigure}...\caption`): an image and an ordinary paragraph after
+it would go each its own way. The language server offers it: on a floating
+image followed by its `Figure:` caption, the code action "Box this figure with
+its caption" puts both in a box, and the image's place becomes the box's.
+
+Boxes made in Word (text boxes) and LibreOffice (frames, and shapes with text)
+show the same way. A box in a table's cell, or with a table in it, shows as
+`⟦box⟧` and is kept as it is. Delete a box's lines and what is between them to
+delete it. A paragraph that only starts like a box's line is written `\:::`.
 
 With Nvim 0.12+ (|vim.ui.img|) and a terminal that shows images (Kitty,
 Ghostty, WezTerm, ...), images are also shown under their line. JPEG and GIF
@@ -384,9 +448,12 @@ neoffice, and so is the documents' filetype). It answers:
   conform.nvim uses it with `lsp_format = "fallback"` (or `"prefer"`): >lua
     require("conform").format({ lsp_format = "fallback" })
 <- Captions are document symbols too, in the section they are in.
+- Code action on a floating image followed by its caption: put both in a box
+  (|neoffice-boxes|).
 - Completion: on a table's options line, the options not given yet with
-  their values (and after `name =`, that option's values); after
-  `){width =`, image widths; after `=={`, highlight colours.
+  their values (and after `name =`, that option's values); in an image's
+  braces and a box's, their attributes (|neoffice-floats|); after `=={`,
+  highlight colours.
 
 `lsp = false` (|neoffice-options|) turns it off.
 
@@ -492,7 +559,7 @@ setup() is optional. Every field is optional too; these are the defaults: >lua
     image_width = 60,      -- at most this many columns wide
     image_height = 20,     -- and this many lines high
     captions = {           -- their words, and what goes after the number
-      table = "Table", figure = "Figure", separator = ". ",
+      table = "Table", figure = { "Figure", "Fig." }, separator = ". ",
     },
     tables = {             -- how tables look (|neoffice-table-format|)
       rules = "booktabs", width = "auto", height = "compact", position = "center",

@@ -20,6 +20,9 @@ local NS = {
   r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
   wp = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
   m = "http://schemas.openxmlformats.org/officeDocument/2006/math",
+  mc = "http://schemas.openxmlformats.org/markup-compatibility/2006",
+  wps = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+  a = "http://schemas.openxmlformats.org/drawingml/2006/main",
 }
 local REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
 local REL_EX = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended"
@@ -255,14 +258,21 @@ local function read_para(ctx, p)
     }
   end
 
-  local function image_of(el) -- an embedded picture: its file in the package, and alt text
+  local function image_of(el) -- an embedded picture: its file in the package, alt text, place
     local blip, doc_pr = xml.find(el, "a:blip"), xml.find(el, "wp:docPr")
     local target = blip and ctx.images[xml.attr(blip, "r:embed") or ""]
     local cx = tonumber(xml.attr(xml.find(el, "wp:extent") or {}, "cx") or "")
-    return target and {
+    local image = target and {
       path = "word/" .. target, alt = doc_pr and vim.trim((xml.attr(doc_pr, "descr") or ""):gsub("%s+", " ")) or "",
       width = cx and markup.width(cx / 360000) or nil,
     }
+    if image then
+      local place = require("neoffice.floats").classify(M.drawing_geometry(el), M.page(ctx))
+      for key, value in pairs(place) do
+        image[key] = value
+      end
+    end
+    return image
   end
 
   -- the run itself stands for its properties (rPr) and attributes
@@ -290,15 +300,21 @@ local function read_para(ctx, p)
           comment_marker(el, "comment_start")
           add({ comment_end = c })
         end
+      elseif (el.tag == "mc:AlternateContent" or el.tag == "w:drawing") and M.box_content(el) then
+        -- a box (a text box: its paragraphs show before this one's: see M.load)
+        add({ object = r, visible = true, box = { node = r, content = M.box_content(el), attrs = M.box_attrs(ctx, r) } })
       elseif el.tag and el.tag ~= "w:rPr" and not DROP[el.tag] then
         local object = xml.elem("w:r", vim.deepcopy(r.attrs), { rpr and xml.copy(rpr), xml.copy(el) })
         local note = el.tag == "w:footnoteReference" and xml.attr(el, "w:id")
         if note then
           ctx.footnote_ids[note] = true
         end
+        local image = el.tag == "w:drawing" and image_of(el) or nil
+        local kind = not image and not note and M.object_kind(el) -- (shown by name: ⟦chart⟧, kept)
         add({
-          object = object, visible = visible(el), image = el.tag == "w:drawing" and image_of(el) or nil,
+          object = object, visible = visible(el) or kind and true, image = image,
           footnote = note and { id = note, text = footnote_text(ctx, note) } or nil,
+          field = kind and { text = kind } or nil,
         })
       end
     end
@@ -473,7 +489,8 @@ function M.load(path)
     comment_of = {}, -- <w:comment> -> comment
     title_styles = {}, -- paragraph style ids of titles
     quote_styles = {}, -- ... and of quotes
-    caption_styles = {}, -- ... and of captions
+    caption_styles = {}, -- ... and of captions (and styles based on them)
+    based_on = {}, -- style id -> the id of the style it is based on
     caption_style = {}, -- the id of the styles "caption", "table caption" and "image caption"
     footnote_ids = {}, -- the footnotes referenced when opened
     style_numbering = {}, -- paragraph style id -> its <w:numPr> (list styles, numbered headings)
@@ -502,6 +519,10 @@ function M.load(path)
       ctx.quote_styles[id] = true
       ctx.quote_style = name == "quote" and id or ctx.quote_style or id
     end
+    local based = xml.child(style, "w:basedOn")
+    if id and based then
+      ctx.based_on[id] = xml.attr(based, "w:val")
+    end
     local numbering = xml.child(xml.child(style, "w:pPr") or {}, "w:numPr")
     if id and numbering then
       ctx.style_numbering[id] = numbering
@@ -509,6 +530,18 @@ function M.load(path)
     if level and id and xml.attr(style, "w:type") == "paragraph" then
       ctx.level_of[id] = level
       ctx.style_of[level] = name:match("^heading") and id or ctx.style_of[level] or id
+    end
+  end
+  for id in pairs(ctx.based_on) do -- (styles based on a caption style are caption styles: LibreOffice's "Figure")
+    local up = id
+    for _ = 1, 10 do
+      up = ctx.based_on[up]
+      if not up then
+        break
+      elseif ctx.caption_styles[up] then
+        ctx.caption_styles[id] = true
+        break
+      end
     end
   end
   -- the headings are numbered when their styles are (in a list), as Word does it
@@ -528,7 +561,26 @@ function M.load(path)
   local paras = {}
   for _, p in ipairs(xml.collect(xml.find(ctx.root, "w:body"), { ["w:p"] = true })) do
     local spans, block = read_para(ctx, p)
-    paras[#paras + 1] = { node = p, block = block, spans = spans }
+    -- its boxes: their paragraphs first (not in a table's cell: there, a box stays as it is)
+    local in_cell = false
+    local up = p.parent
+    while up do
+      in_cell = in_cell or up.tag == "w:tc"
+      up = up.parent
+    end
+    local own = {}
+    for _, s in ipairs(spans) do
+      if s.box and not in_cell then
+        for _, bp in ipairs(xml.collect(s.box.content, { ["w:p"] = true })) do
+          local bspans, bblock = read_para(ctx, bp)
+          paras[#paras + 1] = { node = bp, block = bblock, spans = bspans, box = s.box }
+        end
+      else
+        s.box = nil
+        own[#own + 1] = s
+      end
+    end
+    paras[#paras + 1] = { node = p, block = block, spans = own }
   end
   latex_of(ctx, ctx.equations)
   -- (or the headings themselves are numbered, as LibreOffice writes it)
@@ -950,6 +1002,295 @@ end
 
 -- The width of the text in cm: the page's, minus its margins (of the last section: the document's
 -- own page). Word's default page (Letter, 1 inch margins) if the document doesn't say.
+-- The page, for placing images: { text = the text's width, left, top = its margins } (cm).
+function M.page(ctx)
+  local section = xml.child(xml.find(ctx.root, "w:body") or {}, "w:sectPr") or {}
+  local margins = xml.child(section, "w:pgMar")
+  local function twips(attr, default)
+    return (tonumber(margins and xml.attr(margins, attr) or "") or default) * 2.54 / 1440
+  end
+  return { text = M.text_width(ctx), left = twips("w:left", 1440), top = twips("w:top", 1440) }
+end
+
+-- Where a drawing (<w:drawing>) is: a geometry (see floats.lua), or nil if it is in the line.
+local EMU = 360000 -- (in a centimetre)
+function M.drawing_geometry(drawing)
+  local anchor = xml.child(drawing, "wp:anchor")
+  if not anchor then
+    return nil
+  end
+  local function position(tag, rels)
+    local el = xml.child(anchor, tag) or {}
+    local align, offset = xml.child(el, "wp:align"), xml.child(el, "wp:posOffset")
+    return {
+      rel = rels[xml.attr(el, "relativeFrom") or ""] or rels[1],
+      align = align and xml.text(align) or nil, offset = offset and (tonumber(xml.text(offset)) or 0) / EMU or nil,
+    }
+  end
+  local h = position("wp:positionH", { "column", page = "page" })
+  local v = position("wp:positionV", { "paragraph", page = "page", margin = "margin", topMargin = "margin", bottomMargin = "margin" })
+  h.align = ({ left = "left", right = "right", center = "center", inside = "left", outside = "right" })[h.align or ""]
+  v.align = ({ top = "top", bottom = "bottom", inside = "top", outside = "bottom" })[v.align or ""]
+  local wrap = "front"
+  for tag, kind in pairs({ ["wp:wrapSquare"] = "square", ["wp:wrapTight"] = "tight", ["wp:wrapThrough"] = "tight", ["wp:wrapTopAndBottom"] = "none" }) do
+    if xml.child(anchor, tag) then
+      wrap = kind
+    end
+  end
+  if wrap == "front" and xml.attr(anchor, "behindDoc") == "1" then
+    wrap = "behind"
+  end
+  local dist = tonumber(xml.attr(anchor, wrap == "none" and "distT" or "distL") or "") or 0
+  local cx = tonumber(xml.attr(xml.child(anchor, "wp:extent") or {}, "cx") or "") or 0
+  return { h = h, v = v, wrap = wrap, gap = dist / EMU, width = cx / EMU }
+end
+
+local place_drawing -- (below)
+
+-- What a drawing or object that neoffice doesn't edit is, to show it by name (⟦chart⟧): nil for
+-- others.
+local GRAPHICS = {
+  chart = "chart", diagram = "diagram", wordprocessingGroup = "drawing", wordprocessingShape = "shape",
+  wordprocessingCanvas = "drawing", picture = "image",
+}
+function M.object_kind(el)
+  if el.tag == "w:pict" then
+    return xml.find(el, "v:textbox") and "box" or "drawing"
+  elseif el.tag == "w:object" then
+    return "object"
+  elseif el.tag == "w:drawing" or el.tag == "mc:AlternateContent" then
+    local data = xml.find(el, "a:graphicData")
+    local uri = data and xml.attr(data, "uri") or ""
+    if xml.find(el, "w:txbxContent") then
+      return "box"
+    end
+    for key, name in pairs(GRAPHICS) do
+      if uri:find(key, 1, true) then
+        return name
+      end
+    end
+    return "drawing"
+  end
+end
+
+-- ── Boxes (text boxes: see floats.lua and M.load) ───────────────────────────
+
+-- The paragraphs' container (<w:txbxContent>) of a box in a run's element (<mc:AlternateContent>
+-- or <w:drawing>), if it is one that holds only paragraphs (no tables, no boxes in it).
+function M.box_content(el)
+  local choice = el.tag == "mc:AlternateContent" and xml.child(el, "mc:Choice") or el
+  local drawing = choice and (choice.tag == "w:drawing" and choice or xml.child(choice, "w:drawing"))
+  local content = drawing and xml.find(drawing, "w:txbxContent")
+  if not content or #xml.collect(content, { ["w:tbl"] = true, ["w:txbxContent"] = true }) > 0 then
+    return nil
+  end
+  return content
+end
+
+local function box_drawing(run)
+  local alt = xml.child(run, "mc:AlternateContent")
+  local choice = alt and xml.child(alt, "mc:Choice")
+  return xml.child(choice or run, "w:drawing")
+end
+
+-- A box's attributes: its width and place (see floats.lua).
+function M.box_attrs(ctx, run)
+  local drawing = box_drawing(run)
+  local cx = tonumber(xml.attr(xml.find(drawing or {}, "wp:extent") or {}, "cx") or "")
+  local attrs = require("neoffice.floats").classify(drawing and M.drawing_geometry(drawing), M.page(ctx))
+  attrs.width = cx and markup.width(cx / EMU) or nil
+  return attrs
+end
+
+-- The container of a box's paragraphs (<w:txbxContent>), from its run.
+function M.box_container(run)
+  return xml.find(box_drawing(run) or run, "w:txbxContent")
+end
+
+-- The box a paragraph is in: its run, or nil.
+function M.box_of(p)
+  local up, content, run = p.parent, nil, nil
+  while up do
+    if up.tag == "w:txbxContent" then
+      content = up
+    elseif content and up.tag == "w:r" then
+      run = up -- (the outermost: a new box's isn't in a paragraph yet)
+    elseif run and up.tag == "w:p" then
+      return run
+    end
+    up = up.parent
+  end
+  return run
+end
+
+-- A new box (empty: its paragraphs go in its content): { node = its run, content }.
+function M.new_box(ctx, attrs)
+  local document = xml.find(ctx.root, "w:document")
+  for _, prefix in ipairs({ "mc", "wps", "wp", "a" }) do
+    ensure_ns(document, prefix)
+  end
+  ctx.next_picture = ctx.next_picture or vim.iter(xml.collect(ctx.root, { ["wp:docPr"] = true }, {})):fold(0, function(acc, el)
+    return math.max(acc, tonumber(xml.attr(el, "id")) or 0)
+  end) + 1
+  local id = ctx.next_picture
+  ctx.next_picture = id + 1
+  local cx = math.floor((markup.cm(attrs.width or "", M.text_width(ctx)) or M.text_width(ctx) / 2) * EMU)
+  local cy = EMU -- (made to fit its content: see M.fit_box)
+  local content = xml.elem("w:txbxContent")
+  local run = xml.elem("w:r", {}, {
+    xml.elem("mc:AlternateContent", {}, {
+      xml.elem("mc:Choice", { { "Requires", "wps" } }, {
+        xml.elem("w:drawing", {}, {
+          xml.elem("wp:inline", {}, {
+            xml.elem("wp:extent", { { "cx", tostring(cx) }, { "cy", tostring(cy) } }),
+            xml.elem("wp:docPr", { { "id", tostring(id) }, { "name", "Text Box " .. id } }),
+            xml.elem("a:graphic", {}, {
+              xml.elem("a:graphicData", { { "uri", NS.wps } }, {
+                xml.elem("wps:wsp", {}, {
+                  xml.elem("wps:cNvSpPr", { { "txBox", "1" } }),
+                  xml.elem("wps:spPr", {}, {
+                    xml.elem("a:xfrm", {}, { xml.elem("a:off", { { "x", "0" }, { "y", "0" } }), xml.elem("a:ext", { { "cx", tostring(cx) }, { "cy", tostring(cy) } }) }),
+                    xml.elem("a:prstGeom", { { "prst", "rect" } }, { xml.elem("a:avLst") }),
+                    xml.elem("a:noFill"), xml.elem("a:ln", {}, { xml.elem("a:noFill") }),
+                  }),
+                  xml.elem("wps:txbx", {}, { content }),
+                  xml.elem("wps:bodyPr", { { "wrap", "square" }, { "lIns", "0" }, { "tIns", "0" }, { "rIns", "0" }, { "bIns", "0" }, { "anchor", "t" } }, { xml.elem("a:spAutoFit") }),
+                }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    }),
+  })
+  return { node = run, content = content }
+end
+
+-- A box's width and place, as its attributes say (its copy for old programs, if any, goes: it
+-- would be out of date).
+function M.place_box(ctx, run, attrs)
+  local drawing = box_drawing(run)
+  if not drawing then
+    return
+  end
+  local cx = attrs.width and markup.cm(attrs.width, M.text_width(ctx))
+  if cx then
+    for _, tag in ipairs({ "wp:extent", "a:ext" }) do
+      local el = xml.find(drawing, tag)
+      if el then
+        xml.set_attr(el, "cx", tostring(math.floor(cx * EMU)))
+      end
+    end
+  end
+  place_drawing(ctx, drawing, attrs)
+  M.box_changed(run)
+end
+function M.box_changed(run)
+  local alt = xml.child(run, "mc:AlternateContent")
+  local fallback = alt and xml.child(alt, "mc:Fallback")
+  if fallback then
+    xml.remove(fallback)
+  end
+end
+
+-- A box as tall as its content (roughly: its images, and its text in lines).
+function M.fit_box(ctx, run)
+  local drawing = box_drawing(run)
+  local content = drawing and xml.find(drawing, "w:txbxContent")
+  if not content then
+    return
+  end
+  local cx = tonumber(xml.attr(xml.find(drawing, "wp:extent") or {}, "cx") or "") or EMU
+  local height = 0
+  for _, p in ipairs(xml.collect(content, { ["w:p"] = true })) do
+    for _, extent in ipairs(xml.collect(p, { ["wp:extent"] = true })) do
+      height = height + (tonumber(xml.attr(extent, "cy") or "") or 0)
+    end
+    local chars = #table.concat(vim.tbl_map(xml.text, xml.collect(p, { ["w:t"] = true })))
+    local per_line = math.max(cx / EMU / 0.19, 1)
+    height = height + math.ceil(chars / per_line) * 0.5 * EMU + 0.2 * EMU
+  end
+  height = math.floor(math.max(height, 0.5 * EMU))
+  for _, tag in ipairs({ "wp:extent", "a:ext" }) do
+    local el = xml.find(drawing, tag)
+    if el then
+      xml.set_attr(el, "cy", tostring(height))
+    end
+  end
+end
+
+-- A box's run, at the start of paragraph `p` (after its properties), unless it is in it already.
+function M.attach_box(_, run, p)
+  if run.parent == p then
+    return
+  end
+  if run.parent then
+    xml.remove(run)
+  end
+  local ppr = xml.child(p, "w:pPr")
+  xml.append(p, run, ppr and xml.index(ppr) + 1 or 1)
+end
+
+-- A drawing placed as its attributes say (see floats.lua): in the line, or anchored, floating.
+place_drawing = function(ctx, drawing, attrs)
+  local old = vim.iter(drawing.children):find(function(c) return c.tag == "wp:inline" or c.tag == "wp:anchor" end)
+  if not old then
+    return
+  end
+  local parts = {}
+  for _, tag in ipairs({ "wp:extent", "wp:effectExtent", "wp:docPr", "wp:cNvGraphicFramePr", "a:graphic" }) do
+    parts[tag] = xml.child(old, tag)
+  end
+  local cx = tonumber(xml.attr(parts["wp:extent"] or {}, "cx") or "") or 0
+  local page = M.page(ctx)
+  local geo = require("neoffice.floats").geometry(attrs, page, cx / EMU)
+  if geo and geo.h.align then -- (as an offset: LibreOffice doesn't wrap text around an aligned text box)
+    local w = cx / EMU
+    geo.h = { rel = geo.h.rel, offset = ({ left = 0, right = page.text - w, center = (page.text - w) / 2 })[geo.h.align] }
+  end
+  local new
+  if not geo then
+    new = xml.elem("wp:inline", { { "distT", "0" }, { "distB", "0" }, { "distL", "0" }, { "distR", "0" } })
+  else
+    local function emu(n) return tostring(math.floor(n * EMU + 0.5)) end
+    local function position(tag, pos, rel)
+      return xml.elem(tag, { { "relativeFrom", rel } }, {
+        pos.align and xml.elem("wp:align", {}, { { text = pos.align } }) or xml.elem("wp:posOffset", {}, { { text = emu(pos.offset or 0) } }),
+      })
+    end
+    local gap = emu(geo.gap)
+    local side = geo.wrap == "none" and "0" or gap
+    ctx.next_height = (ctx.next_height or 251659264) + 1
+    new = xml.elem("wp:anchor", {
+      { "distT", gap }, { "distB", gap }, { "distL", side }, { "distR", side }, { "simplePos", "0" },
+      { "relativeHeight", tostring(ctx.next_height) }, { "behindDoc", geo.wrap == "behind" and "1" or "0" },
+      { "locked", "0" }, { "layoutInCell", "1" }, { "allowOverlap", "1" },
+    }, {
+      xml.elem("wp:simplePos", { { "x", "0" }, { "y", "0" } }),
+      position("wp:positionH", geo.h, geo.h.rel == "page" and "page" or "column"),
+      position("wp:positionV", geo.v, geo.v.rel),
+    })
+    parts["wp:effectExtent"] = parts["wp:effectExtent"] or xml.elem("wp:effectExtent", { { "l", "0" }, { "t", "0" }, { "r", "0" }, { "b", "0" } })
+    parts.wrap = geo.wrap == "square" and xml.elem("wp:wrapSquare", { { "wrapText", "bothSides" } })
+      or geo.wrap == "tight" and xml.elem("wp:wrapTight", { { "wrapText", "bothSides" } }, {
+        xml.elem("wp:wrapPolygon", { { "edited", "0" } }, {
+          xml.elem("wp:start", { { "x", "0" }, { "y", "0" } }), xml.elem("wp:lineTo", { { "x", "0" }, { "y", "21600" } }),
+          xml.elem("wp:lineTo", { { "x", "21600" }, { "y", "21600" } }), xml.elem("wp:lineTo", { { "x", "21600" }, { "y", "0" } }),
+          xml.elem("wp:lineTo", { { "x", "0" }, { "y", "0" } }),
+        }),
+      })
+      or geo.wrap == "none" and xml.elem("wp:wrapTopAndBottom") or xml.elem("wp:wrapNone")
+  end
+  for _, tag in ipairs({ "wp:extent", "wp:effectExtent", "wrap", "wp:docPr", "wp:cNvGraphicFramePr", "a:graphic" }) do
+    if parts[tag] and (geo or tag ~= "wrap") then
+      xml.append(new, parts[tag])
+    end
+  end
+  drawing.children[xml.index(old)] = new
+  new.parent, old.parent = drawing, nil
+  ensure_ns(xml.find(ctx.root, "w:document"), "wp")
+end
+
 function M.text_width(ctx)
   local section = xml.child(xml.find(ctx.root, "w:body") or {}, "w:sectPr") or {}
   local size, margins = xml.child(section, "w:pgSz"), xml.child(section, "w:pgMar")
@@ -1444,6 +1785,11 @@ local function image_node(ctx, img)
         xml.set_attr(el, "cy", tostring(math.floor(cy)))
       end
     end
+  end
+  local drawing = xml.find(node, "w:drawing")
+  local floats = require("neoffice.floats")
+  if drawing and (not original or floats.key(original.image) ~= floats.key(img)) then -- (moved, or new)
+    place_drawing(ctx, drawing, img)
   end
   local doc_pr = xml.find(node, "wp:docPr")
   if doc_pr then

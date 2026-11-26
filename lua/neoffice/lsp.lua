@@ -146,6 +146,16 @@ local function attribute_diagnostics(buf)
     }
   end
   for r, line in ipairs(lines) do
+    local fence, fence_attrs = markup.box_line(line) -- a box's line: its attributes (as an image's)
+    if fence and fence_attrs then
+      local attrs, bad = require("neoffice.floats").parse(fence_attrs)
+      local tidy = attrs and "::: {" .. require("neoffice.floats").render(attrs) .. "}"
+      if not attrs then
+        add(r, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Error, bad)
+      elseif tidy ~= line and tidy ~= "::: {}" then
+        add(r, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Hint, "write it as " .. tidy, tidy)
+      end
+    end
     local inside = line:sub(1, 1) == "{" and markup.table_options(line)
     if inside and (lines[r + 1] or ""):match("^|") then
       local ok, err = pcall(tables.parse, inside)
@@ -168,9 +178,11 @@ local function attribute_diagnostics(buf)
     end
     local p = line:find("![", 1, true)
     while p do
-      local _, _, after, width, attrs = markup.image_at(line, p)
-      local tidy = width and "{width = " .. width .. "}"
-      if attrs and line:sub(attrs.s, attrs.e) ~= tidy then
+      local _, _, after, _, attrs = markup.image_at(line, p)
+      local tidy = attrs and attrs.attrs and "{" .. require("neoffice.floats").render(attrs.attrs) .. "}"
+      if attrs and attrs.bad then -- (braces after an image that aren't its attributes)
+        add(r, attrs.s - 1, attrs.e, vim.lsp.protocol.DiagnosticSeverity.Error, attrs.bad)
+      elseif tidy and tidy ~= "{}" and line:sub(attrs.s, attrs.e) ~= tidy then
         add(r, attrs.s - 1, attrs.e, vim.lsp.protocol.DiagnosticSeverity.Hint, "write it as " .. tidy, tidy)
       end
       p = line:find("![", math.max(after or 0, p + 2), true)
@@ -203,10 +215,32 @@ local function completion(buf, pos)
     end
     return items
   end
-  local width = before:match("%)%{%s*width%s*=%s*([^%s}]*)$")
-  if width then
-    for _, w in ipairs({ "100%", "75%", "50%", "8cm", "12cm", "16cm" }) do
-      add(w, #before - #width, KIND.Value, "the image's width: a length (cm, mm, in) or a percentage of the text's width")
+  -- an image's attributes ("){...") or a box's ("::: {..."): those not given yet, or a value
+  local braces = before:match("%)%{([^}]*)$") or before:match("^:::%s*{([^}]*)$")
+  if braces then
+    local floats = require("neoffice.floats")
+    local used = {}
+    for _, a in ipairs((markup.attributes(braces))) do
+      used[a.name or floats.name_of(a.value) or ""] = true
+    end
+    local item = braces:match("([^,;]*)$")
+    local name, value = item:match("^%s*([%a_]+)%s*=%s*(%S*)$")
+    local function values(key)
+      return floats.VALUES[key] or key == "width" and { "100%", "50%", "6cm", "8cm", "12cm" } or { "0.3cm", "0.5cm", "1cm" }
+    end
+    if name then
+      for _, v in ipairs(values(name:lower())) do
+        add(v, #before - #value, KIND.EnumMember, floats.DESCRIBE[name:lower() .. "." .. v])
+      end
+    else
+      local typed = item:match("^%s*(.-)$")
+      for _, key in ipairs(floats.KEYS) do
+        if not used[key] and key ~= "x" and key ~= "y" then
+          for _, v in ipairs(values(key)) do
+            add(key .. " = " .. v, #before - #typed, KIND.Property, floats.DESCRIBE[key .. "." .. v])
+          end
+        end
+      end
     end
     return items
   end
@@ -245,8 +279,44 @@ local function completion(buf, pos)
   return items
 end
 
+-- A floating image followed by its caption: both in a box, so the caption goes where the image
+-- goes (the image's place becomes the box's).
+local function box_figure(buf, params, out)
+  local markup, floats = require("neoffice.markup"), require("neoffice.floats")
+  local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
+  for r = params.range.start.line + 1, math.min(params.range["end"].line + 1, #lines) do
+    local line = lines[r]
+    local p = line:find("![", 1, true)
+    local attrs
+    if p then
+      attrs = select(5, markup.image_at(line, p))
+    end
+    local caption = r + 2 <= #lines and lines[r + 1] == "" and markup.block(lines[r + 2]).caption == "figure"
+    if attrs and attrs.attrs and floats.floating(attrs.attrs) and caption and not markup.box_line(lines[r - 1] or "") then
+      local box, image = {}, { width = attrs.attrs.width }
+      for key, value in pairs(attrs.attrs) do
+        box[key] = value
+      end
+      local inner = floats.render(image)
+      local last = r + 2 -- (the caption's last line)
+      while lines[last + 1] and lines[last + 1] ~= "" and not markup.box_line(lines[last + 1]) do
+        last = last + 1
+      end
+      out[#out + 1] = {
+        title = "Box this figure with its caption (::: {...})", kind = "refactor.rewrite",
+        edit = { changes = { [params.textDocument.uri] = {
+          { range = { start = { line = r - 1, character = 0 }, ["end"] = { line = r - 1, character = 0 } }, newText = "::: {" .. floats.render(box) .. "}\n" },
+          { range = { start = { line = r - 1, character = attrs.s }, ["end"] = { line = r - 1, character = attrs.e - 1 } }, newText = inner },
+          { range = { start = { line = last - 1, character = #lines[last] }, ["end"] = { line = last - 1, character = #lines[last] } }, newText = "\n:::" },
+        } } },
+      }
+    end
+  end
+end
+
 local function code_actions(buf, params)
   local uri, out = params.textDocument.uri, {}
+  box_figure(buf, params, out)
   for _, d in ipairs(attribute_diagnostics(buf)) do
     if d.data and d.range.start.line >= params.range.start.line and d.range.start.line <= params.range["end"].line then
       out[#out + 1] = {

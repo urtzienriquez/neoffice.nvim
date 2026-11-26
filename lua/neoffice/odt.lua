@@ -79,8 +79,8 @@ local function annotation(el)
   }
 end
 
--- An image: its file in the package and its alt text (description, or else title).
-local function image_of(frame)
+-- An image: its file in the package, its alt text (description, or else title) and its place.
+local function image_of(ctx, frame)
   if xml.child(frame, "draw:object") then -- a formula or chart (its draw:image is only a preview)
     return nil
   end
@@ -89,7 +89,11 @@ local function image_of(frame)
   if path and not path:match("^%a+:") and not path:match("^%.%./") then
     local alt = xml.child(frame, "svg:desc") or xml.child(frame, "svg:title")
     local cm = markup.cm(xml.attr(frame, "svg:width"))
-    return { path = path, alt = alt and vim.trim(xml.text(alt):gsub("%s+", " ")) or "", width = cm and markup.width(cm) or nil }
+    local out = { path = path, alt = alt and vim.trim(xml.text(alt):gsub("%s+", " ")) or "", width = cm and markup.width(cm) or nil }
+    for key, value in pairs(require("neoffice.floats").classify(M.frame_geometry(ctx, frame), M.page(ctx))) do
+      out[key] = value
+    end
+    return out
   end
 end
 
@@ -269,11 +273,16 @@ local function read_para(ctx, p)
         if c then
           add({ comment_end = c })
         end
+      elseif (tag == "draw:frame" or tag == "draw:custom-shape") and M.box_content(el) then -- a box: its paragraphs show before this one's
+        add({ object = el, visible = true, box = { node = el, content = M.box_content(el), attrs = M.box_attrs(ctx, el) } })
+        after_space = false
       elseif tag then
-        local image = tag == "draw:frame" and image_of(el) or nil
+        local image = tag == "draw:frame" and image_of(ctx, el) or nil
         local text = not tag:match("^draw:") and plain(el) or ""
         local seq = tag == "text:sequence" and xml.attr(el, "text:name") or nil -- (a caption's number)
-        add({ object = el, visible = VISIBLE[tag] or xml.text(el) ~= "", image = image, field = text ~= "" and { text = text, seq = seq } or nil })
+        local kind = not image and M.object_kind(ctx, el) -- (shown by name: ⟦chart⟧, kept)
+        add({ object = el, visible = VISIBLE[tag] or xml.text(el) ~= "" or kind and true, image = image,
+          field = kind and { text = kind } or text ~= "" and { text = text, seq = seq } or nil })
         after_space = after_space and not spans[#spans].visible
       end
     end
@@ -362,7 +371,26 @@ function M.load(path)
   local body = assert(xml.find(ctx.root, "office:text"), "no office:text")
   for _, p in ipairs(xml.collect(body, PARA, { ["text:tracked-changes"] = true })) do
     local spans, block = read_para(ctx, p)
-    paras[#paras + 1] = { node = p, block = block, spans = spans }
+    -- its boxes: their paragraphs first (not in a table's cell: there, a box stays as it is)
+    local in_cell = false
+    local up = p.parent
+    while up do
+      in_cell = in_cell or up.tag == "table:table-cell"
+      up = up.parent
+    end
+    local own = {}
+    for _, s in ipairs(spans) do
+      if s.box and not in_cell then
+        for _, bp in ipairs(xml.collect(s.box.content, PARA)) do
+          local bspans, bblock = read_para(ctx, bp)
+          paras[#paras + 1] = { node = bp, block = bblock, spans = bspans, box = s.box }
+        end
+      else
+        s.box = nil
+        own[#own + 1] = s
+      end
+    end
+    paras[#paras + 1] = { node = p, block = block, spans = own }
   end
   for _, c in pairs(ctx.comments) do
     c.was_resolved = c.resolved
@@ -696,6 +724,10 @@ local function image_node(ctx, img)
   local desc = xml.child(frame, "svg:desc") or xml.append(frame, xml.elem("svg:desc"))
   desc.children = {}
   xml.append(desc, { text = img.alt })
+  local floats = require("neoffice.floats")
+  if not original or floats.key(original.image) ~= floats.key(img) then -- (moved, or new)
+    M.place_frame(ctx, frame, img)
+  end
   img.node = frame
   return frame
 end
@@ -879,6 +911,224 @@ local function own_style(ctx, el, family, props)
   ctx.named[family .. "|" .. name] = { el = style, automatic = true }
   xml.set_attr(el, "table:style-name", name)
   return xml.child(style, props) or xml.append(style, xml.elem(props))
+end
+
+-- ── Floating images and frames (see floats.lua) ─────────────────────────────
+
+-- The page, for placing images: { text = the text's width, left, top = its margins } (cm).
+function M.page(ctx)
+  local master = xml.find(ctx.styles_doc, "style:master-page")
+  local name = master and xml.attr(master, "style:page-layout-name")
+  local layout = vim.iter(xml.collect(ctx.styles_doc, { ["style:page-layout"] = true })):find(function(l)
+    return xml.attr(l, "style:name") == name
+  end)
+  local props = layout and xml.child(layout, "style:page-layout-properties") or { attrs = {} }
+  return { text = M.text_width(ctx), left = markup.cm(xml.attr(props, "fo:margin-left")) or 2, top = markup.cm(xml.attr(props, "fo:margin-top")) or 2 }
+end
+
+-- A graphic style's property, following the styles it is based on.
+local function graphic_prop(ctx, name, attr)
+  for _ = 1, 10 do
+    local style = style_named(ctx, "graphic", name)
+    if not style then
+      return nil
+    end
+    local value = xml.attr(xml.child(style.el, "style:graphic-properties") or { attrs = {} }, attr)
+    if value then
+      return value
+    end
+    name = xml.attr(style.el, "style:parent-style-name")
+  end
+end
+
+-- Where a frame is: a geometry (see floats.lua), or nil if it is in the line (as a character).
+function M.frame_geometry(ctx, frame)
+  local anchor = xml.attr(frame, "text:anchor-type") or "paragraph"
+  if anchor == "as-char" then
+    return nil
+  end
+  local style = xml.attr(frame, "draw:style-name")
+  local function prop(attr) return graphic_prop(ctx, style, attr) end
+  local wrap = prop("style:wrap") or "none"
+  if wrap == "run-through" then
+    wrap = prop("style:run-through") == "background" and "behind" or "front"
+  elseif wrap ~= "none" then
+    wrap = prop("style:wrap-contour") == "true" and "tight" or "square"
+  end
+  local hpos, hrel = prop("style:horizontal-pos") or "center", prop("style:horizontal-rel") or "paragraph"
+  local vpos, vrel = prop("style:vertical-pos") or "top", prop("style:vertical-rel") or "paragraph"
+  local h = { rel = (anchor == "page" or hrel == "page" or hrel:match("^page%-")) and hrel ~= "page-content" and "page" or "column" }
+  h.align = ({ left = "left", right = "right", center = "center", inside = "left", outside = "right" })[hpos]
+  h.offset = not h.align and (markup.cm(xml.attr(frame, "svg:x")) or 0) or nil
+  local v = { rel = (anchor == "page" or vrel == "page") and "page" or vrel == "page-content" and "margin" or "paragraph" }
+  v.align = (vpos == "top" or vpos == "bottom") and v.rel ~= "paragraph" and vpos or nil
+  v.offset = not v.align and (vpos == "from-top" and markup.cm(xml.attr(frame, "svg:y")) or 0) or nil
+  local gap = markup.cm(prop(wrap == "none" and "fo:margin-top" or "fo:margin-left") or "") or 0
+  return { h = h, v = v, wrap = wrap, gap = gap, width = markup.cm(xml.attr(frame, "svg:width")) or 0 }
+end
+
+-- A frame placed as its attributes say (see floats.lua): in the line, or anchored, floating.
+local function length_cm(n)
+  return ("%.3fcm"):format(n)
+end
+function M.place_frame(ctx, frame, attrs, extra)
+  local geo = require("neoffice.floats").geometry(attrs, M.page(ctx), markup.cm(xml.attr(frame, "svg:width")) or 0)
+  if not geo then
+    xml.set_attr(frame, "text:anchor-type", "as-char")
+    xml.set_attr(frame, "svg:x", nil)
+    xml.set_attr(frame, "svg:y", nil)
+    return
+  end
+  xml.set_attr(frame, "text:anchor-type", "paragraph")
+  local wrap = ({ square = "parallel", tight = "parallel", none = "none", front = "run-through", behind = "run-through" })[geo.wrap]
+  local gap, side = length_cm(geo.gap), geo.wrap == "none" and "0cm" or length_cm(geo.gap)
+  local props = {
+    ["style:wrap"] = wrap, ["style:wrap-contour"] = geo.wrap == "tight" and "true" or "false",
+    ["style:wrap-contour-mode"] = geo.wrap == "tight" and "outside" or false,
+    ["style:run-through"] = geo.wrap == "behind" and "background" or "foreground",
+    ["fo:margin-top"] = gap, ["fo:margin-bottom"] = gap, ["fo:margin-left"] = side, ["fo:margin-right"] = side,
+    ["style:horizontal-pos"] = geo.h.align or "from-left", ["style:horizontal-rel"] = geo.h.rel == "page" and "page" or "paragraph",
+    ["style:vertical-pos"] = geo.v.align or "from-top",
+    ["style:vertical-rel"] = geo.v.rel == "page" and "page" or geo.v.rel == "margin" and "page-content" or "paragraph",
+  }
+  xml.set_attr(frame, "svg:x", not geo.h.align and length_cm(geo.h.offset or 0) or nil)
+  xml.set_attr(frame, "svg:y", not geo.v.align and length_cm(geo.v.offset or 0) or nil)
+  -- (in a style of its own: a copy of its automatic style, or based on its common one)
+  local base = style_named(ctx, "graphic", xml.attr(frame, "draw:style-name"))
+  local style
+  if base and base.automatic then
+    style = xml.copy(base.el)
+  else
+    style = xml.elem("style:style", { { "style:family", "graphic" } })
+    -- (based on its style: also one LibreOffice has built in, as "Frame", that the document doesn't list)
+    xml.set_attr(style, "style:parent-style-name", base and xml.attr(base.el, "style:name") or xml.attr(frame, "draw:style-name"))
+  end
+  local name, n = nil, 1
+  repeat
+    name, n = "NeoGraphic" .. n, n + 1
+  until not style_named(ctx, "graphic", name)
+  xml.set_attr(style, "style:name", name)
+  local el = xml.child(style, "style:graphic-properties") or xml.append(style, xml.elem("style:graphic-properties"))
+  for attr, value in pairs(vim.tbl_extend("force", props, extra or {})) do
+    xml.set_attr(el, attr, value or nil)
+  end
+  xml.append(automatic(ctx), style)
+  ctx.named["graphic|" .. name] = { el = style, automatic = true }
+  xml.set_attr(frame, "draw:style-name", name)
+end
+
+-- What a drawing or object that neoffice doesn't edit is, to show it by name (⟦chart⟧): nil for
+-- others.
+local SHAPES = { ["draw:custom-shape"] = "shape", ["draw:rect"] = "shape", ["draw:ellipse"] = "shape", ["draw:line"] = "shape",
+  ["draw:path"] = "shape", ["draw:polygon"] = "shape", ["draw:polyline"] = "shape", ["draw:connector"] = "shape", ["draw:g"] = "drawing" }
+function M.object_kind(ctx, el)
+  if el.tag == "draw:frame" then
+    local object = xml.child(el, "draw:object") or xml.child(el, "draw:object-ole")
+    local href = object and (xml.attr(object, "xlink:href") or ""):gsub("^%./", "")
+    local content = href and href ~= "" and zip.read(ctx.path, href .. "/content.xml") or ""
+    return object and (content:find("<math", 1, true) and "equation" or content:find("<chart:chart", 1, true) and "chart" or "object")
+      or xml.child(el, "draw:text-box") and "box" or nil
+  end
+  return SHAPES[el.tag] and (xml.find(el, "text:p") and "box" or SHAPES[el.tag]) or nil
+end
+
+-- ── Boxes (frames with text: see floats.lua and M.load) ─────────────────────
+
+-- A box's paragraphs' container: a frame's text box (as LibreOffice makes a figure with its
+-- caption), or a shape with text in it (as it reads Word's text boxes); if it holds only
+-- paragraphs (no tables, no boxes in it).
+function M.box_content(frame)
+  local box = frame.tag == "draw:frame" and xml.child(frame, "draw:text-box")
+    or frame.tag == "draw:custom-shape" and xml.child(frame, "text:p") and frame
+  if not box or #xml.collect(box, { ["table:table"] = true, ["draw:text-box"] = true, ["draw:custom-shape"] = true }) > 0 then
+    return nil
+  end
+  return box
+end
+
+function M.box_attrs(ctx, frame)
+  local attrs = require("neoffice.floats").classify(M.frame_geometry(ctx, frame), M.page(ctx))
+  local cm = markup.cm(xml.attr(frame, "svg:width"))
+  attrs.width = cm and markup.width(cm) or nil
+  return attrs
+end
+
+function M.box_container(frame)
+  return frame.tag == "draw:custom-shape" and frame or xml.child(frame, "draw:text-box")
+end
+
+-- The box a paragraph is in: its frame, or nil.
+function M.box_of(p)
+  local up = p.parent
+  while up do
+    if up.tag == "draw:text-box" then
+      return up.parent
+    elseif up.tag == "draw:custom-shape" then
+      return up
+    end
+    up = up.parent
+  end
+end
+
+-- A new box: a rectangle with text in it (as LibreOffice reads Word's text boxes, and draws them
+-- well), its paragraphs before its geometry.
+function M.new_box(ctx, attrs)
+  ctx.boxes_made = (ctx.boxes_made or 0) + 1
+  local width = markup.cm(attrs.width or "", M.text_width(ctx)) or M.text_width(ctx) / 2
+  local shape = xml.elem("draw:custom-shape", {
+    -- (in a style based on "Frame": LibreOffice then shows the images and fields in it, as in a frame)
+    { "draw:name", ("NeoBox%d_%d"):format(os.time(), ctx.boxes_made) }, { "draw:style-name", "Frame" }, { "text:anchor-type", "paragraph" },
+    { "svg:width", length_cm(width) }, { "svg:height", "1cm" }, { "draw:z-index", "0" },
+  }, {
+    xml.elem("draw:enhanced-geometry", { { "svg:viewBox", "0 0 21600 21600" }, { "draw:type", "rectangle" }, { "draw:enhanced-path", "M 0 0 L 21600 0 21600 21600 0 21600 Z N" } }),
+  })
+  return { node = shape, content = shape }
+end
+
+function M.place_box(ctx, frame, attrs)
+  local cm = attrs.width and markup.cm(attrs.width, M.text_width(ctx))
+  if cm then
+    xml.set_attr(frame, "svg:width", length_cm(cm))
+  end
+  local new = (xml.attr(frame, "draw:name") or ""):match("^NeoBox") -- (one neoffice made: no fill, line or padding)
+  M.place_frame(ctx, frame, attrs, new and {
+    ["draw:fill"] = "none", ["draw:stroke"] = "none", ["fo:padding"] = "0cm", ["draw:auto-grow-height"] = "true",
+    ["draw:textarea-vertical-align"] = "top", ["fo:wrap-option"] = "wrap",
+  } or nil)
+end
+function M.box_changed() end
+
+-- A box as tall as its content (roughly: its images, and its text in lines), growing with it.
+function M.fit_box(_, frame)
+  local box = M.box_container(frame)
+  if not box then
+    return
+  end
+  local width = markup.cm(xml.attr(frame, "svg:width")) or 5
+  local height = 0
+  for _, p in ipairs(xml.collect(box, PARA)) do
+    for _, image in ipairs(xml.collect(p, { ["draw:frame"] = true })) do
+      height = height + (markup.cm(xml.attr(image, "svg:height")) or 0)
+    end
+    local chars = #(xml.text(p))
+    height = height + math.ceil(chars / math.max(width / 0.19, 1)) * 0.5 + 0.2
+  end
+  if box == frame then -- (a shape: its height)
+    xml.set_attr(frame, "svg:height", length_cm(math.max(height, 0.5)))
+  else
+    xml.set_attr(frame, "svg:height", nil)
+    xml.set_attr(box, "fo:min-height", length_cm(math.max(height, 0.5)))
+  end
+end
+
+function M.attach_box(_, frame, p)
+  if frame.parent == p then
+    return
+  end
+  if frame.parent then
+    xml.remove(frame)
+  end
+  xml.append(p, frame, 1)
 end
 
 local function grid_of(tbl) -- its rows of cells

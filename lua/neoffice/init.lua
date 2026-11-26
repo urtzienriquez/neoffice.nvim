@@ -13,6 +13,7 @@
 local xml = require("neoffice.xml")
 local zip = require("neoffice.zip")
 local markup = require("neoffice.markup")
+local floats = require("neoffice.floats")
 local api = vim.api
 local M = {}
 
@@ -26,7 +27,7 @@ M.config = {
   image_width = 60, -- at most this many columns wide
   image_height = 20, -- and this many lines high
   -- captions ("Table: ...", "Figure: ..."): their words, and what goes between the number and the text
-  captions = { table = "Table", figure = "Figure", separator = ". " },
+  captions = { table = "Table", figure = { "Figure", "Fig." }, separator = ". " },
   -- how tables look, unless the line above one says otherwise ("{width = full}"; :help neoffice-table-format)
   tables = { rules = "booktabs", width = "auto", height = "compact", position = "center" },
   panel_keys = { -- in the comments panel (false disables one)
@@ -71,10 +72,13 @@ end
 -- byte columns) and cell = { table, row, col } (the rows where its table and row start, its column),
 -- with its column's alignment, from the table's line of dashes (align: see markup.table_format),
 -- and the options on the line above the table (format: "width = full, height = tall", see tables.lua), if it has one.
+-- The paragraphs of a box (between "::: {width = 6cm, float = right}" and ":::": see floats.lua) have
+-- box = { start (the row of its first line), attrs (the text in its braces) }.
 -- alone: rows that are a paragraph of their own (an empty paragraph you typed in: see M.blocks).
 function M.paragraphs(lines, alone)
   alone = alone or {}
   local out, blanks, table_start, formats, options = {}, {}, nil, {}, {}
+  local box, box_of_row, cut = nil, {}, false -- (cut: a box's line came just before: no paragraph goes on across it)
   local function empty_paragraphs(from)
     for k = from, #blanks do
       out[#out + 1] = { first = blanks[k], last = blanks[k], text = "" }
@@ -83,6 +87,21 @@ function M.paragraphs(lines, alone)
   end
   for row, line in ipairs(lines) do
     local prev = out[#out]
+    local fence, fence_attrs = markup.box_line(line)
+    if fence then -- a box opens or closes (inside one, ":::" closes it; with braces, another opens)
+      local was = box
+      if box then
+        empty_paragraphs(prev and 2 or 1)
+        box = nil
+      end
+      if not was or fence_attrs then
+        empty_paragraphs(prev and 2 or 1)
+        box = { start = row, attrs = fence_attrs or "" }
+      end
+      table_start, cut = nil, true
+      goto continue
+    end
+    box_of_row[row] = box
     local option_line = markup.table_options(line)
     if option_line and (lines[row + 1] or ""):match("^|") then -- (the options of the table below it)
       empty_paragraphs(prev and 2 or 1)
@@ -107,12 +126,15 @@ function M.paragraphs(lines, alone)
           }
         end
       end
-    elseif prev and prev.text ~= "" and not prev.cell and not prev.alone and not alone[row] and #blanks == 0 and not next((markup.block(line))) then -- continues it
+    elseif prev and prev.text ~= "" and not prev.cell and not prev.alone and not alone[row] and #blanks == 0 and not cut and not next((markup.block(line))) then -- continues it
       local hard = #(prev.text:match("\\*$")) % 2 == 1 -- (after a "\": a line break, else a space)
       prev.last, prev.text = row, prev.text .. (hard and "\n" or " ") .. line
     else
       empty_paragraphs(prev and 2 or 1) -- (the first blank line after a paragraph separates)
       out[#out + 1] = { first = row, last = row, text = line, alone = alone[row] }
+    end
+    if not line:match("^%s*$") then
+      cut = false
     end
     ::continue::
   end
@@ -120,6 +142,7 @@ function M.paragraphs(lines, alone)
   local next_first = #lines + 1
   for k = #out, 1, -1 do
     local cell = out[k].cell
+    out[k].box = box_of_row[out[k].first]
     out[k].owns = cell and out[k].first or next_first - 1
     next_first = out[k].first
     local format = cell and formats[cell.table]
@@ -313,7 +336,8 @@ local function pieces(buf, para)
     local object = mark and doc.object[mark[1]]
     if ch.image then -- unchanged, edited (another path or alt text) or new
       local same = object and object.image and object.image.path == ch.image.path and object.image.alt == ch.image.alt
-        and object.image.width == ch.image.width
+        and floats.key(object.image) == floats.key(ch.image)
+      assert(not ch.image.bad, ch.image.bad) -- (braces after it that aren't its attributes)
       assert(not ch.image.width or markup.cm(ch.image.width, 1), "image width: write it in cm, mm, in or % (of the text's width), as in {width = 12cm} or {width = 50%}")
       local where = { mark = mark and mark[1], row = ch.row, col = ch.col, end_row = ch.end_row, end_col = ch.end_col }
       out[#out + 1] = same and { object = object.node } or { image = vim.tbl_extend("force", ch.image, where, { original = object }) }
@@ -403,7 +427,7 @@ local function signature(block, list)
         end, v), "/")
       elseif type(v) == "table" then -- (identity, plus what can change inside comments, changes, images)
         local replies = table.concat(vim.tbl_map(tostring, v.replies or {}), ",")
-        v = table.concat({ tostring(v), replies, tostring(v.resolved), v.text or "", v.path or "", v.alt or "", v.width or "", v.tex or "", tostring(v.display) }, "/")
+        v = table.concat({ tostring(v), replies, tostring(v.resolved), v.text or "", v.path or "", v.alt or "", v.path and floats.key(v) or "", v.tex or "", tostring(v.display) }, "/")
       end
       out[#out + 1] = key .. "=" .. tostring(v)
     end
@@ -521,6 +545,7 @@ local function find_captions(paras)
         end
         local sep = separator(after)
         block.caption, block.caption_sep = kind, sep ~= "" and sep or nil
+        block.caption_label, block.caption_seq = word, field.seq
         for _ = 1, k do
           table.remove(spans, 1)
         end
@@ -530,6 +555,7 @@ local function find_captions(paras)
         local sep = separator(rest:sub(#number + 1))
         if sep ~= "" or #rest == #number then
           block.caption, block.caption_sep = kind, sep ~= "" and sep or nil
+          block.caption_label, block.caption_number = word, number -- (numbered by hand: kept so)
           cut = #lead - #rest + #number + #sep
         end
       end
@@ -540,6 +566,24 @@ local function find_captions(paras)
           table.remove(spans, 1)
         end
       end
+    end
+  end
+end
+
+-- A floating image (anchored to its paragraph: see floats.lua) shows at the start of its
+-- paragraph, wherever its anchor is in the text (its place is measured from the paragraph, so it
+-- doesn't move); written, it goes there. (Not one inside a tracked change or a comment's range.)
+local function hoist_floats(paras)
+  for _, para in ipairs(paras) do
+    local depth, moved = 0, {}
+    for k, s in ipairs(para.spans) do
+      depth = depth + ((s.insert_start or s.comment_start) and 1 or 0) - ((s.insert_end or s.comment_end) and 1 or 0)
+      if k > 1 and depth == 0 and s.image and floats.floating(s.image) then
+        moved[#moved + 1] = k
+      end
+    end
+    for n = #moved, 1, -1 do
+      table.insert(para.spans, 1, table.remove(para.spans, moved[n] + (#moved - n)))
     end
   end
 end
@@ -562,8 +606,9 @@ local function open(buf, path)
   local fmt = require("neoffice." .. (ext == "doc" and "docx" or ext))
   local ctx, paras = fmt.load(base)
   find_captions(paras)
+  hoist_floats(paras)
   ctx.dirty, ctx.files = {}, {} -- parts to write on save (name -> true, or content for new files)
-  local doc = { path = path, base = base, is_doc = ext == "doc", fmt = fmt, ctx = ctx, paras = {}, run = {}, object = {}, comment = {}, change = {}, caption_seps = {} }
+  local doc = { path = path, base = base, is_doc = ext == "doc", fmt = fmt, ctx = ctx, paras = {}, run = {}, object = {}, comment = {}, change = {}, caption_seps = {}, caption_as = {}, boxes = {} }
   doc.stamp, doc.synced = stamp(path), not new -- (synced: the file has the base's content)
   doc.tracking = M.config.track_changes
   if doc.tracking == nil then
@@ -654,6 +699,10 @@ local function open(buf, path)
     last_text = (texts[k] ~= "" or cells[k]) and k or last_text
     doc.paras[k] = para.node
     doc.caption_seps[k] = para.block.caption_sep
+    doc.caption_as[k] = para.block.caption and { label = para.block.caption_label, seq = para.block.caption_seq, number = para.block.caption_number } or nil
+    if para.box then -- (the document's boxes, and how they are placed: see M.save)
+      doc.boxes[para.box.node] = floats.key(para.box.attrs)
+    end
   end
   doc.texts = texts
 
@@ -723,6 +772,12 @@ local function open(buf, path)
         end
       end
     else
+      local box = para.box -- (a box's paragraphs: between its lines, "::: {...}" and ":::")
+      if box and (not paras[k - 1] or paras[k - 1].box ~= box) then
+        local attrs = floats.render(box.attrs)
+        lines[#lines + 1] = attrs ~= "" and "::: {" .. attrs .. "}" or ":::"
+      end
+      local ends_box = box and (not paras[k + 1] or paras[k + 1].box ~= box)
       r = #lines -- (a paragraph with line breaks takes several lines)
       local starts, offset = {}, 0
       for _, line in ipairs(vim.split(texts[k], "\n", { plain = true })) do
@@ -737,11 +792,17 @@ local function open(buf, path)
       end
       local next_list = paras[k + 1] and paras[k + 1].block.list
       local tight = para.block.list and next_list and next_list.id == para.block.list.id and texts[k + 1] ~= ""
-      if texts[k] ~= "" and k < last_text and not tight then
+      if texts[k] ~= "" and k < last_text and not tight and not ends_box then
         lines[#lines + 1] = ""
       end
       if texts[k] == "" then
         empty_rows[#empty_rows + 1] = r
+      end
+      if ends_box then
+        lines[#lines + 1] = ":::"
+        if k < last_text then
+          lines[#lines + 1] = ""
+        end
       end
     end
     local seen_text = false
@@ -1403,7 +1464,17 @@ function M.save(buf, target)
           equations[#equations + 1] = piece.math
         end
       end
-      plans[k] = { old = old_of[k], block = kind, pieces = list, sig = signature(kind, list), cell = block.cell }
+      plans[k] = { old = old_of[k], block = kind, pieces = list, sig = signature(kind, list), cell = block.cell, box = block.box }
+      if block.box and not block.box.parsed then -- its box's attributes (an error if they aren't right)
+        local attrs, bad = floats.parse(block.box.attrs)
+        assert(attrs, bad)
+        block.box.parsed = attrs
+      end
+      for _, piece in ipairs(block.box and list or {}) do -- (a new image in a box: as wide as the box)
+        if piece.image and not piece.image.original and not piece.image.width then
+          piece.image.width = block.box.parsed.width or "50%"
+        end
+      end
     end
 
     if #equations > 0 then
@@ -1416,7 +1487,7 @@ function M.save(buf, target)
 
     -- 2. Rewrite only the paragraphs that changed. (If anything fails before the file is written,
     -- the document's XML is put back as it was: see checkpoint.)
-    local ctx, paras, prev, plain, kept, placements, seps = doc.ctx, {}, nil, nil, {}, {}, {}
+    local ctx, paras, prev, plain, kept, placements, seps, box_keys, written_as = doc.ctx, {}, nil, nil, {}, {}, {}, {}, {}
     local notes = vim.list_extend(vim.tbl_values(doc.change), vim.tbl_values(doc.comment))
     for _, c in pairs(doc.comment) do
       vim.list_extend(notes, c.replies)
@@ -1439,36 +1510,78 @@ function M.save(buf, target)
       end
       return node
     end
+    -- boxes: the buffer's (their paragraphs' box tables) and the document's (their runs or frames)
+    local box_of = doc.fmt.box_of or function() end
+    local boxes, claimed, made = {}, {}, {}
+    for _, plan in ipairs(plans) do
+      local run = plan.box and plan.old and box_of(doc.paras[plan.old])
+      if run and not boxes[plan.box] and not claimed[run] then
+        boxes[plan.box], claimed[run] = run, true
+      end
+    end
+    local outer -- (the last paragraph that isn't in a box)
     for k, plan in ipairs(plans) do
       local node = plan.old and doc.paras[plan.old]
-      local placed = layout:node({ cell = plan.cell, node = node, edited = not plan.old or plan.sig ~= doc.sigs[plan.old] }, prev)
+      local prev_box = prev and box_of(prev)
+      local placed = layout:node({ cell = plan.cell, node = node, edited = not plan.old or plan.sig ~= doc.sigs[plan.old] }, prev_box and outer or prev)
       if node and (placed and placed ~= node or not placed and M.cell_of(node)) then
         deleted[#deleted + 1], plan.old, node = plan.old, nil, nil -- (moved into or out of a table cell)
       end
       node = placed or node
+      if node and box_of(node) ~= (plan.box and boxes[plan.box]) then -- (moved into or out of a box)
+        deleted[#deleted + 1], plan.old, node = plan.old, nil, nil
+      end
       local anchor = prev and outside(prev) or doc.paras[1] and outside(doc.paras[1])
-      if not node and not anchor then -- the document had no paragraph at all
+      if not node and plan.box then -- a new paragraph in a box (a new box, maybe)
+        local run = boxes[plan.box]
+        if not run then
+          local new = doc.fmt.new_box(ctx, plan.box.parsed)
+          run, boxes[plan.box], made[new.node] = new.node, new.node, true
+        end
+        node = doc.fmt.new_para(prev_box == run and prev or plain or prev or doc.paras[1], ctx)
+        if prev_box == run then
+          xml.append(prev.parent, node, xml.index(prev) + 1)
+        else -- (its first: before the box's other paragraphs)
+          local content = doc.fmt.box_container(run)
+          local first = vim.iter(content.children):find(function(c) return c.tag end)
+          xml.append(content, node, first and xml.index(first) or nil)
+        end
+      elseif not node and prev_box then -- a new paragraph after a box: before the paragraph it is in
+        node = doc.fmt.new_para(plain or doc.paras[1], ctx)
+        if prev_box.parent then
+          xml.append(prev_box.parent.parent, node, xml.index(prev_box.parent))
+        elseif outer then
+          local after = outside(outer)
+          xml.append(after.parent, node, xml.index(after) + 1)
+        else
+          local first = doc.paras[1] and outside(doc.paras[1])
+          xml.append(first.parent, node, xml.index(first))
+        end
+      elseif not node and not anchor then -- the document had no paragraph at all
         node = doc.fmt.first_para(ctx)
       elseif not node then -- a new paragraph, formatted like the one before it
         node = doc.fmt.new_para(plain or prev or doc.paras[1], ctx)
         xml.append(anchor.parent, node, xml.index(anchor) + (prev and 1 or 0))
       end
-      plain = not plan.cell and node or plain
+      plain = not plan.cell and not plan.box and node or plain
+      outer = not plan.box and node or outer
       seps[k] = plan.old and doc.caption_seps[plan.old] or nil
+      written_as[k] = plan.old and doc.caption_as[plan.old] or nil
       if not plan.old or plan.sig ~= doc.sigs[plan.old] then
         plan.written = true
         local list = plan.pieces
         local kind = plan.block.caption
         if kind and doc.fmt.caption_number then -- a caption: its word, number and separator first
-          local label, plainly = markup.captions()[kind], { b = false, i = false, u = false, s = false, h = false, sup = false, sub = false }
+          -- (a caption that was one: its word, and its number as it was: a field, or written by hand)
+          local as = written_as[k] or {}
+          local label, plainly = as.label or markup.captions()[kind], { b = false, i = false, u = false, s = false, h = false, sup = false, sub = false }
           local first = vim.iter(plan.pieces):find(function(p) return p.text end)
           plainly.insert = first and first.insert -- (a tracked insertion, as its text)
           seps[k] = seps[k] or (M.config.captions or {}).separator or ". "
-          list = vim.list_extend({
-            vim.tbl_extend("force", plainly, { text = label .. " " }),
-            { object = doc.fmt.caption_number(ctx, label), visible = true },
-            vim.tbl_extend("force", plainly, { text = seps[k] }),
-          }, plan.pieces)
+          local number = as.number and vim.tbl_extend("force", plainly, { text = as.number })
+            or { object = doc.fmt.caption_number(ctx, as.seq or markup.captions()[kind]), visible = true }
+          list = vim.list_extend({ vim.tbl_extend("force", plainly, { text = label .. " " }), number, vim.tbl_extend("force", plainly, { text = seps[k] }) }, plan.pieces)
+          written_as[k] = { label = as.label, seq = as.seq, number = as.number }
         end
         doc.fmt.fill(ctx, node, plan.block, list)
         if kind and doc.fmt.keep_with_next then -- (a table's caption with its table; a figure with its caption)
@@ -1485,7 +1598,12 @@ function M.save(buf, target)
           end
           if new then -- (its mark, once the file is written)
             local data = { node = new.node, visible = true }
-            data.image = piece.image and { path = new.path, alt = new.alt, width = new.width }
+            if piece.image then -- (its path, alt text and attributes, as it now is)
+              data.image = { path = new.path, alt = new.alt }
+              for _, key in ipairs(floats.KEYS) do
+                data.image[key] = new[key]
+              end
+            end
             data.math = piece.math and { tex = new.tex, display = new.display }
             data.footnote = piece.footnote and { text = new.text, id = new.id }
             placements[#placements + 1] = { new = new, data = data }
@@ -1498,6 +1616,43 @@ function M.save(buf, target)
     if #deleted > 0 then
       remove_paragraphs(doc.fmt, vim.tbl_map(function(old) return doc.paras[old] end, deleted))
       ctx.dirty[doc.fmt.MAIN] = true
+    end
+    -- each box in the paragraph after it (the first that isn't in a box or a table), placed as its
+    -- line says; those no longer in the buffer go
+    for k, plan in ipairs(plans) do
+      local next_plan = plans[k + 1]
+      if plan.box and not (next_plan and next_plan.box == plan.box) then -- (its last paragraph)
+        local run = boxes[plan.box]
+        local j = k + 1
+        while plans[j] and (plans[j].box or plans[j].cell) do
+          j = j + 1
+        end
+        local at = plans[j] and paras[j] or doc.fmt.first_para(ctx)
+        doc.fmt.attach_box(ctx, run, at)
+        local key = floats.key(plan.box.parsed)
+        local written = made[run] or doc.boxes[run] ~= key
+        for i = k, 1, -1 do
+          if plans[i].box ~= plan.box then
+            break
+          end
+          written = written or plans[i].written
+        end
+        if made[run] or doc.boxes[run] ~= key then
+          doc.fmt.place_box(ctx, run, plan.box.parsed)
+        end
+        if written then
+          doc.fmt.fit_box(ctx, run)
+          doc.fmt.box_changed(run)
+          ctx.dirty[doc.fmt.MAIN] = true
+        end
+        box_keys[run] = key
+      end
+    end
+    for run in pairs(doc.boxes) do
+      if not box_keys[run] and run.parent then
+        xml.remove(run)
+        ctx.dirty[doc.fmt.MAIN] = true
+      end
     end
     if ctx.dirty[doc.fmt.MAIN] and doc.fmt.number_captions then -- (captions added, removed, moved)
       doc.fmt.number_captions(ctx)
@@ -1527,7 +1682,7 @@ function M.save(buf, target)
       end
       M.place(buf, "object", p.data, p.new.row, p.new.col, p.new.end_row, p.new.end_col)
     end
-    doc.paras, doc.texts, doc.sigs, doc.caption_seps = paras, texts, {}, seps
+    doc.paras, doc.texts, doc.sigs, doc.caption_seps, doc.boxes, doc.caption_as = paras, texts, {}, seps, box_keys, written_as
     for k, block in ipairs(blocks) do -- (those written may have new marks: new images, equations...)
       doc.sigs[k] = plans[k].written and signature(pieces(buf, block)) or plans[k].sig
     end
