@@ -15,7 +15,9 @@ neoffice-equations	neoffice.txt	/*neoffice-equations*
 neoffice-escapes	neoffice.txt	/*neoffice-escapes*
 neoffice-fields	neoffice.txt	/*neoffice-fields*
 neoffice-floats	neoffice.txt	/*neoffice-floats*
+neoffice-fonts	neoffice.txt	/*neoffice-fonts*
 neoffice-footnotes	neoffice.txt	/*neoffice-footnotes*
+neoffice-format-into-style	neoffice.txt	/*neoffice-format-into-style*
 neoffice-highlights	neoffice.txt	/*neoffice-highlights*
 neoffice-images	neoffice.txt	/*neoffice-images*
 neoffice-keymaps	neoffice.txt	/*neoffice-keymaps*
@@ -25,6 +27,7 @@ neoffice-options	neoffice.txt	/*neoffice-options*
 neoffice-para-format	neoffice.txt	/*neoffice-para-format*
 neoffice-read	neoffice.txt	/*neoffice-read*
 neoffice-safety	neoffice.txt	/*neoffice-safety*
+neoffice-styles	neoffice.txt	/*neoffice-styles*
 neoffice-table-format	neoffice.txt	/*neoffice-table-format*
 neoffice-tables	neoffice.txt	/*neoffice-tables*
 neoffice-text	neoffice.txt	/*neoffice-text*

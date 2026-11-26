@@ -268,25 +268,27 @@ describe("a new paragraph", function()
       end
       local p = '<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="22"/></w:rPr>'
         .. '<w:t>Sized text.</w:t></w:r></w:p>'
-      return (text:gsub("<w:body>", "<w:body>" .. p, 1))
+      return (text:gsub("<w:body>", "<w:body>" .. p .. p:gsub("Sized text", "More of it"), 1))
     end,
     odt = function(name, text)
       if name ~= "content.xml" then
         return text
       end
       local style = '<style:style style:name="Sized" style:family="text"><style:text-properties style:font-name="Times New Roman" fo:font-size="11pt"/></style:style>'
-      return (text:gsub("<office:automatic%-styles>", "%0" .. style, 1):gsub("<office:text>", "%0<text:p><text:span text:style-name=\"Sized\">Sized text.</text:span></text:p>", 1))
+      local p = '<text:p><text:span text:style-name="Sized">Sized text.</text:span></text:p>'
+      return (text:gsub("<office:automatic%-styles>", "%0" .. style, 1):gsub("<office:text>", "%0" .. p .. p:gsub("Sized text", "More of it"), 1))
     end,
   }
   for _, ext in ipairs({ "docx", "odt" }) do
-    it("goes on with the font and size of the paragraph before it (" .. ext .. ")", function()
+    it("goes on with the font and size of the paragraphs before it (" .. ext .. ")", function()
       local path = H.copy("rich." .. ext, SIZED[ext])
       H.open(path)
-      assert.equals("Sized text.", H.paras()[1])
-      local r = H.row(1)
+      assert.same({ "Sized text.", "More of it." }, vim.list_slice(H.paras(), 1, 2))
+      assert.equals("{font = Times New Roman, size = 11pt}", H.lines()[H.row(1) - 1]) -- (not its style's font: said once)
+      local r = H.row(2)
       vim.api.nvim_buf_set_lines(0, r, r, false, { "", "Typed **after** it." })
       H.reopen()
-      assert.equals("Typed **after** it.", H.paras()[2])
+      assert.equals("Typed **after** it.", H.paras()[3])
       local main = zip.read(path, H.MAIN[ext])
       local new = main:match(ext == "docx" and "<w:p>.-Typed .-</w:p>" or "<text:p[^>]*>[^\n]-Typed .-</text:p>")
       if ext == "docx" then

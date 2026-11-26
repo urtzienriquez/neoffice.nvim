@@ -226,3 +226,26 @@ describe("the file on disk", function()
     end)
   end
 end)
+
+describe("a part that would come out broken", function()
+  it("isn't written: the save says so and the file stays as it was", function()
+    local path = H.copy("rich.docx")
+    H.open(path)
+    local before = H.bytes(path)
+    local doc = H.doc()
+    local save = doc.fmt.save
+    doc.fmt.save = function(...) -- (as a bug would: two roots)
+      local entries = save(...)
+      entries["word/document.xml"] = "<w:document/><w:body/>"
+      return entries
+    end
+    H.set(1, "Edited.")
+    local errors = {}
+    local notify = vim.notify
+    vim.notify = function(msg) errors[#errors + 1] = msg end
+    H.save()
+    vim.notify, doc.fmt.save = notify, save
+    assert.equals(before, H.bytes(path))
+    assert.truthy(table.concat(errors, "\n"):find("broken word/document.xml", 1, true))
+  end)
+end)

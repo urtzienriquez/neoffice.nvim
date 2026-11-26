@@ -27,6 +27,57 @@ function M.escape(s, in_attr)
   return s
 end
 
+-- Whether XML text is a document Word and LibreOffice can read: one root element, and every
+-- prefix it uses (w:, text:, svg: ...) declared where it is used. true, or nil and why.
+function M.check(s)
+  local ok, doc = pcall(M.parse, s)
+  if not ok or type(doc) ~= "table" then
+    return nil, "it can't be read back"
+  end
+  local roots = 0
+  for _, c in ipairs(doc.children) do
+    roots = roots + (c.tag and 1 or 0)
+  end
+  if roots ~= 1 then
+    return nil, ("%d root elements"):format(roots)
+  end
+  local problem
+  local function walk(el, scope)
+    local declared = scope
+    for _, kv in ipairs(el.attrs) do
+      local prefix = kv[1]:match("^xmlns:(.+)$")
+      if prefix then
+        declared = declared == scope and setmetatable({}, { __index = scope }) or declared
+        declared[prefix] = true
+      end
+    end
+    local function used(name)
+      local prefix = name:match("^([^:]+):")
+      if prefix and prefix ~= "xml" and prefix ~= "xmlns" and not declared[prefix] then
+        problem = problem or ("the prefix %s (in <%s>) isn't declared"):format(prefix, el.tag)
+      end
+    end
+    used(el.tag)
+    for _, kv in ipairs(el.attrs) do
+      used(kv[1])
+    end
+    for _, c in ipairs(el.children) do
+      if c.tag and not problem then
+        walk(c, declared)
+      end
+    end
+  end
+  for _, c in ipairs(doc.children) do
+    if c.tag then
+      walk(c, {})
+    end
+  end
+  if problem then
+    return nil, problem
+  end
+  return true
+end
+
 function M.parse(s)
   local doc = { children = {} }
   local node, pos = doc, 1

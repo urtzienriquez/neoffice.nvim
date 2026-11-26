@@ -137,10 +137,13 @@ function M.prefix(block)
   elseif list then
     kind = ("  "):rep(list.level - 1) .. (list.kind == "bullet" and "- " or (list.n or 1) .. ". ")
   end
-  -- its own format's attributes, in braces after its mark (see paras.lua)
+  -- its own format's attributes, in braces (after its mark, if it has one: see paras.lua)
   local attrs = block.para and require("neoffice.paras").render(block.para) or ""
+  if block.align == "none" then -- (its style's alignment, though the paragraphs around it have another)
+    attrs = "align = none" .. (attrs ~= "" and ", " .. attrs or "")
+  end
   if attrs ~= "" then
-    return kind .. (ALIGN[block.align] or ALIGN.left) .. "{" .. attrs .. "} "
+    return kind .. (ALIGN[block.align] or "") .. "{" .. attrs .. "} "
   end
   return kind .. (ALIGN[block.align] or "")
 end
@@ -148,21 +151,77 @@ end
 -- A line with only a mark and its attributes ("<=> {first = 0.5cm}"), which sets the format of
 -- the paragraphs after it (see paras.lua): { align (nil: left), attrs }, and why if they aren't
 -- right (bad); nil if the line isn't one.
+-- Also a line with only the attributes, "{align = justify, first = 0.5cm}" (and "{}": its style's).
+-- (A table's options are a line in braces too, but just above the table: the caller tells.)
 function M.para_line(line)
+  local function read(align, inside)
+    local attrs, bad = require("neoffice.paras").parse(inside)
+    if attrs and attrs.align then
+      if align and align ~= attrs.align then
+        bad = "its alignment is said twice (its mark, and align =)"
+      end
+      align, attrs.align = attrs.align, nil
+    end
+    return { align = align ~= "none" and align or nil, attrs = attrs or {}, bad = bad, text = inside }
+  end
+  local inside = line:match("^{([^{}]*)}%s*$")
+  if inside and (inside:match("^%s*$") or inside:find("=", 1, true)) then
+    return read(nil, inside)
+  end
   for align, mark in pairs(ALIGN) do
     local marker = vim.trim(mark)
     if line:sub(1, #marker) == marker then
       local rest = line:sub(#marker + 1)
       if rest:match("^%s*$") then
-        return { align = align ~= "left" and align or nil, attrs = {} }
+        return { align = align, attrs = {} }
       end
-      local inside = rest:match("^%s*{([^{}]*)}%s*$")
+      inside = rest:match("^%s*{([^{}]*)}%s*$")
       if inside then
-        local attrs, bad = require("neoffice.paras").parse(inside)
-        return { align = align ~= "left" and align or nil, attrs = attrs or {}, bad = bad, text = inside }
+        return read(align, inside)
       end
     end
   end
+end
+
+-- The document's header, at its top: its paragraph styles, and what each gives (see init.lua):
+--   ---
+--   styles:
+--     Normal:    {font = Times New Roman, size = 11pt, align = justify}
+--     Heading 1: {font = Arial, size = 14pt, bold}
+--   ---
+-- { last = its last row, styles = { { row, name, text (in its braces), attrs, bad } } }, or nil.
+function M.header(lines)
+  if lines[1] ~= "---" or not (lines[2] or ""):match("^styles:%s*$") then
+    return nil
+  end
+  local out = { styles = {} }
+  for r = 3, #lines do
+    local l = lines[r]
+    if l == "---" then
+      out.last = r
+      return out
+    end
+    local name, inside = l:match("^%s+([^:{}]-)%s*:%s*{(.*)}%s*$")
+    if name then
+      local attrs, bad = require("neoffice.paras").parse_style(inside)
+      out.styles[#out.styles + 1] = { row = r, name = vim.trim(name), text = inside, attrs = attrs, bad = bad }
+    elseif not l:match("^%s*$") then
+      out.styles[#out.styles + 1] = { row = r, bad = "not a style's line: write it as   Name: {font = ..., size = ...}" }
+    end
+  end
+end
+function M.render_header(styles) -- (styles: { { name, attrs } }, in order)
+  local width = 0
+  for _, s in ipairs(styles) do
+    width = math.max(width, vim.fn.strdisplaywidth(s.name))
+  end
+  local lines = { "---", "styles:" }
+  for _, s in ipairs(styles) do
+    local pad = (" "):rep(width - vim.fn.strdisplaywidth(s.name))
+    lines[#lines + 1] = "  " .. s.name .. ": " .. pad .. "{" .. require("neoffice.paras").render_style(s.attrs) .. "}"
+  end
+  lines[#lines + 1] = "---"
+  return lines
 end
 
 -- The block a line starts with; where its text begins; where its kind's and its alignment's
@@ -200,13 +259,25 @@ function M.block(line)
       break
     end
   end
-  -- (after its mark, its own format's attributes: "<=> {first = 0}")
-  local inside, after
-  if align_at and not kind_at then -- (plain paragraphs only)
+  -- (its own format's attributes, after its mark or alone: "<=> {first = 0} ...", "{before = 6pt} ...";
+  -- alone, only "name = value"s)
+  local inside, after, brace_at
+  if not kind_at then -- (plain paragraphs only)
     inside, after = line:match("^{([^{}]*)} ()", start)
+    if inside and not align_at and not inside:find("=", 1, true) then
+      inside = nil
+    end
+    brace_at = inside and start
   end
   if inside then
     local attrs, bad = require("neoffice.paras").parse(inside)
+    if attrs and attrs.align then
+      if block.align and block.align ~= attrs.align then
+        attrs, bad = nil, "its alignment is said twice (its mark, and align =)"
+      else
+        block.align, attrs.align = attrs.align, nil
+      end
+    end
     if attrs then
       block.para, start = attrs, after
     else
@@ -214,7 +285,7 @@ function M.block(line)
       start = after
     end
   end
-  return block, start, kind_at, align_at
+  return block, start, kind_at, align_at, brace_at
 end
 
 local function kind(block)
@@ -353,6 +424,19 @@ function M.attributes(text, names)
   local list, p = {}, 1
   while p <= #text do
     local s, name, value, e = text:match("^%s*()([%a_][%w_%-]*)%s*=%s*([^%s,;=]+)()", p)
+    if s then -- (a value of several words, up to the next comma: "font = Times New Roman"; or quoted)
+      local at = text:match("^%s*[%a_][%w_%-]*%s*=%s*()", p)
+      local quoted, qe = text:match('^"([^"]*)"()', at)
+      local words, we = text:match("^([^,;=\"]-)%s*()[,;]", at)
+      if not words then
+        words, we = text:match("^([^,;=\"]-)%s*()$", at)
+      end
+      if quoted then
+        value, e = quoted, qe
+      elseif words and words:find(" ", 1, true) and name:lower() == "font" then -- (only a font's name has spaces)
+        value, e = words, we
+      end
+    end
     if not s then
       s, value, e = text:match("^%s*()([^%s,;=]+)()", p)
     end
@@ -369,6 +453,51 @@ function M.attributes(text, names)
     tidy[#tidy + 1] = name and name .. " = " .. a.value or a.value
   end
   return list, table.concat(tidy, ", ")
+end
+
+-- The attributes of a span of text ("[words]{font = Arial, size = 9pt}"): { font, size }, or nil
+-- and why. (Its size as shown: in pt.)
+M.SPAN_KEYS = { "font", "size" }
+function M.span_attrs(text)
+  local out, any = {}, false
+  for _, a in ipairs((M.attributes(text))) do
+    if a.name ~= "font" and a.name ~= "size" then
+      return nil, ("not an attribute of text: %s (they are font, size)"):format(a.name or a.value)
+    end
+    local value = vim.trim(a.value)
+    if a.name == "size" then
+      local cm = M.cm(value)
+      if not cm or cm <= 0 then
+        return nil, "not a size: " .. a.value .. " (11pt, 12pt...)"
+      end
+      local pt = cm * 72 / 2.54
+      value = (("%.1f"):format(pt):gsub("%.?0+$", "")) .. "pt"
+    elseif value == "" then
+      return nil, "a font's name is missing"
+    end
+    out[a.name], any = value, true
+  end
+  if not any then
+    return nil, "a font or a size is missing (font = Arial, size = 9pt)"
+  end
+  return out
+end
+-- (a value as written: in quotes if it holds what separates values, as "Times New Roman;serif")
+function M.attr_value(v)
+  return (v:find("[,;=\"{}]") or v ~= vim.trim(v)) and '"' .. v:gsub('"', "") .. '"' or v
+end
+function M.render_span_attrs(s)
+  local parts = {}
+  for _, key in ipairs(M.SPAN_KEYS) do
+    if s[key] then
+      parts[#parts + 1] = key .. " = " .. M.attr_value(s[key])
+    end
+  end
+  return table.concat(parts, ", ")
+end
+-- (what tells spans of text apart: their font and size)
+local function span_key(s)
+  return (s.font or s.size) and ((s.font or "") .. "|" .. (s.size or "")) or nil
 end
 
 -- The cells of a table row line: for each, { col = where its text starts (0-based), text }, with
@@ -444,7 +573,8 @@ local function unbracket(line, cols)
       local rest = line:sub(i + 2)
       local upto = rest:find("[", 1, true)
       local drop = not inlink and (nx == "]" or not line:sub(i - 1, i - 1):match("[%^!]")
-        and not (upto and rest:sub(1, upto - 1) or rest):find("](", 1, true) and not (upto and rest:sub(1, upto - 1) or rest):find("\\](", 1, true))
+        and not (upto and rest:sub(1, upto - 1) or rest):find("%]%(") and not (upto and rest:sub(1, upto - 1) or rest):find("\\%]%(")
+        and not (upto and rest:sub(1, upto - 1) or rest):find("%]{") and not (upto and rest:sub(1, upto - 1) or rest):find("\\%]{"))
       if drop then
         removed[#removed + 1] = i - 1
       else
@@ -490,6 +620,26 @@ function M.render(spans, block, strict)
     len = len + #s
   end
   local function switch(to)
+    if span_key(cur) ~= span_key(to) then -- (a span of text in another font: everything closes, and opens again inside)
+      if cur.link then
+        put("](" .. cur.link:gsub("%)", "%%29") .. ")")
+      end
+      for k = #M.FLAGS, 1, -1 do
+        if cur[M.FLAGS[k]] then
+          put(closing(M.FLAGS[k], cur[M.FLAGS[k]]))
+        end
+      end
+      if span_key(cur) then
+        put("]{" .. M.render_span_attrs(cur) .. "}")
+      end
+      if span_key(to) then
+        if (parts[#parts] or ""):sub(-1) == "!" then -- (so "![" doesn't read as an image)
+          parts[#parts], len = parts[#parts]:sub(1, -2) .. "\\!", len + 1
+        end
+        put("[")
+      end
+      cur = { font = to.font, size = to.size }
+    end
     if cur.link and cur.link ~= to.link then
       put("](" .. cur.link:gsub("%)", "%%29") .. ")")
     end
@@ -555,14 +705,16 @@ function M.render(spans, block, strict)
   while start do
     for _ = 1, 3 do
       local text = line:sub(start, (line:find("\n", start, true) or #line + 1) - 1)
-      local parsed, _, kind_at, align_at = M.block(text)
+      local parsed, _, kind_at, align_at, brace_at = M.block(text)
       local at = text:match("^%s+$") and 1
       if not at and (start > 1 or not kind(block)) and kind(parsed) and not (block.cell and parsed.row) then
         at = kind_at
       elseif not at and (start > 1 or not block.align) and parsed.align then
         at = align_at
-      elseif not at and start == 1 and block.align and not block.para and (parsed.para or parsed.para_bad) then
-        at = align_at + #ALIGN[parsed.align] -- (text in braces after its mark: "\{")
+      elseif not at and start == 1 and not block.para and block.align ~= "none" and brace_at and (parsed.para or parsed.para_bad) then
+        at = brace_at -- (text in braces that would read as its attributes: "\{")
+      elseif not at and start == 1 and not kind(block) and not block.align and (text == "---" or M.para_line(text)) then
+        at = 1 -- (text that would read as a format's line, or the header's: "\{...}", "\---")
       end
       if not at then
         break
@@ -580,7 +732,7 @@ function M.render(spans, block, strict)
   -- "\[", which reads as LaTeX's display math), if the line still reads back the same
   if not strict and line:find("\\[%[%]]") then
     local plain, pcols = unbracket(line, cols)
-    if M.same(plain, spans) then
+    if plain ~= line and M.same(plain, spans) then
       line, cols = plain, pcols
     end
   end
@@ -602,7 +754,7 @@ local function signature(entry, token)
   for _, k in ipairs(M.FLAGS) do
     flags[#flags + 1] = entry[k] and k .. (entry[k] == true and k == "h" and "yellow" or tostring(entry[k])) or ""
   end
-  return table.concat(flags, ",") .. "|" .. (entry.link or "") .. "|" .. entry.ch
+  return table.concat(flags, ",") .. "|" .. (entry.link or "") .. "|" .. (entry.font or "") .. "|" .. (entry.size or "") .. "|" .. entry.ch
 end
 function M.same(line, spans)
   local want = {}
@@ -616,7 +768,8 @@ function M.same(line, spans)
     elseif s.text then
       local fmt = s.raw and {} or s
       for ch in s.text:gmatch("[^\128-\191][\128-\191]*") do
-        want[#want + 1] = signature({ ch = ch, link = fmt.link, b = fmt.b, i = fmt.i, u = fmt.u, s = fmt.s, h = fmt.h, sup = fmt.sup, sub = fmt.sub })
+        want[#want + 1] = signature({ ch = ch, link = fmt.link, b = fmt.b, i = fmt.i, u = fmt.u, s = fmt.s, h = fmt.h, sup = fmt.sup, sub = fmt.sub,
+          font = fmt.font, size = fmt.size })
       end
     end
   end
@@ -746,14 +899,19 @@ function M.parse(line)
   local text_start = pos
 
   local chars, cur, link_close, braces = {}, {}, nil, {} -- braces: the open ^{ and _{
+  local span_close, span_after, spans_open = nil, nil, {} -- (the open span of text in another font)
   local h_from -- (where the open highlight started, in chars)
   local function emit(at)
     local byte = line:byte(at) -- (the character's bytes, from its first: UTF-8)
     local ch = line:sub(at, at + (byte < 0xC0 and 0 or byte < 0xE0 and 1 or byte < 0xF0 and 2 or 3))
-    chars[#chars + 1] = { -- (the flags of M.FLAGS)
+    local c = { -- (the flags of M.FLAGS)
       col = at - 1, ch = ch, link = cur.link, b = cur.b == true, i = cur.i == true, u = cur.u == true,
       s = cur.s == true, h = cur.h or false, sup = cur.sup == true, sub = cur.sub == true,
     }
+    if span_close then -- (in a span of text in another font)
+      c.font, c.size, c.span_bad = cur.font, cur.size, cur.span_bad
+    end
+    chars[#chars + 1] = c
     return at + #ch
   end
   local function token(key, value, after)
@@ -773,6 +931,26 @@ function M.parse(line)
     end
     return false
   end
+  -- "[" starts a span of text in another font if a matching "]{...}" follows (its "]", its
+  -- attributes, and the position after them)
+  local function find_span(at)
+    local p, depth = at + 1, 0
+    while p <= #line do
+      local c = line:sub(p, p)
+      if c == "\\" then
+        p = p + 2
+      elseif c == "[" then
+        depth, p = depth + 1, p + 1
+      elseif c == "]" and depth > 0 then
+        depth, p = depth - 1, p + 1
+      elseif c == "]" then
+        local inside, after = line:match("^{([^}]*)}()", p + 1)
+        return inside and p, inside, after
+      else
+        p = p + 1
+      end
+    end
+  end
   -- "[" starts a link only if a matching "](url)" follows
   local function find_link(at)
     local p = at + 1
@@ -790,7 +968,7 @@ function M.parse(line)
   end
 
   while pos <= #line do
-    if not MARKS[line:byte(pos)] and pos ~= link_close then -- (most characters: just text)
+    if not MARKS[line:byte(pos)] and pos ~= link_close and pos ~= span_close then -- (most characters: just text)
       pos = emit(pos)
       goto continue
     end
@@ -804,7 +982,10 @@ function M.parse(line)
     if line:sub(pos, pos + 2) == "⟦" then
       field, after_field = enclosed(line, pos + 3, "⟧")
     end
-    if pos == link_close then
+    if pos == span_close and pos ~= link_close then
+      cur.font, cur.size, cur.span_bad, pos = nil, nil, nil, span_after
+      span_close, span_after = unpack(table.remove(spans_open) or {})
+    elseif pos == link_close then
       cur.link, link_close, pos = nil, nil, line:find(")", pos, true) + 1
     elseif line:sub(pos, pos + 7) == "\\newpage" then
       pos = token("page_break", true, pos + 8)
@@ -854,6 +1035,13 @@ function M.parse(line)
       cur[flag], pos = true, pos + 2
     elseif c == "}" and #braces > 0 then
       cur[table.remove(braces)], pos = false, pos + 1
+    elseif c == "[" and not cur.link and not span_close and find_span(pos) then
+      local close, inside, after = find_span(pos)
+      local attrs, bad = M.span_attrs(inside)
+      table.insert(spans_open, { span_close, span_after })
+      span_close, span_after = close, after
+      cur.font, cur.size, cur.span_bad = attrs and attrs.font, attrs and attrs.size, bad
+      pos = pos + 1
     elseif c == "[" and not cur.link and find_link(pos) then
       link_close, cur.link = find_link(pos)
       pos = pos + 1

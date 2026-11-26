@@ -13,6 +13,26 @@
 local api = vim.api
 local M = { NAME = "neoffice_ls" }
 
+-- The fonts installed (their families' names, from fontconfig: once a session; none without it).
+local installed
+function M.fonts()
+  if not installed then
+    installed = {}
+    local ok, out = pcall(vim.fn.systemlist, { "fc-list", ":", "family" })
+    local seen = {}
+    for _, line in ipairs(ok and vim.v.shell_error == 0 and out or {}) do
+      for family in line:gmatch("[^,]+") do
+        family = vim.trim(family)
+        if family ~= "" and not seen[family] and not family:find("\\") then
+          seen[family], installed[#installed + 1] = true, family
+        end
+      end
+    end
+    table.sort(installed)
+  end
+  return installed
+end
+
 local function neo()
   return require("neoffice")
 end
@@ -90,6 +110,10 @@ end
 
 local function folds(buf)
   local out = {}
+  local header = require("neoffice.markup").header(api.nvim_buf_get_lines(buf, 0, 200, false))
+  if header then -- (the styles at the top: folded out of the way, if you like)
+    out[#out + 1] = { startLine = 0, endLine = header.last - 1, kind = "region" }
+  end
   for _, h in ipairs(headings(buf)) do
     local last = h.last
     while last > h.first and (api.nvim_buf_get_lines(buf, last, last + 1, false)[1] or "") == "" do
@@ -145,15 +169,37 @@ local function attribute_diagnostics(buf)
       severity = severity, message = message, source = "neoffice_ls", data = new and { new = new } or nil,
     }
   end
+  -- the styles at the top: each line right, and a style the document has
+  local header = markup.header(lines)
+  local doc = neo().docs[buf]
+  for _, st in ipairs(header and header.styles or {}) do
+    local line = lines[st.row]
+    if st.bad then
+      add(st.row, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Error, st.bad)
+    elseif doc and doc.fmt.style_id and not (doc.header and doc.header[st.name:lower()]) and not doc.fmt.style_id(doc.ctx, st.name) then
+      add(st.row, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Error, ("not a paragraph style of this document: %s"):format(st.name))
+    end
+  end
   for r, line in ipairs(lines) do
-    -- a format's line ("<=> {first = 0.5cm}"), or a paragraph's own attributes after its mark
-    local format = line:find("^[<%-]") and markup.para_line(line)
-    local own = not format and line:find("^[<%-]") and markup.block(line)
-    if format and format.bad or own and own.para_bad then
+    if line:find("]{", 1, true) then -- a span of text's attributes ("[words]{font = Arial}")
+      for _, c in ipairs(select(2, markup.parse(line))) do
+        if c.span_bad then
+          add(r, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Error, c.span_bad)
+          break
+        end
+      end
+    end
+    -- a format's line ("{align = justify, first = 0.5cm}"), or a paragraph's own attributes
+    local above_table = (lines[r + 1] or ""):match("^|")
+    local format = line:find("^[<%-{]") and not above_table and not (header and r <= header.last) and markup.para_line(line)
+    local own = not format and line:find("^[<%-{]") and not (header and r <= header.last) and markup.block(line)
+    local orphan = format and format.bad and line:sub(1, 1) == "{" and pcall(tables.parse, markup.table_options(line) or "")
+    if orphan then
+      add(r, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Hint, "a table's options, with no table under it: nothing (delete the line)")
+    elseif format and format.bad or own and own.para_bad then
       add(r, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Error, format and format.bad or own.para_bad)
     elseif format and format.text then
-      local attrs = require("neoffice.paras").render(format.attrs)
-      local tidy = vim.trim(markup.ALIGN[format.align or "left"]) .. (attrs ~= "" and " {" .. attrs .. "}" or "")
+      local tidy = "{" .. require("neoffice.paras").render(vim.tbl_extend("force", {}, format.attrs, { align = format.align })) .. "}"
       if tidy ~= line then
         add(r, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Hint, "write it as " .. tidy, tidy)
       end
@@ -228,29 +274,142 @@ local function completion(buf, pos)
     return items
   end
   -- a paragraph format's attributes ("<=> {..."): those not given yet, or a value
-  local pbraces = before:match("^[<%-][=|<%-]>?%s*{([^}]*)$")
-  if pbraces then
+  -- a paragraph format's attributes ("<=> {..."), or a span of text's ("[words]{..."): those not
+  -- given yet, or a value (a font: one of those installed)
+  -- in the styles at the top: a style's name (those the document has), or its attributes
+  local all = api.nvim_buf_get_lines(buf, 0, 200, false)
+  local header = markup.header(all)
+  local in_header = header and pos.line + 1 > 2 and pos.line + 1 < header.last
+  local doc = neo().docs[buf]
+  if in_header and before:match("^%s+[^:{}]*$") and doc and doc.fmt.paragraph_styles then
+    local typed = before:match("^%s+(.*)$")
+    local listed = {}
+    for _, st in ipairs(header.styles) do
+      listed[(st.name or ""):lower()] = true
+    end
+    for _, name in ipairs(doc.fmt.paragraph_styles(doc.ctx)) do
+      if not listed[name:lower()] then
+        add(name, #before - #typed, KIND.Class, "a paragraph style of this document", name .. ": {")
+      end
+    end
+    return items
+  end
+  local hbraces = in_header and before:match("^%s+[^:{}]-%s*:%s*{([^}]*)$")
+  local mark, pbraces = before:match("^(%S%S%S)%s*{([^}]*)$") -- (after any of the marks: <=> <|> ->> <<-)
+  local marks = {}
+  for _, m in pairs(markup.ALIGN) do
+    marks[vim.trim(m)] = true
+  end
+  pbraces = not in_header and marks[mark or ""] and pbraces or nil
+  if not pbraces and not in_header and not (lines[2] or ""):match("^|") then -- (a format's line, or a paragraph's own: "{...")
+    pbraces = before:match("^{([^}]*)$")
+  end
+  pbraces = pbraces or hbraces
+  local sbraces = not pbraces and before:match("%]{([^}]*)$")
+  if pbraces or sbraces then
     local pf = require("neoffice.paras")
     local used = {}
-    for _, a in ipairs((markup.attributes(pbraces))) do
+    for _, a in ipairs((markup.attributes(pbraces or sbraces))) do
       used[a.name or ""] = true
     end
-    local item = pbraces:match("([^,;]*)$")
-    local name, value = item:match("^%s*([%a_%-]+)%s*=%s*(%S*)$")
+    local item = (pbraces or sbraces):match("([^,;]*)$")
+    local name, value = item:match("^%s*([%a_%-]+)%s*=%s*(.*)$")
     local VALUES = {
       ["indent-left"] = { "0.5cm", "1cm", "1.27cm", "none" }, ["indent-right"] = { "0.5cm", "1cm", "none" },
       first = { "0.5cm", "1.27cm", "-0.5cm", "none" }, before = { "0pt", "6pt", "12pt", "none" },
       after = { "0pt", "6pt", "12pt", "none" }, line = { "single", "1.15", "1.5", "double", "none" },
+      size = { "9pt", "10pt", "11pt", "12pt", "14pt", "16pt" },
+      align = { "left", "center", "right", "justify", "none" },
     }
-    if name and VALUES[name] then
+    local keys = hbraces and pf.STYLE_KEYS or pbraces and pf.KEYS or markup.SPAN_KEYS
+    if hbraces then -- (a style says what it gives: no none)
+      for key, list in pairs(VALUES) do
+        VALUES[key] = vim.tbl_filter(function(v) return v ~= "none" end, list)
+      end
+      VALUES.bold, VALUES.italic = { "" }, { "" }
+    end
+    if name == "font" then
+      -- every word typed anywhere in its name ("new rom": Times New Roman); the document's fonts
+      -- first (those its lines name, and its own), then those installed, those starting so first
+      local typed = vim.trim(value:gsub('"', "")):lower()
+      local words = vim.split(typed, "%s+", { trimempty = true })
+      local function matches(family)
+        local low = family:lower()
+        for _, w in ipairs(words) do
+          if not low:find(w, 1, true) then
+            return false
+          end
+        end
+        return true
+      end
+      local installed, seen, ours = {}, {}, {}
+      for _, family in ipairs(M.fonts()) do
+        installed[family:lower()] = true
+      end
+      local function mine(family)
+        family = vim.trim(family or "")
+        if family ~= "" and family ~= "none" and not seen[family:lower()] then
+          seen[family:lower()], ours[#ours + 1] = true, family
+        end
+      end
+      local doc = neo().docs[buf]
+      if doc and doc.fmt.font_default then
+        mine(doc.fmt.font_default(doc.ctx).font)
+      end
+      if doc and doc.fmt.run_font then -- (those its text has: most used first)
+        local count, known = {}, {}
+        for _, props in pairs(doc.run) do
+          if known[props] == nil then
+            known[props] = doc.fmt.run_font(doc.ctx, props).font or false
+          end
+          local f = known[props]
+          if f then
+            count[f] = (count[f] or 0) + 1
+          end
+        end
+        local used = vim.tbl_keys(count)
+        table.sort(used, function(x, y) return count[x] > count[y] or count[x] == count[y] and x < y end)
+        for _, f in ipairs(used) do
+          mine(f)
+        end
+      end
+      for r, l in ipairs(api.nvim_buf_get_lines(buf, 0, -1, false)) do
+        if r ~= pos.line + 1 and l:find("font", 1, true) then
+          for v in l:gmatch('font%s*=%s*"([^"]+)"') do
+            mine(v)
+          end
+          for v in l:gmatch("font%s*=%s*([^,;}\"]+)") do
+            mine(v)
+          end
+        end
+      end
+      local function offer(family, sort, what)
+        add(markup.attr_value(family), #before - #value, KIND.EnumMember, what)
+        items[#items].sortText = sort .. family:lower()
+      end
+      for i, family in ipairs(ours) do -- (in their order: its default, then the most used)
+        if matches(family) then
+          offer(family, ("0%04d"):format(i), installed[family:lower()] and "in this document"
+            or "in this document (not installed here: shown in a similar font; Word and LibreOffice elsewhere may have it)")
+        end
+      end
+      for _, family in ipairs(M.fonts()) do
+        if not seen[family:lower()] and matches(family) then
+          offer(family, family:lower():sub(1, #typed) == typed and "1" or "2", "installed")
+        end
+      end
+    elseif name and VALUES[name] then
       for _, v in ipairs(VALUES[name]) do
         add(v, #before - #value, KIND.EnumMember, pf.DESCRIBE[name])
       end
     elseif not name then
       local typed = item:match("^%s*(.-)$")
-      for _, key in ipairs(pf.KEYS) do
+      for _, key in ipairs(keys) do
         if not used[key] then
-          for _, v in ipairs(VALUES[key]) do
+          if (key == "bold" or key == "italic") and hbraces then -- (said alone)
+            add(key, #before - #typed, KIND.Property, pf.DESCRIBE[key])
+          end
+          for _, v in ipairs(key == "font" and { "" } or (key ~= "bold" and key ~= "italic") and VALUES[key] or {}) do
             if v ~= "none" then
               add(key .. " = " .. v, #before - #typed, KIND.Property, pf.DESCRIBE[key])
             end
@@ -364,9 +523,127 @@ local function box_figure(buf, params, out)
   end
 end
 
+-- On a format's line: its attributes moved into the style of the paragraphs under it (the line at
+-- the top says so; the format's line says what is left of them, or goes). Nothing looks any
+-- different: paragraphs of that style elsewhere that had its values say them now. Offered only
+-- when that holds: the paragraphs under it all of one style (known: as the document has them,
+-- saved), listed at the top; none of that style that would change and can't say so (in a cell,
+-- a box).
+local function into_style(buf, params, out)
+  local markup, pf = require("neoffice.markup"), require("neoffice.paras")
+  local doc = neo().docs[buf]
+  local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
+  local header = markup.header(lines)
+  local r = params.range.start.line + 1
+  local line = lines[r] or ""
+  if not (doc and doc.header and header and doc.fmt.style_name) or r <= header.last or (lines[r + 1] or ""):match("^|") then
+    return
+  end
+  local f = line:find("^[<%-{]") and markup.para_line(line)
+  if not f or f.bad then
+    return
+  end
+  local moved = {}
+  for k, v in pairs(f.attrs) do
+    moved[k] = v ~= "none" and v or nil
+  end
+  moved.align = f.align
+  if not next(moved) then
+    return
+  end
+  local blocks, styles = neo().block_styles(buf)
+  local run, style -- (its paragraphs' format, and their style)
+  for k, b in ipairs(blocks) do
+    if b.first > r and b.format and not run then
+      run = b.format
+    end
+    local _, _, kind_at = markup.block(b.text)
+    if run and rawequal(b.format, run) and b.text ~= "" and not b.cell and not b.box and not kind_at then
+      if not styles[k] or (style and styles[k] ~= style) then
+        return
+      end
+      style = styles[k]
+    end
+  end
+  if not style then
+    return
+  end
+  local name = doc.fmt.style_name(doc.ctx, style)
+  local entry = vim.iter(header.styles):find(function(st) return st.name and st.name:lower() == name:lower() and st.attrs end)
+  if not entry then
+    return
+  end
+  local old, new = entry.attrs, vim.deepcopy(entry.attrs)
+  for k, v in pairs(moved) do
+    new[k] = v
+  end
+  local DEFAULT = { align = "left", line = "single" }
+  local edits = {}
+  local function replace(row, c1, c2, text)
+    edits[#edits + 1] = { range = { start = { line = row - 1, character = c1 }, ["end"] = { line = row - 1, character = c2 } }, newText = text }
+  end
+  -- the others of that style that had its values: said now
+  for k, b in ipairs(blocks) do
+    local own, start, kind_at, _, brace_at = markup.block(b.text)
+    local plain_para = not kind_at and not own.caption
+    if styles[k] == style and b.text ~= "" and not rawequal(b.format, run) and plain_para then
+      local eff = pf.apply(b.format or { attrs = {} }, own.align, own.para)
+      local adds = {}
+      for key in pairs(moved) do
+        local have = key == "align" and eff.align or eff.attrs[key]
+        if have == nil or have == "none" then
+          adds[key] = old[key] or DEFAULT[key] or (vim.tbl_contains(pf.LAYOUT, key) and "0cm") or nil
+        end
+      end
+      if next(adds) then
+        if b.cell or b.box then
+          return -- (it can't say so)
+        end
+        local row = b.first + (b.lead and 1 or 0)
+        local text = lines[row]
+        local mine = vim.tbl_extend("force", {}, own.para or {}, adds)
+        local align = own.align or mine.align
+        mine.align = nil
+        local braces = "{" .. pf.render(vim.tbl_extend("force", {}, mine, { align = not own.align and align or nil })) .. "} "
+        if brace_at then -- (its braces: with these too)
+          local close = text:find("} ", brace_at, true)
+          replace(row, brace_at - 1, close + 1, braces)
+        else
+          replace(row, start - 1, start - 1, braces)
+        end
+      end
+    elseif styles[k] == style and b.text ~= "" and not rawequal(b.format, run) and (b.cell or b.box) then
+      return
+    end
+  end
+  -- the style's line, and the format's
+  local hline = lines[entry.row]
+  local brace = hline:find("{", 1, true)
+  replace(entry.row, brace - 1, #hline, "{" .. pf.render_style(new) .. "}")
+  local left = {}
+  for k, v in pairs(f.attrs) do
+    left[k] = v == "none" and v or nil
+  end
+  local rest = pf.render(left)
+  local earlier = false
+  for row = header.last + 1, r - 1 do
+    earlier = earlier or (lines[row]:find("^[<%-{]") and markup.para_line(lines[row]) ~= nil)
+  end
+  if rest == "" and not earlier then
+    edits[#edits + 1] = { range = { start = { line = r - 1, character = 0 }, ["end"] = { line = r, character = 0 } }, newText = "" }
+  else
+    replace(r, 0, #line, "{" .. rest .. "}")
+  end
+  out[#out + 1] = {
+    title = ("Move this format into the style %s (nothing looks different)"):format(name), kind = "refactor.rewrite",
+    edit = { changes = { [params.textDocument.uri] = edits } },
+  }
+end
+
 local function code_actions(buf, params)
   local uri, out = params.textDocument.uri, {}
   box_figure(buf, params, out)
+  into_style(buf, params, out)
   for _, d in ipairs(attribute_diagnostics(buf)) do
     if d.data and d.range.start.line >= params.range.start.line and d.range.start.line <= params.range["end"].line then
       out[#out + 1] = {

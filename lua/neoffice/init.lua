@@ -29,6 +29,7 @@ M.config = {
   track_changes = nil, -- record your edits as tracked changes: true/false, nil = as the document says
   conceal = false, -- hide the formatting marks (except on the cursor line)
   show_tabs = true, -- show tabs as a faint → (they look like spaces otherwise, and aren't)
+  styles = true, -- the document's paragraph styles, at its top ("---" / "styles:" / "  Normal: {...}" / "---")
   images = true, -- show images in the buffer (needs Neovim's vim.ui.img and a terminal that supports it)
   lsp = true, -- a language server for documents: headings as symbols (gO), folding, hover on comments
   comment_text = false, -- each comment's author and text at the end of its line (:Neoffice comments text)
@@ -97,8 +98,13 @@ function M.paragraphs(lines, alone)
     end
     blanks = {}
   end
+  local header = markup.header(lines) -- (the document's styles, at its top: no paragraphs)
   for row, line in ipairs(lines) do
     local prev = out[#out]
+    if header and row <= header.last then
+      fenced = row == header.last or fenced -- (a blank line after it separates)
+      goto continue
+    end
     local fence, fence_attrs = markup.box_line(line)
     if fence then -- a box opens or closes (inside one, ":::" closes it; with braces, another opens)
       local was = box
@@ -114,7 +120,12 @@ function M.paragraphs(lines, alone)
       goto continue
     end
     box_of_row[row] = box
-    local para_line = not box and line:find("^[<%-]") and markup.para_line(line)
+    local para_line = not box and line:find("^[<%-{]") and not (lines[row + 1] or ""):match("^|") and markup.para_line(line)
+    if para_line and para_line.bad and line:sub(1, 1) == "{" and pcall(require("neoffice.tables").parse, markup.table_options(line) or "") then
+      empty_paragraphs(empty_after()) -- (a table's options with no table under it, deleted: nothing,
+      cut, fenced, table_start = true, true, nil -- neither text nor a format)
+      goto continue
+    end
     if para_line then -- the format of the paragraphs after it (see paras.lua)
       empty_paragraphs(empty_after())
       format, cut, fenced = para_line, true, true
@@ -414,6 +425,39 @@ local function pieces(buf, para)
     end
   end
 
+  -- the font and size its text is to have where it says nothing: its format's (a plain paragraph's),
+  -- else what most of its text has now (false: none of its own, its style's)
+  local fonts = {}
+  local own_of, known = doc.fmt.run_font or function() return {} end, {}
+  local function own(props) -- (once for each run's properties)
+    known[props] = known[props] or own_of(doc.ctx, props)
+    return known[props]
+  end
+  for _, key in ipairs(markup.SPAN_KEYS) do
+    if block.para then -- (none: its style's)
+      fonts[key] = block.para[key] or false
+    else
+      local weight, order, at, props_now = {}, {}, walker(runs), runs[1] and doc.run[runs[1][1]]
+      for _, ch in ipairs(chars) do
+        if ch.ch ~= "" and ch.ch ~= "\n" and not ch[key] then
+          local run = at(ch)
+          props_now = run and doc.run[run[1]] or props_now
+          local v = props_now and own(props_now)[key] or false
+          if weight[v] == nil then
+            order[#order + 1], weight[v] = v, 0
+          end
+          weight[v] = weight[v] + 1
+        end
+      end
+      for _, v in ipairs(order) do
+        if fonts[key] == nil or weight[v] > weight[fonts[key]] then
+          fonts[key] = v
+        end
+      end
+      fonts[key] = fonts[key] or false
+    end
+  end
+
   local out, e, parts = {}, 1, {} -- (parts: how many pieces of each deletion so far)
   local props = runs[1] and doc.run[runs[1][1]] -- text before the first run takes its properties
   if not props and not para.cell then -- (a new paragraph: its text as the paragraph next to it's)
@@ -510,15 +554,17 @@ local function pieces(buf, para)
       end
       -- the same formatting as the text before it: one piece (its text is collected, joined below)
       local last = out[#out]
+      assert(not ch.span_bad, ch.span_bad) -- (a span of text's attributes: right)
+      local font, size = ch.font or fonts.font, ch.size or fonts.size
       local same = last and type(last.text) == "table" and last.props == (props or nil) and last.link == ch.link
-        and last.insert == insert
+        and last.insert == insert and last.font == font and last.size == size
       for _, flag in ipairs(markup.FLAGS) do
         same = same and last[flag] == ch[flag]
       end
       if same then
         last.text[#last.text + 1] = ch.ch
       else
-        local piece = { text = { ch.ch }, props = props or nil, link = ch.link, insert = insert }
+        local piece = { text = { ch.ch }, props = props or nil, link = ch.link, insert = insert, font = font, size = size }
         for _, flag in ipairs(markup.FLAGS) do
           piece[flag] = ch[flag]
         end
@@ -545,6 +591,59 @@ local function pieces(buf, para)
 end
 
 -- A fingerprint of a paragraph's pieces: equal fingerprints mean the paragraph's XML is still right.
+-- Fonts and sizes, as shown: a paragraph's are what most of its text has (a plain paragraph's are
+-- its format's: `shown`, on its format's line; another's are kept as they are, unsaid), and text in
+-- another has them in its span ("[words]{font = Arial}"). A span's run_font, run_size: its text's
+-- own (see the formats); block.font_base: what the paragraph's style gives.
+local function fonts_of(block, spans, shown)
+  local base = block.font_base or {}
+  for _, key in ipairs(markup.SPAN_KEYS) do
+    local inherit = block.font_inherit or base -- (what text that says nothing shows)
+    local function value(s)
+      return s.text and not s.deletion and not (s.image or s.math or s.footnote or s.field) and (s["run_" .. key] or inherit[key] or base[key]) or nil
+    end
+    local function same(a, b) -- (as measured: a font whatever its case)
+      return pformat.measure(key, a) == pformat.measure(key, b)
+    end
+    local weight, order, main = {}, {}, nil -- (by measure: its most common spelling)
+    for _, s in ipairs(spans) do
+      local v = value(s)
+      if v then
+        local m = pformat.measure(key, v) or v
+        if not weight[m] then
+          order[#order + 1], weight[m] = m, { n = 0, spelling = {} }
+        end
+        weight[m].n = weight[m].n + #s.text
+        weight[m].spelling[v] = (weight[m].spelling[v] or 0) + #s.text
+      end
+    end
+    for _, m in ipairs(order) do
+      if not main or weight[m].n > weight[main].n then
+        main = m
+      end
+    end
+    if main then
+      local best
+      for v, n in pairs(weight[main].spelling) do
+        if not best or n > weight[main].spelling[best] or n == weight[main].spelling[best] and v < best then
+          best = v
+        end
+      end
+      main = best
+    end
+    if shown then
+      block.para = block.para or {}
+      -- (what it shows, wherever it comes from; unsaid if it is its style's: see the header)
+      block.para[key] = main and not same(main, base[key]) and main or nil
+      block.no_text = not main or nil -- (no text, so no font: whatever the paragraphs around it have)
+    end
+    for _, s in ipairs(spans) do
+      local v = value(s)
+      s[key] = v and not same(v, main) and v or nil
+    end
+  end
+end
+
 local function signature(block, list)
   local l = block.list
   local out = { table.concat({ tostring(block.heading), tostring(block.title), tostring(block.quote), tostring(block.align), tostring(block.caption),
@@ -589,12 +688,9 @@ local function setup_buffer(buf)
     if M.config.conceal then
       vim.opt_local.conceallevel = 2
     end
-    if M.config.show_tabs then -- (in this window, for this buffer only: as :setlocal; in the marks' gray)
+    if M.config.show_tabs then -- (in this window, for this buffer only: as :setlocal; drawn in the marks' gray by M.decorate)
       vim.opt_local.list = true
       vim.opt_local.listchars = "tab:→ "
-      if not vim.wo.winhighlight:find("Whitespace:", 1, true) then
-        vim.opt_local.winhighlight:append("Whitespace:NeofficeMark")
-      end
     end
   end
   local group = api.nvim_create_augroup("neoffice_" .. buf, {})
@@ -617,7 +713,11 @@ local function setup_buffer(buf)
     window()
   end
   require("neoffice.images").attach(buf, group)
-  M.decorate(buf)
+  vim.schedule(function() -- (once the text shows: opening doesn't wait for the colours)
+    if api.nvim_buf_is_valid(buf) then
+      M.decorate(buf)
+    end
+  end)
 end
 
 -- Convert a file with LibreOffice (to = "docx", "doc:MS Word 97", ...) into `dir`; returns the new path.
@@ -832,6 +932,9 @@ local function open(buf, path)
       end)
     end
     local candidates = {}
+    for k, para in ipairs(paras) do -- (fonts first: they are part of a paragraph's format)
+      fonts_of(para.block, para.spans, plain(para.block) and not cells[k] and not para.box)
+    end
     for k, para in ipairs(paras) do
       local b = para.block
       if not cells[k] and not para.box and plain(b) then
@@ -847,6 +950,9 @@ local function open(buf, path)
     local run = { attrs = {} }
     for i, k in ipairs(candidates) do
       local b = paras[k].block
+      if b.no_text then -- (only images...: the font and size of the run it is in)
+        b.para = vim.tbl_extend("force", b.para or {}, { font = run.attrs.font, size = run.attrs.size })
+      end
       local own = { align = b.align, attrs = b.para or {} }
       local function shared(j) -- (the j-th next one has it too)
         local other = candidates[i + j] and paras[candidates[i + j]].block
@@ -942,6 +1048,28 @@ local function open(buf, path)
   -- A table is a pipe table: a line per row, "|" between cells and "<br>" between the paragraphs
   -- of a cell, and a line of dashes after its first row.
   local lines, marks, started, rows, columns, empty_rows = {}, {}, {}, {}, 0, {}
+  -- the styles its paragraphs have, at its top (only in a document with text): its default one
+  -- first, then as they come
+  doc.header = nil
+  if M.config.styles ~= false and doc.fmt.style_of and last_text > 0 then
+    local seen, order = {}, {}
+    for _, para in ipairs(paras) do
+      local id = para.node and doc.fmt.style_of(ctx, para.node)
+      if id and not seen[id] then
+        seen[id], order[#order + 1] = true, id
+      end
+    end
+    local default = doc.fmt.style_of(ctx, xml.elem(doc.fmt.MAIN == "content.xml" and "text:p" or "w:p"))
+    table.sort(order, function(a, b) return (a == default and 0 or 1) < (b == default and 0 or 1) end)
+    local shown = {}
+    doc.header = {}
+    for _, id in ipairs(order) do
+      local entry = { id = id, name = doc.fmt.style_name(ctx, id), attrs = doc.fmt.style_view(ctx, id) }
+      shown[#shown + 1], doc.header[entry.name:lower()] = entry, entry
+    end
+    vim.list_extend(lines, markup.render_header(shown))
+    lines[#lines + 1] = ""
+  end
   for k, para in ipairs(paras) do
     local r, at
     local cell, before, after = cells[k], cells[k - 1], cells[k + 1]
@@ -973,8 +1101,7 @@ local function open(buf, path)
     else
       if format_before[k] then -- (the format of the paragraphs from here on: see paras.lua)
         local f = format_before[k]
-        local attrs = pformat.render(f.attrs)
-        lines[#lines + 1] = vim.trim(markup.ALIGN[f.align or "left"]) .. (attrs ~= "" and " {" .. attrs .. "}" or "")
+        lines[#lines + 1] = "{" .. pformat.render(vim.tbl_extend("force", {}, f.attrs, { align = f.align })) .. "}"
       end
       local box = para.box -- (a box's paragraphs: between its lines, "::: {...}" and ":::")
       if box and (not paras[k - 1] or paras[k - 1].box ~= box) then
@@ -1081,7 +1208,7 @@ local function open(buf, path)
   end
   doc.sigs = {}
   for k, block in ipairs(M.paragraphs(lines, alone)) do
-    assert(block.text == texts[k], "neoffice: paragraph layout mismatch") -- (see markup.render)
+    assert(block.text == texts[k], "neoffice: paragraph layout mismatch" .. (vim.env.NEOFFICE_DEBUG and (" " .. k .. ": " .. vim.inspect(block.text) .. " ~= " .. vim.inspect(texts[k])) or "")) -- (see markup.render)
     doc.sigs[k] = signature(pieces(buf, block))
   end
   vim.bo[buf].modified = false
@@ -1172,6 +1299,28 @@ function M.decorate(buf)
       end
     end
   end
+  if M.config.show_tabs then -- tabs: a → in the marks' gray, over the one 'list' shows (whatever colours the
+    -- window is given: some colour schemes set its 'winhighlight' as they like)
+    for r, line in ipairs(lines) do
+      local c = line:find("\t", 1, true)
+      while c do
+        api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, c - 1, { virt_text = { { "→", "NeofficeMark" } }, virt_text_pos = "overlay", priority = 150 })
+        c = line:find("\t", c + 1, true)
+      end
+    end
+  end
+  local header = markup.header(lines) -- the styles at its top: their names, and the rest as formatting
+  for r = 1, header and header.last or 0 do
+    local line = lines[r]
+    local s, e = line:find("^%s+[^:{}]-%s*:")
+    if s and r > 2 and r < header.last then
+      local first = line:find("%S")
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, first - 1, { end_col = e - 1, hl_group = "NeofficeStyleName", priority = 150 })
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, e - 1, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
+    else
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
+    end
+  end
   for r, line in ipairs(lines) do -- a table's options (above it); a format's line (its mark, its attributes)
     local fence, attrs = markup.box_line(line)
     if fence then -- (a box's line: its ::: as a table's |, its attributes as formatting)
@@ -1183,7 +1332,7 @@ function M.decorate(buf)
     end
     if line:sub(1, 1) == "{" and markup.table_options(line) and (lines[r + 1] or ""):match("^|") then
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = #line, hl_group = "NeofficeTableOptions", priority = 150 })
-    elseif line:find("^[<%-]") and markup.para_line(line) then
+    elseif line:find("^[<%-{]") and not (lines[r + 1] or ""):match("^|") and markup.para_line(line) then
       local brace = line:find("{", 1, true)
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = brace and brace - 1 or #line, hl_group = "NeofficeAlign", priority = 250 })
       if brace then
@@ -1199,7 +1348,7 @@ function M.decorate(buf)
     local block, text_start = markup.block(lines[para.first])
     -- the alignment mark (above Markdown's highlighting, which takes ">..." for a quote)
     local own, own_start, _, align_at = markup.block(para.text)
-    if own.align then -- (on the line after its floating images, if they are on one of their own)
+    if own.align and align_at then -- (its mark; on the line after its floating images, if they are on one of their own)
       local row = para.first - 1 + (para.lead and 1 or 0)
       local col = (para.col or 0) + align_at - 1
       api.nvim_buf_set_extmark(buf, NS_DECOR, row, col, {
@@ -1270,8 +1419,8 @@ function M.decorate_marks(buf, para, lines)
   -- what isn't text is formatting (marks, attributes, a backslash...): in the marks' gray. Not what
   -- says what kind of paragraph it is ("# ", "% ", "- ", "> ", "Table: "): in that kind's colour
   local text = para.text
-  local _, text_start, _, align_at = markup.block(text)
-  local at = (align_at or text_start) - 1
+  local _, text_start, _, align_at, brace_at = markup.block(text)
+  local at = (align_at or brace_at or text_start) - 1 -- (from its mark, or its braces: "{size = 9pt} ...")
   local function gray(from, to) -- (bytes from..to-1 of the text)
     if to > from and text:sub(from + 1, to):find("%S") then
       local r1, c1 = position(from)
@@ -1331,7 +1480,8 @@ end
 local function spans_of(chars, inside, flags)
   return vim.tbl_map(function(c)
     local span = { text = c.ch ~= "\n" and c.ch or nil, link = c.link, line_break = c.ch == "\n" or nil,
-      image = c.image, math = c.math, footnote = c.footnote, field = c.field, page_break = c.page_break }
+      image = c.image, math = c.math, footnote = c.footnote, field = c.field, page_break = c.page_break,
+      font = c.font, size = c.size }
     for _, flag in ipairs(markup.FLAGS) do
       span[flag] = c[flag]
       if flags and inside(c) and flags[flag] ~= nil then
@@ -1496,6 +1646,23 @@ local function match_lines(old, new)
   end
   return old_of, deleted
 end
+
+-- The buffer's paragraphs, and the style of each that the document has as it is (unchanged since
+-- read or written; nil for one edited or new): for the language server.
+function M.block_styles(buf)
+  local doc = M.docs[buf]
+  local blocks = M.blocks(buf)
+  local out = {}
+  if doc and doc.fmt.style_of then
+    local old_of = match_lines(doc.texts, vim.tbl_map(function(p) return p.text end, blocks))
+    for k in ipairs(blocks) do
+      local node = old_of[k] and doc.paras[old_of[k]]
+      out[k] = node and doc.fmt.style_of(doc.ctx, node) or nil
+    end
+  end
+  return blocks, out
+end
+
 
 local PARAGRAPHS = { ["w:p"] = true, ["text:p"] = true, ["text:h"] = true }
 local CONTENT = vim.tbl_extend("force", PARAGRAPHS, { ["w:tbl"] = true, ["text:list"] = true, ["text:list-item"] = true, ["table:table"] = true })
@@ -1736,6 +1903,28 @@ function M.save(buf, target)
 
     -- 1. Work out every paragraph first: if anything is wrong (a missing image, an equation that
     -- can't be converted), nothing changes.
+    -- the header's styles: what changed in each (an error if a line isn't right, or names a style
+    -- the document hasn't); the header deleted, or a style's line, changes nothing
+    local restyle = {} -- (style id -> { key = value or false })
+    local header = doc.header and markup.header(api.nvim_buf_get_lines(buf, 0, -1, false))
+    for _, st in ipairs(header and header.styles or {}) do
+      assert(not st.bad, ("the styles at the top, line %d: %s"):format(st.row, st.bad or ""))
+      local known = doc.header[st.name:lower()]
+      local id = known and known.id or doc.fmt.style_id(doc.ctx, st.name)
+      assert(id, ("not a paragraph style of this document: %s (the styles at the top, line %d)"):format(st.name, st.row))
+      local old = known and known.attrs or doc.fmt.style_view(doc.ctx, id)
+      local changes = {}
+      for _, key in ipairs(pformat.STYLE_KEYS) do
+        if not pformat.same_style_value(key, old[key], st.attrs[key]) then
+          changes[key] = st.attrs[key] or false
+        end
+      end
+      if next(changes) then
+        restyle[id] = changes
+      end
+      st.id = id
+    end
+
     local plans, equations = {}, {}
     for k, block in ipairs(blocks) do
       local kind, list = pieces(buf, block)
@@ -1782,6 +1971,28 @@ function M.save(buf, target)
     end
     local restore = checkpoint(ctx, notes)
     local written, failure = pcall(function()
+    for id, changes in pairs(restyle) do -- the styles first (what the paragraphs are written against)
+      doc.fmt.set_style(ctx, id, changes)
+    end
+    -- (a style based on one that changed gives what its line says still: said by it, then)
+    for _ = 1, next(restyle) and 3 or 0 do
+      local pinned = false
+      for _, st in ipairs(header.styles) do
+        local now, pin = doc.fmt.style_view(ctx, st.id), {}
+        for _, key in ipairs(pformat.STYLE_KEYS) do
+          if not pformat.same_style_value(key, now[key], st.attrs[key]) then
+            pin[key] = st.attrs[key] or false
+          end
+        end
+        if next(pin) then -- (it looks as it did: its paragraphs needn't be written again)
+          doc.fmt.set_style(ctx, st.id, pin)
+          pinned = true
+        end
+      end
+      if not pinned then
+        break
+      end
+    end
     local layout = require("neoffice.tables").start(doc.fmt, ctx, vim.tbl_map(function(plan)
       return { cell = plan.cell, node = plan.old and doc.paras[plan.old] }
     end, plans), M.cell_of)
@@ -1855,7 +2066,9 @@ function M.save(buf, target)
       outer = not plan.box and node or outer
       seps[k] = plan.old and doc.caption_seps[plan.old] or nil
       written_as[k] = plan.old and doc.caption_as[plan.old] or nil
-      if not plan.old or plan.sig ~= doc.sigs[plan.old] then
+      -- (a paragraph whose style changed: written again, so what it says of its own is against it)
+      local restyled = next(restyle) and node and plan.old and not plan.cell and restyle[doc.fmt.style_of(ctx, node)]
+      if not plan.old or plan.sig ~= doc.sigs[plan.old] or restyled then
         plan.written = true
         local list = plan.pieces
         local kind = plan.block.caption
@@ -1949,6 +2162,12 @@ function M.save(buf, target)
       live.changes[ch] = true
     end
     local entries = doc.fmt.save(ctx, live)
+    for name, bytes in pairs(entries) do -- (never a part Word or LibreOffice couldn't read: nothing is written then)
+      if type(bytes) == "string" and (name:match("%.xml$") or name:match("%.rels$")) then
+        local ok, why = xml.check(bytes)
+        assert(ok, ("neoffice would have written a broken %s (%s): this is a bug in neoffice, please report it"):format(name, why))
+      end
+    end
     if next(entries) then -- the base gets the changes...
       zip.write(doc.base, entries)
       doc.synced = false
@@ -1968,6 +2187,10 @@ function M.save(buf, target)
       M.place(buf, "object", p.data, p.new.row, p.new.col, p.new.end_row, p.new.end_col)
     end
     doc.paras, doc.texts, doc.sigs, doc.caption_seps, doc.boxes, doc.caption_as = paras, texts, {}, seps, box_keys, written_as
+    for _, st in ipairs(next(restyle) and header.styles or {}) do -- (the styles as they now are: what the header is compared with next)
+      local name = doc.fmt.style_name(ctx, st.id)
+      doc.header[name:lower()] = { id = st.id, name = name, attrs = doc.fmt.style_view(ctx, st.id) }
+    end
     for k, block in ipairs(blocks) do -- (those written may have new marks: new images, equations...)
       doc.sigs[k] = plans[k].written and signature(pieces(buf, block)) or plans[k].sig
     end

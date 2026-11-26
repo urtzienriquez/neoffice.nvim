@@ -21,7 +21,7 @@ local FLAGS = { "b", "i", "u", "s", "h", "sup", "sub" } -- (see markup.FLAGS)
 local ALIGN = { center = "center", ["end"] = "right", right = "right", justify = "justify" } -- fo:text-align
 local QUOTES = { Quotations = true, Block_20_Text = true, Quote = true, Intense_20_Quote = true }
 local CAPTIONS = { Caption = true, Table = true, Figure = true, Illustration = true, Drawing = true }
-local caption_style, para_attrs, style_attrs -- (below)
+local caption_style, para_attrs, style_attrs, automatic -- (below)
 
 -- The formatting { b, i, u, sup, sub } of a text style, following its parent styles, starting
 -- from `inherited` (that of the enclosing text).
@@ -216,7 +216,7 @@ para_attrs = function(ctx, p)
   local style = ctx.auto_paras[xml.attr(p, "text:style-name") or ""]
   local out = raw_attrs(style and xml.child(style, "style:paragraph-properties"))
   local base = style_attrs(ctx, style and xml.attr(style, "style:parent-style-name") or xml.attr(p, "text:style-name"))
-  for _, key in ipairs(paras.KEYS) do
+  for _, key in ipairs(paras.LAYOUT) do
     if out[key] and paras.measure(key, out[key]) == paras.measure(key, base[key] or (key == "line" and "single" or "0cm")) then
       out[key] = nil
     end
@@ -231,6 +231,180 @@ local function layout(ctx, p)
   return ALIGN[xml.attr(props, "fo:text-align") or ""], xml.attr(props, "fo:break-before") == "page"
 end
 
+-- Fonts (see fonts_of in init.lua): a span's own font and size (its text styles', following their
+-- parents), and what a paragraph's style gives (following its parents, and the default style).
+-- A font by its family's name (style:font-name names a font-face, which says its family); sizes as
+-- shown ("11pt").
+local function unquote(s)
+  return (s:gsub("^%s*['\"](.*)['\"]%s*$", "%1"))
+end
+local function first_family(family) -- (of a list, the first preferred: "'Times New Roman', serif")
+  local first = vim.trim(unquote(family:match("^%s*('[^']*')") or family:match('^%s*("[^"]*")') or family:match("^([^,]*)")))
+  return first ~= "" and first or nil
+end
+local function font_families(ctx)
+  if not ctx.font_family then
+    ctx.font_family = {}
+    for _, root in ipairs({ ctx.styles_doc, ctx.root }) do
+      for _, face in ipairs(xml.collect(root, { ["style:font-face"] = true }, { ["office:body"] = true })) do
+        local name, family = xml.attr(face, "style:name"), xml.attr(face, "svg:font-family")
+        if name then
+          ctx.font_family[name] = family and first_family(family) or name
+        end
+      end
+    end
+  end
+  return ctx.font_family
+end
+local function props_font(ctx, props, out) -- (text properties, over what `out` says)
+  if props then
+    local paras = require("neoffice.paras")
+    local name, family = xml.attr(props, "style:font-name"), xml.attr(props, "fo:font-family")
+    if name then
+      out.font = font_families(ctx)[name] or name
+    elseif family then
+      out.font = first_family(family) or out.font
+    end
+    local size = xml.attr(props, "fo:font-size")
+    local percent = size and tonumber(size:match("^([%d.]+)%%$") or "")
+    if percent then -- (of what it had)
+      local had = out.size and markup.cm(out.size)
+      out.size = had and paras.pt(had * percent / 100 * 72 / 2.54) or out.size
+    elseif size and markup.cm(size) then
+      out.size = paras.pt(markup.cm(size) * 72 / 2.54)
+    end
+  end
+  return out
+end
+local function text_style_font(ctx, name, out, depth)
+  local style = name and ctx.styles[name]
+  if not style or (depth or 0) > 10 then
+    return out
+  end
+  out = text_style_font(ctx, xml.attr(style, "style:parent-style-name"), out, (depth or 0) + 1)
+  return props_font(ctx, xml.child(style, "style:text-properties"), out)
+end
+function M.run_font(ctx, props) -- (props: a span's style, or the styles of the spans it is in)
+  local chain = type(props) == "table" and props or { props }
+  local key = table.concat(chain, "\0")
+  ctx.run_fonts = ctx.run_fonts or {}
+  if not ctx.run_fonts[key] then -- (a style's fonts don't change: new styles get new names)
+    local out = {}
+    for _, name in ipairs(chain) do
+      out = text_style_font(ctx, name, out)
+    end
+    ctx.run_fonts[key] = out
+  end
+  return vim.deepcopy(ctx.run_fonts[key])
+end
+function M.font_default(ctx) -- (the document's: its default paragraph style's, Standard)
+  return M.font_base(ctx, nil)
+end
+function M.font_base(ctx, p)
+  local name = p and M.style_of(ctx, p) or "Standard" -- (its named style's: an automatic one is its own formatting)
+  ctx.font_bases = ctx.font_bases or {}
+  if not ctx.font_bases[name] then
+    ctx.font_bases[name] = M.font_base_of(ctx, name)
+  end
+  return vim.deepcopy(ctx.font_bases[name])
+end
+-- (what its text shows where it says nothing: its automatic style's font, if that has one, else
+-- its named style's, as LibreOffice does)
+function M.font_inherited(ctx, p)
+  local name = xml.attr(p, "text:style-name") or "Standard"
+  ctx.font_inherits = ctx.font_inherits or {}
+  if not ctx.font_inherits[name] then
+    ctx.font_inherits[name] = M.font_base_of(ctx, name)
+  end
+  return vim.deepcopy(ctx.font_inherits[name])
+end
+function M.font_base_of(ctx, name)
+  style_attrs(ctx, nil) -- (the paragraph styles, by name)
+  local chain, cur = {}, name
+  for _ = 1, 10 do
+    if not cur or not ctx.para_style_el[cur] then
+      break
+    end
+    chain[#chain + 1] = ctx.para_style_el[cur]
+    cur = xml.attr(ctx.para_style_el[cur], "style:parent-style-name")
+  end
+  local default = ctx.para_style_el[false]
+  local out = props_font(ctx, default and xml.child(default, "style:text-properties"), {})
+  for k = #chain, 1, -1 do
+    out = props_font(ctx, xml.child(chain[k], "style:text-properties"), out)
+  end
+  return out
+end
+-- (a font-face for a font, so a style can name it: the document's own if it has one)
+local function font_face(ctx, family, in_styles) -- (in content.xml, or in styles.xml for a style there)
+  local root
+  if in_styles then
+    root = xml.find(ctx.styles_doc, "office:document-styles")
+  else
+    root = automatic(ctx).parent -- (<office:document-content>)
+  end
+  local decls = xml.child(root, "office:font-face-decls")
+  for _, face in ipairs(decls and xml.collect(decls, { ["style:font-face"] = true }) or {}) do
+    local name = xml.attr(face, "style:name")
+    if name and (font_families(ctx)[name] or name):lower() == family:lower() then
+      return name
+    end
+  end
+  if not decls then -- (before the styles)
+    local first = xml.child(root, "office:styles") or xml.child(root, "office:automatic-styles")
+    decls = xml.append(root, xml.elem("office:font-face-decls"), first and xml.index(first) or nil)
+  end
+  local name = family -- (its name: the family's, unless another font has it)
+  if font_families(ctx)[name] and font_families(ctx)[name]:lower() ~= family:lower() then
+    name = family .. " (neoffice)"
+  end
+  xml.append(decls, xml.elem("style:font-face", { { "style:name", name },
+    { "svg:font-family", family:find("[%s,;]") and "'" .. family .. "'" or family } }))
+  ctx.font_family[name] = family
+  return name
+end
+M.font_face = font_face
+
+-- A paragraph's named style (not the automatic one LibreOffice gives its own formatting).
+function M.style_of(ctx, p)
+  local name = xml.attr(p, "text:style-name")
+  local auto = name and ctx.auto_paras[name]
+  if auto then
+    name = xml.attr(auto, "style:parent-style-name")
+  end
+  return name or "Standard"
+end
+local function text_align(props) -- (fo:text-align, as a name: "left" for start/left)
+  local v = props and xml.attr(props, "fo:text-align")
+  return v and (ALIGN[v] or "left") or nil
+end
+function M.style_align(ctx, name) -- (what alignment a style gives: nil for left)
+  ctx.style_aligns = ctx.style_aligns or {}
+  local key = name or false
+  if ctx.style_aligns[key] == nil then
+    style_attrs(ctx, nil)
+    local found, cur = nil, name
+    for _ = 1, 10 do
+      local el = cur and ctx.para_style_el[cur]
+      if not el then
+        break
+      end
+      found = found or text_align(xml.child(el, "style:paragraph-properties"))
+      cur = xml.attr(el, "style:parent-style-name")
+    end
+    local default = ctx.para_style_el[false]
+    found = found or text_align(default and xml.child(default, "style:paragraph-properties"))
+    ctx.style_aligns[key] = found ~= "left" and found or false
+  end
+  return ctx.style_aligns[key] or nil
+end
+local function own_align(ctx, p) -- (its alignment, if not its style's: "left" too, then)
+  local auto = ctx.auto_paras[xml.attr(p, "text:style-name") or ""]
+  local base = M.style_align(ctx, M.style_of(ctx, p)) or "left"
+  local have = text_align(auto and xml.child(auto, "style:paragraph-properties")) or base
+  return have ~= base and have or nil
+end
+
 -- The block of a paragraph (see markup.prefix).
 local function block_of(ctx, p)
   local list, block = list_of(ctx, p), {}
@@ -243,8 +417,9 @@ local function block_of(ctx, p)
   elseif list then
     block = { list = list }
   end
-  block.align = layout(ctx, p)
+  block.align = own_align(ctx, p)
   block.caption_style = based_on(ctx, p, CAPTIONS) or nil -- (see captions in init.lua)
+  block.font_base, block.font_inherit, block.font_default = M.font_base(ctx, p), M.font_inherited(ctx, p), M.font_default(ctx)
   if not (block.heading or block.title or block.quote or block.list) then -- (a plain one: its own format, see paras.lua)
     block.para = para_attrs(ctx, p)
   end
@@ -292,7 +467,8 @@ local function read_para(ctx, p)
   local function walk(node, f)
     local function text(s)
       if s ~= "" then
-        add(vim.tbl_extend("force", flags(ctx, nil, f), { text = s, props = f.style, link = f.link }))
+        local own = M.run_font(ctx, f.style)
+        add(vim.tbl_extend("force", flags(ctx, nil, f), { text = s, props = f.style, link = f.link, run_font = own.font, run_size = own.size }))
       end
     end
     local k = 0
@@ -527,7 +703,7 @@ function M.first_para(ctx)
   return xml.append(xml.find(ctx.root, "office:text"), xml.elem("text:p"))
 end
 
-local function automatic(ctx) -- <office:automatic-styles> (created if needed)
+automatic = function(ctx) -- <office:automatic-styles> (created if needed)
   if not ctx.auto then
     local body = xml.find(ctx.root, "office:body")
     ctx.auto = xml.append(body.parent, xml.elem("office:automatic-styles"), xml.index(body))
@@ -659,17 +835,28 @@ end
 -- The style to use for a piece: its original one, or a copy with bold/italic/underline changed.
 -- The styles of the spans for a piece (nested, outermost first): its original ones, or with the
 -- innermost a copy with bold/italic/... changed.
-local function style_for(ctx, piece)
+local function style_for(ctx, piece, base, inherit)
   local chain = type(piece.props) == "table" and piece.props or { piece.props }
   local outer, inner, inherited = vim.list_slice(chain, 1, #chain - 1), chain[#chain], {}
   for _, name in ipairs(outer) do
     inherited = flags(ctx, name, inherited)
   end
   local have = flags(ctx, inner, inherited)
-  if vim.iter(FLAGS):all(function(k) return have[k] == piece[k] end) then
+  -- its font and size: only if what it shows changes (to the paragraph style's for none, said)
+  local paras, fonts = require("neoffice.paras"), {}
+  local own = M.run_font(ctx, chain)
+  base, inherit = base or {}, inherit or base or {}
+  for _, key in ipairs({ "font", "size" }) do
+    local want = piece[key]
+    if want ~= nil and paras.measure(key, want or base[key]) ~= paras.measure(key, own[key] or inherit[key] or base[key]) then
+      fonts[key] = want or base[key] or false
+    end
+  end
+  if vim.iter(FLAGS):all(function(k) return have[k] == piece[k] end) and not fonts.font and not fonts.size then
     return chain
   end
   local key = table.concat(vim.tbl_map(function(k) return tostring(piece[k]) end, FLAGS), "|") .. "|" .. (inner or "")
+    .. "|" .. tostring(fonts.font) .. "|" .. tostring(fonts.size)
   if not ctx.made[key] then
     automatic(ctx)
     local base = inner and ctx.styles[inner]
@@ -697,6 +884,15 @@ local function style_for(ctx, piece)
     xml.set_attr(props, "style:text-line-through-style", piece.s and "solid" or "none")
     xml.set_attr(props, "style:text-line-through-type", piece.s and "single" or nil)
     xml.set_attr(props, "fo:background-color", piece.h and "#" .. (markup.COLORS[piece.h] or piece.h:gsub("^#", "")) or "transparent")
+    if fonts.font ~= nil then -- (false: none known to say: the paragraph style's)
+      xml.set_attr(props, "style:font-name", fonts.font and font_face(ctx, fonts.font) or nil)
+      xml.set_attr(props, "fo:font-family", nil)
+    end
+    if fonts.size ~= nil then
+      for _, attr in ipairs({ "fo:font-size", "style:font-size-asian", "style:font-size-complex" }) do
+        xml.set_attr(props, attr, fonts.size or nil)
+      end
+    end
     xml.append(ctx.auto, style)
     ctx.styles[name], ctx.made[key] = style, name
   end
@@ -855,13 +1051,13 @@ local function set_para(ctx, p, want)
   local auto = ctx.auto_paras[xml.attr(p, "text:style-name") or ""]
   local base = style_attrs(ctx, auto and xml.attr(auto, "style:parent-style-name") or xml.attr(p, "text:style-name"))
   want = vim.deepcopy(want) -- (a value its style gives already: none of its own)
-  for _, key in ipairs(paras.KEYS) do
+  for _, key in ipairs(paras.LAYOUT) do
     if want[key] and want[key] ~= "none" and paras.measure(key, want[key]) == paras.measure(key, base[key] or (key == "line" and "single" or "0cm")) then
       want[key] = nil
     end
   end
   local changes = {}
-  for _, key in ipairs(paras.KEYS) do
+  for _, key in ipairs(paras.LAYOUT) do
     if paras.measure(key, have[key]) ~= paras.measure(key, want[key]) then
       local value = want[key] ~= "none" and want[key] or nil
       if key == "line" and value then
@@ -901,14 +1097,18 @@ local function set_para(ctx, p, want)
     xml.append(automatic(ctx), style)
     ctx.made[key], ctx.auto_paras[new] = new, style
     ctx.parent_style[new] = xml.attr(style, "style:parent-style-name") or false
+    if ctx.para_style_el then -- (known as a paragraph style: its font, see font_base)
+      ctx.para_style_el[new] = style
+    end
   end
   xml.set_attr(p, "text:style-name", ctx.made[key])
 end
 
 -- Give a paragraph this alignment and page break (when they changed), through an automatic style.
-local ALIGN_VALUE = { center = "center", right = "end", justify = "justify" }
-local function set_layout(ctx, p, align, page)
-  local have_align, have_page = layout(ctx, p)
+local ALIGN_VALUE = { center = "center", right = "end", justify = "justify", left = "start" }
+local function set_layout(ctx, p, align, page) -- (align: nil for its style's)
+  local _, have_page = layout(ctx, p)
+  local have_align = own_align(ctx, p)
   if have_align == align and have_page == page then
     return
   end
@@ -926,15 +1126,116 @@ local function set_layout(ctx, p, align, page)
     until ctx.parent_style[new] == nil
     xml.set_attr(style, "style:name", new)
     local props = xml.child(style, "style:paragraph-properties") or xml.append(style, xml.elem("style:paragraph-properties"), 1)
-    if have_align ~= align then
-      xml.set_attr(props, "fo:text-align", ALIGN_VALUE[align])
+    if have_align ~= align then -- (what it shows: its own, or its style's again)
+      xml.set_attr(props, "fo:text-align", ALIGN_VALUE[align or M.style_align(ctx, M.style_of(ctx, p)) or "left"])
     end
     xml.set_attr(props, "fo:break-before", page and "page" or nil)
     xml.append(automatic(ctx), style)
     ctx.made[key], ctx.auto_paras[new] = new, style
     ctx.parent_style[new] = xml.attr(style, "style:parent-style-name") or false
+    if ctx.para_style_el then -- (known as a paragraph style: its font, see font_base)
+      ctx.para_style_el[new] = style
+    end
   end
   xml.set_attr(p, "text:style-name", ctx.made[key])
+end
+
+-- ── Styles (the document's header: see init.lua) ───────────────────────────
+-- A paragraph style's name (as LibreOffice shows it: "Text Body"), and what it gives (following
+-- its parents, and the default style): { font, size, align, bold, italic, and paras.LAYOUT }.
+function M.style_name(ctx, name)
+  style_attrs(ctx, nil)
+  local el = name and ctx.para_style_el[name]
+  local shown = el and xml.attr(el, "style:display-name")
+  shown = shown or (name or "Standard"):gsub("_(%x%x)_", function(hex) return string.char(tonumber(hex, 16)) end)
+  return shown
+end
+function M.paragraph_styles(ctx) -- (the names of all its named paragraph styles)
+  style_attrs(ctx, nil)
+  local out = {}
+  for name in pairs(ctx.para_style_el) do
+    if name and not ctx.auto_paras[name] then
+      out[#out + 1] = M.style_name(ctx, name)
+    end
+  end
+  table.sort(out)
+  return out
+end
+function M.style_id(ctx, shown) -- (by its name, whatever its case: a named style, in styles.xml)
+  style_attrs(ctx, nil)
+  for name, el in pairs(ctx.para_style_el) do
+    if name and not ctx.auto_paras[name] and (M.style_name(ctx, name):lower() == shown:lower() or name:lower() == shown:lower()) then
+      return name, el
+    end
+  end
+end
+function M.style_view(ctx, name)
+  local paras = require("neoffice.paras")
+  local out = vim.deepcopy(style_attrs(ctx, name))
+  for _, key in ipairs(paras.LAYOUT) do -- (the defaults: unsaid)
+    if out[key] and paras.measure(key, out[key]) == paras.measure(key, key == "line" and "single" or "0cm") then
+      out[key] = nil
+    end
+  end
+  local font = M.font_base_of(ctx, name)
+  out.font, out.size = font.font, font.size
+  out.align = M.style_align(ctx, name)
+  local weight, slant -- (the first of its chain that says, else the default style)
+  local cur = name
+  for _ = 1, 10 do
+    local el = cur and ctx.para_style_el[cur]
+    if not el then
+      break
+    end
+    local props = xml.child(el, "style:text-properties")
+    weight = weight or (props and xml.attr(props, "fo:font-weight"))
+    slant = slant or (props and xml.attr(props, "fo:font-style"))
+    cur = xml.attr(el, "style:parent-style-name")
+  end
+  local default = ctx.para_style_el[false]
+  local dprops = default and xml.child(default, "style:text-properties")
+  weight = weight or (dprops and xml.attr(dprops, "fo:font-weight"))
+  slant = slant or (dprops and xml.attr(dprops, "fo:font-style"))
+  out.bold = weight and (weight == "bold" or (tonumber(weight) or 0) >= 600) or nil
+  out.italic = slant and slant ~= "normal" or nil
+  return out
+end
+-- A style's properties changed: { key = value, or false for the default }. Only those given.
+function M.set_style(ctx, name, changes)
+  style_attrs(ctx, nil)
+  local style = assert(ctx.para_style_el[name], "no style " .. tostring(name))
+  local function props_of(tag, first)
+    return xml.child(style, tag) or xml.append(style, xml.elem(tag), first and 1 or nil)
+  end
+  for key, value in pairs(changes) do
+    if ODF_ATTR[key] then
+      local v = value or (key == "line" and "single" or "0cm")
+      if key == "line" then
+        local multiple = ({ single = 1, double = 2 })[v] or tonumber(v)
+        v = multiple and ("%g%%"):format(multiple * 100) or v
+      end
+      xml.set_attr(props_of("style:paragraph-properties", true), ODF_ATTR[key], v)
+    elseif key == "align" then
+      xml.set_attr(props_of("style:paragraph-properties", true), "fo:text-align", ALIGN_VALUE[value or "left"])
+    else
+      local props = props_of("style:text-properties")
+      if key == "font" then
+        xml.set_attr(props, "style:font-name", value and font_face(ctx, value, true) or nil)
+        xml.set_attr(props, "fo:font-family", nil)
+      elseif key == "size" then
+        for _, attr in ipairs({ "fo:font-size", "style:font-size-asian", "style:font-size-complex" }) do
+          xml.set_attr(props, attr, value or nil)
+        end
+      elseif key == "bold" or key == "italic" then
+        for _, suffix in ipairs({ "", "-asian", "-complex" }) do
+          local attr = (suffix == "" and "fo:" or "style:") .. (key == "bold" and "font-weight" or "font-style") .. suffix
+          xml.set_attr(props, attr, key == "bold" and (value and "bold" or "normal") or (value and "italic" or "normal"))
+        end
+      end
+    end
+  end
+  ctx.dirty[STYLES] = true -- (what styles give: read again)
+  ctx.style_attrs, ctx.font_bases, ctx.font_inherits, ctx.style_aligns = {}, nil, nil, nil
 end
 
 -- The style of a caption of this kind ("table", "figure"): LibreOffice's "Table" or "Figure"
@@ -1501,6 +1802,9 @@ local function para_style(ctx, p, kind)
     xml.append(automatic(ctx), style)
     ctx.made[key], ctx.auto_paras[new] = new, style
     ctx.parent_style[new] = xml.attr(style, "style:parent-style-name") or false
+    if ctx.para_style_el then -- (known as a paragraph style: its font, see font_base)
+      ctx.para_style_el[new] = style
+    end
     ctx.made[kind .. "|" .. new] = new -- (already so)
   end
   xml.set_attr(p, "text:style-name", ctx.made[key])
@@ -1698,6 +2002,7 @@ function M.fill(ctx, p, block, pieces)
   set_list(ctx, p, block.list)
   p.children = {}
 
+  local base, inherit = M.font_base(ctx, p), M.font_inherited(ctx, p) -- (its named style's; what its text shows)
   local cur, after_space = { el = p }, true -- cur: the open <text:a>, if any
   for _, piece in ipairs(pieces) do
     if piece.text then
@@ -1707,7 +2012,7 @@ function M.fill(ctx, p, block, pieces)
         cur = { link = piece.link, el = a and xml.append(p, a) or p }
       end
       local target = cur.el
-      for _, style in ipairs(style_for(ctx, piece)) do -- (nested spans, outermost first)
+      for _, style in ipairs(style_for(ctx, piece, base, inherit)) do -- (nested spans, outermost first)
         target = xml.append(target, xml.elem("text:span", { { "text:style-name", style } }))
       end
       after_space = put_text(target, piece.text, after_space)

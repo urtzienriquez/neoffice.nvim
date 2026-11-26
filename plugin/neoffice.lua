@@ -69,6 +69,7 @@ local function highlights()
     NeofficeTableOptions = { link = "NeofficeMark" },
     NeofficeBox = { link = "@punctuation.special" }, -- (a box's :::, as a table's |)
     NeofficeCaption = { link = "@label" },
+    NeofficeStyleName = { link = "@label" }, -- (a style's name, in the styles at the top)
     NeofficeEscape = { link = "NeofficeMark" }, -- (a backslash that makes the next character plain text)
     NeofficeChangeInfo = { link = "Comment" },
     NeofficeFormat = { underdashed = true, sp = "#61afef" },

@@ -13,9 +13,12 @@ else in the file stays exactly as it was.
   colours: `==highlight=={green}`), `x^{2}`, `W_{food}`, `[links](https://…)`.
 - Captions: `Table: …` and `Figure: …`, real captions numbered by the document (Word's and
   LibreOffice's own numbering, so cross-references work).
-- Paragraph formats set for many paragraphs at once, as in LaTeX: a line `<=> {first = 0.5cm}` sets
-  the alignment, indentation, spacing of the paragraphs after it, until the next; one that differs
-  says how (`<|> A centred one.`).
+- The document's paragraph styles at its top (`Normal: {font = Times New Roman, size = 11pt}`):
+  edit a line to change the style, and every paragraph of it follows.
+- Paragraph formats set for many paragraphs at once, as in LaTeX: a line `{align = justify, first =
+  0.5cm}` sets what the paragraphs after it have of their own, against their style, until the next;
+  one that differs says how (`<|> A centred one.`, `{before = 12pt} More space.`). A few words in
+  another font: `[words]{font = Arial}`. A code action moves a format into its style.
 - Paragraphs: `# ` headings (numbered on demand), `% ` title, `> ` quote, `- ` and `1. ` lists,
   and alignment `<|> centered`, `->> right`, `<=> justified`.
 - Line breaks (`\` at the end of a line) and page breaks (`\newpage`).
@@ -72,6 +75,7 @@ require("neoffice").setup({
   author = "Your Name", -- on your comments and changes (default: $USER)
   track_changes = nil, -- true/false: always/never track your edits (default: as the document says)
   conceal = false, -- hide the marks
+  styles = true, -- the document's paragraph styles at its top
   show_tabs = true, -- show tabs as a faint →
   images = true, -- show images
   comment_text = false, -- each comment's text at the end of its line (or :Neoffice comments text)

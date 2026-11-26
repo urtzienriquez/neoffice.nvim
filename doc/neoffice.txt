@@ -84,35 +84,94 @@ Its alignment comes after its kind:
 Alignment shows only when it is set on the paragraph itself: a style that
 centers its paragraphs (some Title styles) shows no mark.
 
+                                                           *neoffice-styles*
+The styles at the top ~
+A document opens with its paragraph styles at the top: those its paragraphs
+have (its default one first), and what each gives: >
+
+  ---
+  styles:
+    Normal:    {font = Times New Roman, size = 11pt, align = justify}
+    Heading 1: {font = Arial, size = 14pt, bold, before = 12pt}
+    Caption:   {size = 10pt, italic}
+  ---
+<
+Each line is what the style gives (following the styles it is based on, and
+the document's defaults): `font`, `size`, `align`, `bold`, `italic`, and the
+format's attributes below. Editing a line changes the style itself, so every
+paragraph of it follows (in the whole document: its headers and footnotes
+too), as in Word and LibreOffice; a style based on it keeps what its own line
+shows. Deleting a line, or the whole header, changes nothing; a line naming
+a style the document hasn't, or an attribute that isn't one, makes the write
+fail, saying so. The language server completes the styles' names (those the
+document has) and their attributes, and folds the header out of the way
+(|zc|). `setup({ styles = false })` doesn't show it.
+
                                                        *neoffice-para-format*
 The format of plain paragraphs (not headings, titles, quotes, list items,
-captions, table cells or boxes) is set for many at once, as in LaTeX: a line
-with only a mark, and attributes in braces, sets the format of the paragraphs
-after it, until the next such line: >
+captions, table cells or boxes) is what they have of their own, against
+their style above. It is set for many at once, as in LaTeX: a line with only
+attributes in braces sets the format of the paragraphs after it, until the
+next such line: >
 
-  <=> {first = 0.5cm}
+  {align = justify, first = 0.5cm}
   Small mammals budget their energy...
 
   Populations from warm and cold places...
 
-  <<- {indent-left = 0.76cm, first = -0.76cm}
+  {indent-left = 0.76cm, first = -0.76cm}
   Alexander, R. M. (1999). Energy for animal life...
+
+  {}
+  From here on, as their style says.
 <
+  `align`                         `left`, `center`, `right`, `justify`
   `indent-left`, `indent-right`   indentation (cm, mm, in, pt)
   `first`                         the first line's indent (negative: hanging)
   `before`, `after`               the space before and after (pt...)
   `line`                          line spacing: `single`, `1.5`, `double`, a
                                   multiple, or a length (exactly that)
+  `font`, `size`                  the font of its text and its size (`11pt`)
 
-`none` is no value of the paragraph's own (its style's). A paragraph that
-differs from the paragraphs around it says how, with its mark and only the
-attributes that differ: `<|> A centered one.`, `<=> {before = 12pt} One
-with more space above.` (attributes after a mark apply to that paragraph
-only).
+A format says only what differs from the style: `none` (or leaving it out)
+is the style's (`align = none`: the style's alignment). A paragraph that
+differs from the paragraphs around it says how, at its start: `{before =
+12pt} One with more space above.` (only braces with `name = value` in them
+are attributes: `{this} text` is text). The marks are short for alignment:
+`<|> A centered one.`, `->> {before = 6pt} Right, and more space.` (a line
+with only a mark is a format's line too: `<=>` is `{align = justify}`).
+
+                                              *neoffice-format-into-style*
+On a format's line, a code action moves its attributes into the style of
+the paragraphs under it: "Move this format into the style Normal". The line
+at the top says them, and the format's line goes; paragraphs of that style
+elsewhere that had the style's values say them now, so nothing looks any
+different. It is offered only when that holds (the paragraphs under it all
+of one style, saved; none that would change in a table cell or a box).
+
+                                                              *neoffice-fonts*
+A paragraph's font and size are what most of its text has, wherever that
+comes from (its text, as Word and LibreOffice often set it, or its style). A
+few words in another font or size say so in a span, as in pandoc: >
+
+  The [Latin name]{font = Arial, size = 9pt} of the species.
+<
+Most documents have none: a span shows only text that differs from its
+paragraph. Headings, lists and other paragraphs that aren't plain keep their
+font as it is (unsaid), and show spans the same way. A font's name may have
+spaces (`font = Times New Roman`); one with `,` or `;` in it is written in
+quotes (`font = "Times New Roman;serif"`, as LibreOffice names some). The
+language server completes fonts: those of the document first, then those
+installed (from fontconfig); any word of a name finds it (`roman`, `new rom`:
+Times New Roman). Right after `font = ` your completion menu may need asking
+for (<C-Space> in blink.cmp), or a letter typed.
+Changing a format's font or size changes the text of the paragraphs under
+it; writing only what changes, as for everything else. A new paragraph takes
+the font of the format it is under.
 
 They are the paragraph's own formatting (what Word and LibreOffice show for
 it rather than its style's; a value its style gives already is none of its
-own). Opened, paragraphs one after another with the same format go under one
+own, and a font its style gives is unsaid). Opened, paragraphs one after another with the same format go under one
 line of it; written, each gets its format, also those you add. Only what
 changed is written: a value the same but written another way (`10mm` for
 `1cm`) changes nothing. The language server completes the attributes, and
@@ -132,7 +191,8 @@ A `\` makes the next character plain text when it could be read as a mark:
 Before any other character it is just a backslash (`C:\Users` stays as it
 is), and a mark that is never closed is just text (`if a == b`). Brackets
 are text (`[B]`, `[1, 2]`) unless they start a link, an image or a footnote:
-only then is one written `\[` (as in `\[not a link](x)`). Text that
+only then is one written `\[` (as in `\[not a link](x)`, or `\[x]{y}`, which
+would read as a span of text in another font). Text that
 would read as something else is written escaped, so what you see is always
 what the document has. The backslash shows faint (|hl-NonText|):
 
@@ -622,6 +682,7 @@ setup() is optional. Every field is optional too; these are the defaults: >lua
     track_changes = nil,   -- true/false: always/never track your edits;
                            -- nil: as the document says
     conceal = false,       -- hide the marks (except on the cursor line)
+    styles = true,         -- the styles at the top (|neoffice-styles|)
     show_tabs = true,      -- show tabs as a faint → (|'list'|, in its windows only;
                            -- the Tab key types a tab, whatever 'expandtab' says)
     images = true,         -- show images (where the terminal can)
@@ -669,6 +730,7 @@ Highlight groups (all `default`, so your colour scheme can set them):
   NeofficeTitle             the title
   NeofficeNumber            heading numbers
   NeofficeAlign             the alignment marks and format lines
+  NeofficeStyleName         a style's name, in the styles at the top
   NeofficeUnderline         underlined text (`++...++`)
   NeofficeHighlight_rrggbb  highlighted text, by colour (`==...==`)
   NeofficeTableOptions      a table's options line (`{width = full}`)
@@ -685,6 +747,9 @@ WHAT IS (AND ISN'T) CHANGED                                  *neoffice-safety*
   exist, an equation that can't be converted), the file is not changed and the
   buffer stays modified. The file is replaced in one step, so it is never left
   half written.
+- Every part about to be written is checked first (one root element, every
+  prefix declared): a part Word or LibreOffice couldn't read is never written;
+  the save fails and says so (that would be a bug in neoffice).
 - If another program changed the file since it was read or written, writing
   stops; |:w!| writes over it.
 - A document that can't be read opens read-only and empty, so it can't be

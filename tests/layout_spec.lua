@@ -202,7 +202,7 @@ for _, name in ipairs({ "layout.docx", "layout.odt" }) do
       assert.equals(0, #H.changes(require("neoffice").config.author))
       H.reopen() -- (now two justified paragraphs one after the other: under one line of their format)
       assert.same({ "Right text.", "A quote." }, { H.paras()[2], H.paras()[4] })
-      assert.equals("<=>", H.lines()[H.row(2) - 1])
+      assert.equals("{align = justify}", H.lines()[H.row(2) - 1])
     end)
 
     if H.has_libreoffice then
@@ -245,7 +245,22 @@ describe("colours", function()
         assert.are_not.equal("|", l:sub(m[3] + 1, m[3] + 1))
       end
     end
-    assert.truthy(vim.wo.winhighlight:find("Whitespace:NeofficeMark", 1, true)) -- (tabs: the same gray)
+    -- (a tab: a → in the same gray, whatever the window's colours; braces with no mark: gray too)
+    H.set(1, "{size = 9pt} A\tB **c**.")
+    vim.wo.winhighlight = "" -- (as some colour schemes set it)
+    neo.decorate(0)
+    row, line = H.row(1), H.lines()[H.row(1)]
+    local arrows, grays = 0, {}
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(0, ns, { row - 1, 0 }, { row - 1, -1 }, { details = true })) do
+      if m[4].virt_text and m[4].virt_text[1][1] == "→" and m[4].virt_text[1][2] == "NeofficeMark" then
+        arrows = arrows + 1
+        assert.equals("\t", line:sub(m[3] + 1, m[3] + 1))
+      elseif m[4].hl_group == "NeofficeMark" then
+        grays[#grays + 1] = line:sub(m[3] + 1, m[4].end_col)
+      end
+    end
+    assert.equals(1, arrows)
+    assert.same({ "{size = 9pt} ", "**", "**" }, grays)
     local mark = vim.api.nvim_get_hl(0, { name = "NeofficeMark", link = false })
     local normal = vim.api.nvim_get_hl(0, { name = "Normal" })
     if normal.fg and normal.bg then -- (half way between the text's colour and the background's)

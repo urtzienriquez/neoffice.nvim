@@ -113,11 +113,24 @@ function M.edits(buf, first, last)
       r = r + 1
     end
   end
+  local header = markup.header(lines) -- (the styles at the top: each line tidy, its names aligned)
+  if header and first + 1 <= header.last then
+    local ok = vim.iter(header.styles):all(function(st) return st.attrs ~= nil end)
+    if ok then
+      local tidy = markup.render_header(vim.tbl_map(function(st) return { name = st.name, attrs = st.attrs } end, header.styles))
+      for k, line in ipairs(tidy) do
+        if k > 2 and k < #tidy and lines[k] then
+          edit(out, k - 1, 0, lines[k], line)
+        end
+      end
+    end
+  end
   for row = first + 1, math.min(last + 1, #lines) do -- formats' lines (no marks on them: the whole line)
-    local format = lines[row]:find("^[<%-]") and markup.para_line(lines[row])
+    local line = lines[row]
+    local format = line:find("^[<%-{]") and not (header and row <= header.last) and not (lines[row + 1] or ""):match("^|")
+      and markup.para_line(line)
     if format and format.text and not format.bad then
-      local attrs = require("neoffice.paras").render(format.attrs)
-      edit(out, row - 1, 0, lines[row], vim.trim(markup.ALIGN[format.align or "left"]) .. (attrs ~= "" and " {" .. attrs .. "}" or ""))
+      edit(out, row - 1, 0, line, "{" .. require("neoffice.paras").render(vim.tbl_extend("force", {}, format.attrs, { align = format.align })) .. "}")
     end
   end
   for row = first + 1, math.min(last + 1, #lines) do -- boxes' lines (no marks on them: the whole line)

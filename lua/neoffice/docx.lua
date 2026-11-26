@@ -173,6 +173,106 @@ local function list_of(ctx, ppr)
 end
 
 -- The block of a paragraph (see markup.prefix), from its properties.
+-- Fonts (see fonts_of in init.lua): a run's own font and size (its properties', else its character
+-- style's), and what a paragraph's style gives (following the styles it is based on, and the
+-- document's defaults). Sizes as shown ("11pt"); a theme's font by its name.
+local function theme_font(ctx, which) -- (the theme's latin font: "minor" for the text, "major" for headings)
+  if not ctx.theme_fonts then
+    ctx.theme_fonts = {}
+    local ok, theme = pcall(part, ctx, "word/theme/theme1.xml")
+    for _, kind in ipairs(ok and theme and { "minor", "major" } or {}) do
+      local f = xml.find(theme, "a:" .. kind .. "Font")
+      local latin = f and xml.child(f, "a:latin")
+      ctx.theme_fonts[kind] = latin and xml.attr(latin, "typeface") ~= "" and xml.attr(latin, "typeface") or nil
+    end
+  end
+  return ctx.theme_fonts[which]
+end
+local function rpr_font(ctx, rpr) -- (what run properties say: { font, size }, nil for what they don't)
+  local out = {}
+  local fonts = rpr and xml.child(rpr, "w:rFonts")
+  if fonts then
+    out.font = xml.attr(fonts, "w:ascii") or xml.attr(fonts, "w:hAnsi")
+    local theme = not out.font and (xml.attr(fonts, "w:asciiTheme") or xml.attr(fonts, "w:hAnsiTheme"))
+    if theme then
+      out.font = theme_font(ctx, theme:match("^major") and "major" or "minor")
+    end
+  end
+  local sz = rpr and xml.child(rpr, "w:sz")
+  local half = sz and tonumber(xml.attr(sz, "w:val") or "")
+  out.size = half and require("neoffice.paras").pt(half / 2)
+  return out
+end
+local function style_font(ctx, id, paragraph) -- (a style's, following its chain; a paragraph's, from the defaults)
+  ctx.style_fonts = ctx.style_fonts or {}
+  local key = (paragraph and "p|" or "c|") .. (id or "")
+  if not ctx.style_fonts[key] then
+    local styles = part(ctx, STYLES) or {}
+    local chain, cur = {}, id
+    if not cur and paragraph then -- (the default paragraph style)
+      local default = vim.iter(xml.collect(styles, { ["w:style"] = true })):find(function(s)
+        return xml.attr(s, "w:type") == "paragraph" and xml.attr(s, "w:default") == "1"
+      end)
+      cur = default and xml.attr(default, "w:styleId")
+    end
+    for _ = 1, 10 do
+      if not cur then
+        break
+      end
+      chain[#chain + 1] = cur
+      cur = ctx.based_on[cur]
+    end
+    local out = {}
+    if paragraph then
+      local defaults = xml.find(styles, "w:rPrDefault")
+      out = rpr_font(ctx, defaults and xml.child(defaults, "w:rPr"))
+    end
+    for k = #chain, 1, -1 do
+      local style = has(styles, "w:style", "w:styleId", chain[k])
+      for name, value in pairs(rpr_font(ctx, style and xml.child(style, "w:rPr"))) do
+        out[name] = value
+      end
+    end
+    ctx.style_fonts[key] = out
+  end
+  return ctx.style_fonts[key]
+end
+local function own_font(ctx, rpr)
+  local own = rpr_font(ctx, rpr)
+  local rstyle = rpr and xml.child(rpr, "w:rStyle")
+  if rstyle then
+    local s = style_font(ctx, xml.attr(rstyle, "w:val"))
+    own.font, own.size = own.font or s.font, own.size or s.size
+  end
+  return own
+end
+function M.run_font(ctx, r)
+  if type(r) ~= "table" or r.tag ~= "w:r" then
+    return {}
+  end
+  ctx.run_fonts = ctx.run_fonts or setmetatable({}, { __mode = "k" }) -- (a run read stays as it was: those written are new)
+  if not ctx.run_fonts[r] then
+    ctx.run_fonts[r] = own_font(ctx, xml.child(r, "w:rPr"))
+  end
+  return vim.deepcopy(ctx.run_fonts[r])
+end
+function M.font_default(ctx) -- (the document's: its default paragraph style's, else Normal's, as LibreOffice writes it)
+  local styles = part(ctx, STYLES) or {}
+  local flagged = vim.iter(xml.collect(styles, { ["w:style"] = true })):find(function(st)
+    return xml.attr(st, "w:type") == "paragraph" and xml.attr(st, "w:default") == "1"
+  end)
+  if not flagged and has(styles, "w:style", "w:styleId", "Normal") then
+    local base = style_font(ctx, "Normal", true)
+    return { font = base.font, size = base.size or "10pt" }
+  end
+  return M.font_base(ctx, nil)
+end
+function M.font_base(ctx, ppr)
+  local style = ppr and xml.child(ppr, "w:pStyle")
+  local base = style_font(ctx, style and xml.attr(style, "w:val"), true) -- (cached, by style)
+  return { font = base.font, size = base.size or "10pt" } -- (Word's size when nothing says one)
+end
+
 local function block_of(ctx, ppr)
   local style = ppr and xml.child(ppr, "w:pStyle")
   local id = style and xml.attr(style, "w:val")
@@ -188,8 +288,9 @@ local function block_of(ctx, ppr)
     local list = list_of(ctx, ppr)
     block = list and { list = list } or {}
   end
-  block.align = JC[jc and xml.attr(jc, "w:val") or ""]
+  block.align = M.own_align(ctx, ppr)
   block.caption_style = id and ctx.caption_styles[id] or nil -- (see captions in init.lua)
+  block.font_base, block.font_default = M.font_base(ctx, ppr), M.font_default(ctx)
   if not (block.heading or block.title or block.quote or block.list) then -- (a plain one: its own format, see paras.lua)
     block.para = M.para_attrs(ppr, ctx)
   end
@@ -235,7 +336,7 @@ function M.para_attrs(ppr, ctx)
     local paras = require("neoffice.paras")
     local id = ppr and xml.child(ppr, "w:pStyle") and xml.attr(xml.child(ppr, "w:pStyle"), "w:val")
     local style = style_attrs(ctx, id)
-    for _, key in ipairs(paras.KEYS) do
+    for _, key in ipairs(paras.LAYOUT) do
       local base = style[key] or (key == "line" and "single" or "0cm")
       if out[key] and paras.measure(key, out[key]) == paras.measure(key, base) then
         out[key] = nil
@@ -364,6 +465,8 @@ local function read_para(ctx, p)
   local function run(r, link)
     local rpr = xml.child(r, "w:rPr")
     local f = flags(rpr)
+    local own = own_font(ctx, rpr)
+    f.run_font, f.run_size = own.font, own.size
     local change = rpr and xml.child(rpr, "w:rPrChange")
     change = change and format_change(r, rpr, change)
     if change then
@@ -724,7 +827,34 @@ local function set_flag(rpr, tag, value) -- value: true (on), false (off), or a 
   end
 end
 
-local function text_run(piece)
+-- A run's font set to `name` (false: none of its own), or its size to `size` ("11pt"; false: none).
+local function set_font(rpr, name)
+  local el = xml.child(rpr, "w:rFonts")
+  if not el and name then
+    set_flag(rpr, "w:rFonts", true)
+    el = xml.child(rpr, "w:rFonts")
+  end
+  if el then
+    for _, attr in ipairs({ "w:ascii", "w:hAnsi", "w:cs" }) do
+      xml.set_attr(el, attr, name or nil)
+    end
+    for _, attr in ipairs({ "w:asciiTheme", "w:hAnsiTheme", "w:cstheme" }) do
+      xml.set_attr(el, attr, nil)
+    end
+    if #(el.attrs or {}) == 0 then
+      xml.remove(el)
+    end
+  end
+end
+local function set_size(rpr, size)
+  local half = size and math.floor(require("neoffice.markup").cm(size) * 72 / 2.54 * 2 + 0.5)
+  set_flag(rpr, "w:sz", half and tostring(half))
+  if half then
+    set_flag(rpr, "w:szCs", tostring(half))
+  end
+end
+
+local function text_run(piece, ctx, base)
   local original = piece.props -- the <w:r> this text came from, if any
   local rpr = original and xml.child(original, "w:rPr")
   rpr = rpr and xml.copy(rpr) or xml.elem("w:rPr")
@@ -736,6 +866,16 @@ local function text_run(piece)
   end
   if have.sup ~= piece.sup or have.sub ~= piece.sub then
     set_flag(rpr, "w:vertAlign", piece.sup and "superscript" or piece.sub and "subscript")
+  end
+  if ctx and (piece.font ~= nil or piece.size ~= nil) then -- its font and size: only if what it shows changes
+    local paras = require("neoffice.paras")
+    local own = own_font(ctx, rpr)
+    for key, set in pairs({ font = set_font, size = set_size }) do
+      local want = piece[key]
+      if want ~= nil and paras.measure(key, want or base[key]) ~= paras.measure(key, own[key] or base[key]) then
+        set(rpr, want)
+      end
+    end
   end
   local run = xml.elem("w:r", original and vim.deepcopy(original.attrs), { #rpr.children > 0 and rpr or nil })
   for k, chunk in ipairs(vim.split(piece.text, "\t", { plain = true })) do
@@ -1066,18 +1206,24 @@ function M.keep_with_next(_, p)
 end
 
 -- A paragraph's own format's attributes set as `want` says (only those whose value changed).
+local write_layout -- (below)
 local function set_para(ctx, ppr, want)
   local paras = require("neoffice.paras")
   local have = M.para_attrs(ppr, ctx)
   want = vim.deepcopy(want) -- (a value its style gives already: none of its own)
   local id = xml.child(ppr, "w:pStyle") and xml.attr(xml.child(ppr, "w:pStyle"), "w:val")
   local style = style_attrs(ctx, id)
-  for _, key in ipairs(paras.KEYS) do
+  for _, key in ipairs(paras.LAYOUT) do
     local base = style[key] or (key == "line" and "single" or "0cm")
     if want[key] and want[key] ~= "none" and paras.measure(key, want[key]) == paras.measure(key, base) then
       want[key] = nil
     end
   end
+  write_layout(ppr, have, want)
+end
+-- Paragraph properties' indentation and spacing from `have` to `want` (only those that changed).
+write_layout = function(ppr, have, want)
+  local paras = require("neoffice.paras")
   local function changed(key) return paras.measure(key, have[key]) ~= paras.measure(key, want[key]) end
   local function twips(key) -- (a length, in twips)
     local cm = want[key] and want[key] ~= "none" and require("neoffice.markup").cm((want[key]:gsub("^%-", "")))
@@ -1141,15 +1287,18 @@ local function set_para(ctx, ppr, want)
   end
 end
 
-local function set_align(ppr, align) -- (only when it changed: "start", "left", "both"... stay as they are)
+-- (only when what it shows changed: "start", "left", "both"... stay as they are; nil: its style's)
+local default_style_id -- (below)
+local function set_align(ppr, align, style_align)
   local jc = xml.child(ppr, "w:jc")
-  if JC[jc and xml.attr(jc, "w:val") or ""] == align then
+  local have = jc and (JC[xml.attr(jc, "w:val") or ""] or "left") or style_align or "left"
+  if have == (align or style_align or "left") then
     return
   end
   if jc then
     xml.remove(jc)
   end
-  if align then
+  if align and align ~= (style_align or "left") then
     local at = #ppr.children + 1
     for k, c in ipairs(ppr.children) do
       if (PPR_ORDER[c.tag] or 0) > PPR_ORDER["w:jc"] then
@@ -1159,6 +1308,162 @@ local function set_align(ppr, align) -- (only when it changed: "start", "left", 
     end
     xml.append(ppr, xml.elem("w:jc", { { "w:val", align == "justify" and "both" or align } }), at)
   end
+end
+local function own_align(ctx, ppr) -- (a paragraph's alignment, if not its style's: "left" too, then)
+  local jc = ppr and xml.child(ppr, "w:jc")
+  local style = ppr and xml.child(ppr, "w:pStyle")
+  local base = M.style_align(ctx, style and xml.attr(style, "w:val") or default_style_id(ctx)) or "left"
+  local have = jc and (JC[xml.attr(jc, "w:val") or ""] or "left") or base
+  return have ~= base and have or nil
+end
+M.own_align = own_align
+
+-- ── Styles (the document's header: see init.lua) ───────────────────────────
+-- A paragraph style's id, name (as Word shows it: "Heading 1"), and what it gives (following the
+-- styles it is based on, and the defaults): { font, size, align, bold, italic, and paras.LAYOUT }.
+local function styles_el(ctx)
+  return part(ctx, STYLES) or {}
+end
+default_style_id = function(ctx)
+  local styles = styles_el(ctx)
+  local flagged = vim.iter(xml.collect(styles, { ["w:style"] = true })):find(function(st)
+    return xml.attr(st, "w:type") == "paragraph" and xml.attr(st, "w:default") == "1"
+  end)
+  return flagged and xml.attr(flagged, "w:styleId") or (has(styles, "w:style", "w:styleId", "Normal") and "Normal") or nil
+end
+function M.style_of(ctx, p) -- (a paragraph's)
+  local ppr = xml.child(p, "w:pPr")
+  local style = ppr and xml.child(ppr, "w:pStyle")
+  return style and xml.attr(style, "w:val") or default_style_id(ctx)
+end
+function M.style_name(ctx, id)
+  local style = id and has(styles_el(ctx), "w:style", "w:styleId", id)
+  local name = style and xml.child(style, "w:name")
+  name = name and xml.attr(name, "w:val") or id or "Normal"
+  return (name:gsub("^%l", string.upper))
+end
+function M.paragraph_styles(ctx) -- (the names of all its paragraph styles)
+  local out = {}
+  for _, st in ipairs(xml.collect(styles_el(ctx), { ["w:style"] = true })) do
+    if xml.attr(st, "w:type") == "paragraph" then
+      out[#out + 1] = M.style_name(ctx, xml.attr(st, "w:styleId"))
+    end
+  end
+  return out
+end
+function M.style_id(ctx, name) -- (by its name, whatever its case; nil if it has none)
+  for _, st in ipairs(xml.collect(styles_el(ctx), { ["w:style"] = true })) do
+    local n = xml.child(st, "w:name")
+    if xml.attr(st, "w:type") == "paragraph" and (n and xml.attr(n, "w:val") or ""):lower() == name:lower() then
+      return xml.attr(st, "w:styleId")
+    end
+  end
+end
+local function chain_of(ctx, id)
+  local chain, cur = {}, id
+  for _ = 1, 10 do
+    if not cur then
+      break
+    end
+    chain[#chain + 1] = has(styles_el(ctx), "w:style", "w:styleId", cur)
+    cur = ctx.based_on[cur]
+  end
+  return chain
+end
+function M.style_view(ctx, id)
+  local out = vim.deepcopy(style_attrs(ctx, id))
+  for _, key in ipairs(require("neoffice.paras").LAYOUT) do -- (the defaults: unsaid)
+    if out[key] and require("neoffice.paras").measure(key, out[key]) == require("neoffice.paras").measure(key, key == "line" and "single" or "0cm") then
+      out[key] = nil
+    end
+  end
+  local font = style_font(ctx, id, true)
+  out.font, out.size = font.font, font.size or "10pt"
+  local defaults = xml.find(styles_el(ctx), "w:docDefaults")
+  local function find(path, tag) -- (in the first style of the chain that says, else the defaults)
+    for _, st in ipairs(chain_of(ctx, id)) do
+      local el = xml.child(st, path)
+      if el and xml.child(el, tag) then
+        return xml.child(el, tag)
+      end
+    end
+    local d = defaults and xml.find(defaults, path)
+    return d and xml.child(d, tag)
+  end
+  local jc = find("w:pPr", "w:jc")
+  local align = JC[jc and xml.attr(jc, "w:val") or ""]
+  out.align = align
+  out.bold = is_on(find("w:rPr", "w:b")) or nil
+  out.italic = is_on(find("w:rPr", "w:i")) or nil
+  return out
+end
+function M.style_align(ctx, id) -- (what alignment a style gives: nil for left)
+  ctx.style_aligns = ctx.style_aligns or {}
+  local key = id or false
+  if ctx.style_aligns[key] == nil then
+    ctx.style_aligns[key] = M.style_view(ctx, id).align or false
+  end
+  return ctx.style_aligns[key] or nil
+end
+-- A style's properties changed: { key = value, or false for the default }. Only those given.
+function M.set_style(ctx, id, changes)
+  local style = assert(has(styles_el(ctx), "w:style", "w:styleId", id), "no style " .. tostring(id))
+  local paras = require("neoffice.paras")
+  local function child(parent, tag, order)
+    local el = xml.child(parent, tag)
+    if not el then
+      el = xml.elem(tag)
+      local at = #parent.children + 1
+      for k, c in ipairs(parent.children) do
+        if (order[c.tag] or 0) > (order[tag] or 0) then
+          at = k
+          break
+        end
+      end
+      xml.append(parent, el, at)
+    end
+    return el
+  end
+  local STYLE_ORDER = { ["w:name"] = 1, ["w:aliases"] = 2, ["w:basedOn"] = 3, ["w:next"] = 4, ["w:link"] = 5, ["w:autoRedefine"] = 6,
+    ["w:hidden"] = 7, ["w:uiPriority"] = 8, ["w:semiHidden"] = 9, ["w:unhideWhenUsed"] = 10, ["w:qFormat"] = 11, ["w:locked"] = 12,
+    ["w:personal"] = 13, ["w:rsid"] = 16, ["w:pPr"] = 17, ["w:rPr"] = 18, ["w:tblPr"] = 19, ["w:trPr"] = 20, ["w:tcPr"] = 21, ["w:tblStylePr"] = 22 }
+  local layout_have, layout_want, any_layout = nil, nil, false
+  for key, value in pairs(changes) do
+    if vim.tbl_contains(paras.LAYOUT, key) then
+      local ppr = child(style, "w:pPr", STYLE_ORDER)
+      layout_have = layout_have or M.raw_para_attrs(ppr)
+      layout_want = layout_want or vim.deepcopy(layout_have)
+      layout_want[key] = value or (key == "line" and "single" or "0cm")
+      any_layout = true
+    elseif key == "align" then
+      local ppr = child(style, "w:pPr", STYLE_ORDER)
+      local jc = xml.child(ppr, "w:jc")
+      if jc then
+        xml.remove(jc)
+      end
+      local at = #ppr.children + 1
+      for k, c in ipairs(ppr.children) do
+        if (PPR_ORDER[c.tag] or 0) > PPR_ORDER["w:jc"] then
+          at = k
+          break
+        end
+      end
+      xml.append(ppr, xml.elem("w:jc", { { "w:val", value == "justify" and "both" or value or "left" } }), at)
+    else
+      local rpr = child(style, "w:rPr", STYLE_ORDER)
+      if key == "font" then
+        set_font(rpr, value)
+      elseif key == "size" then
+        set_size(rpr, value)
+      elseif key == "bold" or key == "italic" then
+        set_flag(rpr, key == "bold" and "w:b" or "w:i", value and true or "0")
+      end
+    end
+  end
+  if any_layout then
+    write_layout(xml.child(style, "w:pPr"), layout_have, layout_want)
+  end
+  ctx.dirty[STYLES], ctx.style_attrs, ctx.style_fonts, ctx.style_aligns = true, nil, nil, nil -- (what styles give: read again)
 end
 
 -- The width of the text in cm: the page's, minus its margins (of the last section: the document's
@@ -2047,7 +2352,8 @@ function M.fill(ctx, p, block, pieces)
   end
   if block.align or (ppr and xml.child(ppr, "w:jc")) then
     ppr = ppr or xml.elem("w:pPr")
-    set_align(ppr, block.align)
+    local style = xml.child(ppr, "w:pStyle")
+    set_align(ppr, block.align, M.style_align(ctx, style and xml.attr(style, "w:val") or default_style_id(ctx)))
   end
   if block.para then -- (its own format's attributes: a plain paragraph's, see paras.lua)
     ppr = ppr or xml.elem("w:pPr")
@@ -2057,6 +2363,7 @@ function M.fill(ctx, p, block, pieces)
     xml.append(p, ppr)
   end
 
+  local base = M.font_base(ctx, ppr) -- (the font and size its style gives)
   local cur = { el = p } -- the open <w:hyperlink>/<w:ins> wrappers
   for _, piece in ipairs(pieces) do
     if piece.text then
@@ -2073,7 +2380,7 @@ function M.fill(ctx, p, block, pieces)
           cur.ins = nil
         end
       end
-      xml.append(cur.ins or cur.el, text_run(piece))
+      xml.append(cur.ins or cur.el, text_run(piece, ctx, base))
     elseif not (piece.insert_start or piece.insert_end) then
       cur = { el = p }
       local del = piece.deletion

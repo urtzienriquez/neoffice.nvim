@@ -33,9 +33,12 @@ function H.copy(name, edit)
   return path
 end
 
+neo.config.styles = false -- (the styles at the top: tested on their own, styles_spec.lua)
+
 function H.open(path)
   vim.cmd("silent! %bwipeout!")
   vim.cmd("edit " .. vim.fn.fnameescape(path))
+  vim.wait(0) -- (what opening leaves for once the text shows: its colours)
   return api.nvim_get_current_buf()
 end
 
