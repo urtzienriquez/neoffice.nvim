@@ -240,8 +240,12 @@ end
 -- { last = its last row, styles = { { row, name, text (in its braces), attrs, bad } } }, or nil.
 -- (and the document's page settings: "page: {size = A4, margins = 2.5cm}", see pages.lua)
 function M.header(lines)
-  local second = lines[2] or ""
-  if lines[1] ~= "---" or not (second:match("^styles:%s*$") or second:match("^page:")) then
+  local second, at = nil, 2 -- (its first line but comments: "# ...", as in YAML)
+  while lines[at] and lines[at]:match("^%s*#") do
+    at = at + 1
+  end
+  second = lines[at] or ""
+  if lines[1] ~= "---" or not (second:match("^styles:%s*$") or second:match("^page:") or second == "---" and at > 2) then
     return nil
   end
   local out = { styles = {} }
@@ -253,7 +257,9 @@ function M.header(lines)
     end
     local name, inside = l:match("^%s+([^:{}]-)%s*:%s*{(.*)}%s*$")
     local page = l:match("^page:%s*{(.*)}%s*$")
-    if l:match("^styles:%s*$") then
+    if l:match("^%s*#") then -- (a comment, as in YAML: inactive, as if deleted)
+      name = nil
+    elseif l:match("^styles:%s*$") then
       name = nil
     elseif page then
       local attrs, bad = require("neoffice.pages").parse(page)

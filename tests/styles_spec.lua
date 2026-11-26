@@ -218,3 +218,27 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
   end)
 end
+
+describe("comments at the top", function()
+  it("are lines starting with # (as in YAML): inactive, and the top is still the top with its first commented", function()
+    local markup = require("neoffice.markup")
+    local h = markup.header({ "---", "# page: {size = A4}", "styles:", "  # Normal: {size = 9pt}", "  Title: {size = 20pt}", "---", "Text." })
+    assert.same({ 6, nil, 1, "Title" }, { h.last, h.page, #h.styles, h.styles[1].name })
+    assert.is_nil(markup.header({ "---", "Text." }))
+  end)
+
+  it("change nothing when saved, a style's line changed and commented out", function()
+    neo.config.styles = true
+    local path = H.copy("rich.docx")
+    H.open(path)
+    neo.config.styles = false
+    local before = H.bytes(path)
+    local st = require("neoffice.markup").header(H.lines()).styles[1]
+    local line = H.lines()[st.row]
+    api.nvim_buf_set_lines(0, st.row - 1, st.row, false, { "  # " .. vim.trim(line:gsub("size = %d+pt", "size = 30pt")) })
+    H.save()
+    assert.equals(before, H.bytes(path))
+    assert.equals(#H.paras(), #vim.tbl_filter(function() return true end, H.paras())) -- (no line of it read as text)
+    assert.is_nil(vim.iter(H.paras()):find(function(p) return p:find("size = 30pt", 1, true) end))
+  end)
+end)

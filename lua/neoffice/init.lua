@@ -1809,7 +1809,12 @@ function M.decorate(buf)
       end
     end
   end
-  local header = markup.header(lines) -- the styles at its top: their names, and the rest as formatting
+  -- the styles at its top: their names, and the rest as formatting; but as YAML (as markdown's front
+  -- matter, by tree-sitter) where it can be: its keys, values and comments as in an R Markdown file
+  local header = markup.header(lines)
+  if languages and pcall(vim.treesitter.language.add, "yaml") then
+    header = nil
+  end
   for r = 1, header and header.last or 0 do
     local line = lines[r]
     local s, e = line:find("^%s+[^:{}]-%s*:")

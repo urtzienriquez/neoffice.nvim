@@ -122,6 +122,10 @@ have (its default one first), and what each gives: >
     Caption:   {size = 10pt, italic}
   ---
 <
+A line starting with `#` is a comment, as in YAML (`gcc` comments one out):
+inactive, as if it weren't there. The lines at the top are highlighted as YAML
+(as an R Markdown file's), where tree-sitter has a YAML parser.
+
 Each line is what the style gives (following the styles it is based on, and
 the document's defaults): `font`, `size`, `align`, `bold`, `italic`, and the
 format's attributes below. Editing a line changes the style itself, so every
