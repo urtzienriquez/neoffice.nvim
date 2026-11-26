@@ -135,6 +135,7 @@ local function changed(m)
 end
 
 function M.reply()
+  neo().finish_all()
   local m = at_cursor()
   if not m then
     return
@@ -148,6 +149,7 @@ function M.reply()
 end
 
 function M.resolve()
+  neo().finish_all()
   local m = at_cursor()
   if m then
     m.c.resolved = not m.c.resolved
@@ -156,6 +158,7 @@ function M.resolve()
 end
 
 function M.delete()
+  neo().finish_all()
   local m, reply = at_cursor()
   if not m or vim.fn.confirm(reply and "Delete reply?" or "Delete comment and its replies?", "&Yes\n&No") ~= 1 then
     return
@@ -319,6 +322,7 @@ end
 -- Comment the visual selection, or the cursor position in normal mode.
 -- `use_marks` takes the last selection instead (for :'<,'>Neoffice comment).
 function M.add(use_marks)
+  neo().finish_all()
   local buf = api.nvim_get_current_buf()
   if not neo().docs[buf] then
     return vim.notify("[neoffice] Not a document buffer", vim.log.levels.WARN)

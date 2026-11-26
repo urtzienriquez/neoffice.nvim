@@ -25,8 +25,18 @@ local caption_style, para_attrs, style_attrs, automatic -- (below)
 
 -- The formatting { b, i, u, sup, sub } of a text style, following its parent styles, starting
 -- from `inherited` (that of the enclosing text).
+local function merge(a, b) -- (a copy of a, with b's: tables of plain values)
+  local out = {}
+  for k, v in pairs(a) do
+    out[k] = v
+  end
+  for k, v in pairs(b) do
+    out[k] = v
+  end
+  return out
+end
 local function flags(ctx, name, inherited)
-  local f = vim.deepcopy(inherited or {})
+  local f = merge(inherited or {}, {}) -- (a copy: its values aren't changed, only replaced)
   for _, k in ipairs(FLAGS) do
     f[k] = f[k] or false
   end
@@ -295,7 +305,7 @@ function M.run_font(ctx, props) -- (props: a span's style, or the styles of the 
     end
     ctx.run_fonts[key] = out
   end
-  return vim.deepcopy(ctx.run_fonts[key])
+  return ctx.run_fonts[key] -- (as it is: not to be changed)
 end
 function M.font_default(ctx) -- (the document's: its default paragraph style's, Standard)
   return M.font_base(ctx, nil)
@@ -306,7 +316,7 @@ function M.font_base(ctx, p)
   if not ctx.font_bases[name] then
     ctx.font_bases[name] = M.font_base_of(ctx, name)
   end
-  return vim.deepcopy(ctx.font_bases[name])
+  return ctx.font_bases[name] -- (as it is: not to be changed)
 end
 -- (what its text shows where it says nothing: its automatic style's font, if that has one, else
 -- its named style's, as LibreOffice does)
@@ -316,7 +326,7 @@ function M.font_inherited(ctx, p)
   if not ctx.font_inherits[name] then
     ctx.font_inherits[name] = M.font_base_of(ctx, name)
   end
-  return vim.deepcopy(ctx.font_inherits[name])
+  return ctx.font_inherits[name] -- (as it is: not to be changed)
 end
 function M.font_base_of(ctx, name)
   style_attrs(ctx, nil) -- (the paragraph styles, by name)
@@ -468,7 +478,7 @@ local function read_para(ctx, p)
     local function text(s)
       if s ~= "" then
         local own = M.run_font(ctx, f.style)
-        add(vim.tbl_extend("force", flags(ctx, nil, f), { text = s, props = f.style, link = f.link, run_font = own.font, run_size = own.size }))
+        add(merge(flags(ctx, nil, f), { text = s, props = f.style, link = f.link, run_font = own.font, run_size = own.size }))
       end
     end
     local k = 0
@@ -516,11 +526,11 @@ local function read_para(ctx, p)
         local style = xml.attr(el, "text:style-name")
         local outer = type(f.style) == "table" and f.style or { f.style }
         local chain = style and vim.list_extend(vim.list_slice(outer), { style }) or outer
-        walk(el, vim.tbl_extend("force", flags(ctx, style, f), { style = #chain > 1 and chain or chain[1], link = f.link }))
+        walk(el, merge(flags(ctx, style, f), { style = #chain > 1 and chain or chain[1], link = f.link }))
       elseif tag == "text:a" then
         local url = xml.attr(el, "xlink:href")
         ctx.link_attrs[url] = ctx.link_attrs[url] or el.attrs
-        walk(el, vim.tbl_extend("force", f, { link = url }))
+        walk(el, merge(f, { link = url }))
       elseif tag == "text:s" then
         text((" "):rep(tonumber(xml.attr(el, "text:c")) or 1))
         spans[#spans].explicit, after_space = true, false -- (a real space: kept)
@@ -2088,24 +2098,24 @@ function M.save(ctx, live)
       ctx.dirty[M.MAIN] = true
     end
   end
-  local entries = {}
+  local entries, trees = {}, {}
   if ctx.dirty[M.MAIN] then
     local root = xml.find(ctx.root, "office:document-content")
     for _, ns in ipairs(NAMESPACES) do
       xml.set_attr(root, "xmlns:" .. ns[1], xml.attr(root, "xmlns:" .. ns[1]) or ns[2])
     end
-    entries[M.MAIN] = xml.serialize(ctx.root)
+    entries[M.MAIN], trees[M.MAIN] = xml.serialize(ctx.root), ctx.root
   end
   if ctx.dirty[MANIFEST] then
-    entries[MANIFEST] = xml.serialize(ctx.manifest)
+    entries[MANIFEST], trees[MANIFEST] = xml.serialize(ctx.manifest), ctx.manifest
   end
   if ctx.dirty[STYLES] then
-    entries[STYLES] = xml.serialize(ctx.styles_doc)
+    entries[STYLES], trees[STYLES] = xml.serialize(ctx.styles_doc), ctx.styles_doc
   end
   for name, bytes in pairs(ctx.files) do
     entries[name] = bytes
   end
-  return entries
+  return entries, trees -- (trees: the XML each part was written from, to check: see init.lua)
 end
 
 return M

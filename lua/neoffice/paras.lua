@@ -42,10 +42,25 @@ end
 
 -- A value's measure, for comparing: a number (cm for lengths) or, for line spacing, "x1.5" (a
 -- multiple) or a number (exact, in cm); nil for none.
+local measured = {} -- (each value's, once: they are few, and asked for often)
 function M.measure(key, value)
   if not value or value == "none" then
     return nil
-  elseif key == "font" then -- (its name: whatever its case)
+  end
+  local known = measured[key]
+  if not known then
+    known = {}
+    measured[key] = known
+  end
+  local m = known[value]
+  if m == nil then
+    m = M.measure_of(key, value) or false
+    known[value] = m
+  end
+  return m or nil
+end
+function M.measure_of(key, value)
+  if key == "font" then -- (its name: whatever its case)
     return vim.trim(value):lower()
   elseif key == "align" then
     return vim.tbl_contains(M.ALIGNS, value) and value or nil

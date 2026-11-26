@@ -62,6 +62,10 @@ end
 -- Create an extmark of `kind` holding `data`. Marks start with left gravity so a range can never
 -- end before it starts; runs also grow at their end, so text typed after a word takes its format.
 function M.place(buf, kind, data, r1, c1, r2, c2)
+  if M.docs[buf] and M.docs[buf].sigs and not M.docs[buf].opening then -- (a change but not to the text: after the fingerprints)
+    M.finish_sigs(buf)
+    M.docs[buf].all_dirty = true
+  end
   local opts = { end_row = r2, end_col = c2, right_gravity = false, end_right_gravity = kind == "run" }
   if kind == "comment" or kind == "change" then
     opts = vim.tbl_extend("force", opts, require("neoffice." .. kind .. "s").style(data))
@@ -286,7 +290,8 @@ local function neighbour_props(buf, para, block)
   end
 end
 
-local function pieces(buf, para)
+-- (new: a paragraph the document hasn't yet, whose text takes the formatting of the one next to it)
+local function pieces(buf, para, new)
   local doc = M.docs[buf]
   local block, chars = markup.parse(para.text)
   block.cell = para.cell and true or nil
@@ -310,17 +315,27 @@ local function pieces(buf, para)
     end
     return para.first - 2 + row, offset - start
   end
-  local row, start = 1, -(para.col or 0)
-  for _, ch in ipairs(chars) do
-    if ch.len then -- (an image, equation... may go on in the next line)
-      ch.end_row, ch.end_col = position(ch.col + ch.len)
+  if not para.lead and #lines == 1 then -- (on one line, nothing before its text: where each is, directly)
+    local row0, shift = para.first - 1, para.col or 0
+    for _, ch in ipairs(chars) do
+      if ch.len then
+        ch.end_row, ch.end_col = row0, ch.col + ch.len + shift
+      end
+      ch.row, ch.col = row0, ch.col + shift
     end
-    ch.col = M.buffer_offset(para, ch.col)
-    -- (a character right after a line joined with nothing is on the next line)
-    while row < #lines and (ch.col > start + #lines[row] or ch.col == start + #lines[row] and M.join(para, row) == 0) do
-      start, row = start + #lines[row] + M.join(para, row), row + 1
+  else
+    local row, start = 1, -(para.col or 0)
+    for _, ch in ipairs(chars) do
+      if ch.len then -- (an image, equation... may go on in the next line)
+        ch.end_row, ch.end_col = position(ch.col + ch.len)
+      end
+      ch.col = M.buffer_offset(para, ch.col)
+      -- (a character right after a line joined with nothing is on the next line)
+      while row < #lines and (ch.col > start + #lines[row] or ch.col == start + #lines[row] and M.join(para, row) == 0) do
+        start, row = start + #lines[row] + M.join(para, row), row + 1
+      end
+      ch.row, ch.col = para.first - 2 + row, ch.col - start
     end
-    ch.row, ch.col = para.first - 2 + row, ch.col - start
   end
   local function inside(r, c) -- (a table cell: only what is in its columns)
     return not para.cell or (c >= para.col and c <= para.stop)
@@ -462,10 +477,16 @@ local function pieces(buf, para)
 
   local out, e, parts = {}, 1, {} -- (parts: how many pieces of each deletion so far)
   local props = runs[1] and doc.run[runs[1][1]] -- text before the first run takes its properties
-  if not props and not para.cell then -- (a new paragraph: its text as the paragraph next to it's)
+  if new and not props and not para.cell and #chars > 0 then -- (a new paragraph: its text as the paragraph next to it's)
     props = neighbour_props(buf, para, block)
   end
-  for k = 1, #chars + 1 do
+  local has_inserts = false
+  for _, m in ipairs(changes) do
+    has_inserts = has_inserts or m[5].type == "insert"
+  end
+  local k = 0
+  while true do
+    k = k + 1
     while events[e] and events[e][1] == k do
       out[#out + 1], e = events[e][4], e + 1
     end
@@ -486,7 +507,7 @@ local function pieces(buf, para)
       local run = run_at(ch)
       local seg, fmt = last.segs[#last.segs], { props = run and doc.run[run[1]] or nil }
       for _, flag in ipairs(markup.FLAGS) do
-        fmt[flag] = ch[flag]
+        fmt[flag] = ch[flag] or false -- (false: as the formats say it)
       end
       local same = seg and seg.props == fmt.props
       for _, flag in ipairs(markup.FLAGS) do
@@ -549,7 +570,7 @@ local function pieces(buf, para)
         props = doc.run[run[1]]
       end
       local insert
-      for _, m in ipairs(changes) do
+      for _, m in ipairs(has_inserts and changes or {}) do
         if m[5].type == "insert" and covers(m, ch.row, ch.col) then
           insert = m[5]
         end
@@ -561,16 +582,33 @@ local function pieces(buf, para)
       local same = last and type(last.text) == "table" and last.props == (props or nil) and last.link == ch.link
         and last.insert == insert and last.font == font and last.size == size
       for _, flag in ipairs(markup.FLAGS) do
-        same = same and last[flag] == ch[flag]
+        same = same and last[flag] == (ch[flag] or false)
       end
       if same then
         last.text[#last.text + 1] = ch.ch
       else
         local piece = { text = { ch.ch }, props = props or nil, link = ch.link, insert = insert, font = font, size = size }
         for _, flag in ipairs(markup.FLAGS) do
-          piece[flag] = ch[flag]
+          piece[flag] = ch[flag] or false -- (false: as the formats say it)
         end
         out[#out + 1] = piece
+      end
+      -- (the text after it, as long as nothing could make it different, taken at once: no marker
+      -- there, no tracked change, the same formatting, and the same run of the document)
+      if not has_inserts and #deletions == 0 then
+        local text, nxt = out[#out].text, chars[k + 1]
+        while nxt and nxt.ch ~= "" and nxt.ch ~= "\n" and nxt.ch ~= "￼" and not nxt.span_bad
+          and not (events[e] and events[e][1] == k + 1)
+          and nxt.link == ch.link and nxt.b == ch.b and nxt.i == ch.i and nxt.u == ch.u and nxt.s == ch.s
+          and nxt.h == ch.h and nxt.sup == ch.sup and nxt.sub == ch.sub and nxt.font == ch.font and nxt.size == ch.size do
+          local r2 = run_at(nxt)
+          if r2 and doc.run[r2[1]] ~= props then
+            break
+          end
+          text[#text + 1] = nxt.ch
+          k = k + 1
+          nxt = chars[k + 1]
+        end
       end
     end
     ::next_char::
@@ -646,13 +684,32 @@ local function fonts_of(block, spans, shown)
   end
 end
 
+-- What a paragraph's fingerprint depends on besides its text and its marks: its format (from the
+-- line above it), its box, its column's alignment.
+local function context_key(block)
+  return table.concat({ block.format and pformat.key(block.format) or "", block.box and block.box.attrs or "",
+    block.cell and tostring(block.cell.align) or "" }, "|")
+end
+-- (whether rows changed since the fingerprints were taken cover a paragraph)
+local function touched(doc, block)
+  for _, r in ipairs(doc.touched or {}) do
+    if r[1] <= block.owns - 1 and r[2] >= block.first - 1 then
+      return true
+    end
+  end
+  return false
+end
+
 local function signature(block, list)
   local l = block.list
   local out = { table.concat({ tostring(block.heading), tostring(block.title), tostring(block.quote), tostring(block.align), tostring(block.caption),
     block.para and pformat.key({ attrs = block.para }) or "",
     tostring(block.cell), l and table.concat({ l.kind, l.level, tostring(l.n), tostring(l.id) }, ",") or "" }, "|") }
   for _, piece in ipairs(list) do
-    local keys = vim.tbl_keys(piece)
+    local keys = {}
+    for key in pairs(piece) do
+      keys[#keys + 1] = key
+    end
     table.sort(keys)
     for _, key in ipairs(keys) do
       local v = piece[key]
@@ -1210,11 +1267,54 @@ local function open(buf, path)
     api.nvim_buf_set_extmark(buf, M.ns.empty, r, 0, { invalidate = true, right_gravity = false })
     alone[r + 1] = true
   end
-  doc.sigs = {}
-  for k, block in ipairs(M.paragraphs(lines, alone)) do
+  local opened = M.paragraphs(lines, alone)
+  for k, block in ipairs(opened) do
     assert(block.text == texts[k], "neoffice: paragraph layout mismatch" .. (vim.env.NEOFFICE_DEBUG and (" " .. k .. ": " .. vim.inspect(block.text) .. " ~= " .. vim.inspect(texts[k])) or "")) -- (see markup.render)
-    doc.sigs[k] = signature(pieces(buf, block))
   end
+  -- what each paragraph is as opened (doc.sigs, to tell at a save which changed): worked out once
+  -- the text shows (see M.finish_sigs)
+  doc.sigs, doc.ctx_keys, doc.touched, doc.all_dirty = {}, {}, {}, false
+  doc.pending = { blocks = opened, next = 1, tick = api.nvim_buf_get_changedtick(buf) }
+  api.nvim_buf_attach(buf, false, {
+    on_bytes = function(_, _, _, start_row, _, _, old_end_row, _, _, new_end_row)
+      local d = M.docs[buf]
+      if not d then
+        return true
+      end
+      -- (the rows changed since the fingerprints were taken, as they move with later changes: their
+      -- paragraphs' are taken again at the next save)
+      local delta = new_end_row - old_end_row
+      for _, r in ipairs(d.touched) do
+        if r[1] > start_row + old_end_row then
+          r[1], r[2] = r[1] + delta, r[2] + delta
+        elseif r[2] >= start_row then
+          r[2] = math.max(r[2] + delta, start_row + new_end_row)
+        end
+      end
+      d.touched[#d.touched + 1] = { start_row, start_row + new_end_row }
+    end,
+  })
+  local function step() -- (a few at a time, so typing isn't held up)
+    local d = M.docs[buf]
+    local p = d and d.pending
+    if not p then
+      return
+    end
+    if api.nvim_buf_get_changedtick(buf) ~= p.tick then
+      return M.finish_sigs(buf)
+    end
+    local stop = math.min(p.next + 39, #p.blocks)
+    for k = p.next, stop do
+      d.sigs[k], d.ctx_keys[k] = signature(pieces(buf, p.blocks[k])), context_key(p.blocks[k])
+    end
+    p.next = stop + 1
+    if p.next > #p.blocks then
+      d.pending = nil
+    else
+      vim.schedule(step)
+    end
+  end
+  vim.schedule(step)
   vim.bo[buf].modified = false
   setup_buffer(buf)
   require("neoffice.changes").start(buf)
@@ -1651,6 +1751,45 @@ local function match_lines(old, new)
   return old_of, deleted
 end
 
+-- The paragraphs' fingerprints as opened, all of them now (before a save, and before anything
+-- that changes the document but not its text: a comment, a change accepted...). If the text changed
+-- meanwhile, those that did (or whose rows were touched) aren't taken as they are now: they are
+-- written at the next save.
+function M.finish_sigs(buf)
+  local doc = M.docs[buf]
+  local p = doc and doc.pending
+  if not p then
+    return
+  end
+  doc.pending = nil
+  if api.nvim_buf_get_changedtick(buf) == p.tick then
+    for k = p.next, #p.blocks do
+      doc.sigs[k], doc.ctx_keys[k] = signature(pieces(buf, p.blocks[k])), context_key(p.blocks[k])
+    end
+    return
+  end
+  local blocks = M.blocks(buf)
+  local old_of = match_lines(doc.texts, vim.tbl_map(function(b) return b.text end, blocks))
+  for k, block in ipairs(blocks) do
+    local o = old_of[k]
+    if o and o >= p.next and doc.sigs[o] == nil and not touched(doc, block) then
+      doc.sigs[o], doc.ctx_keys[o] = signature(pieces(buf, block)), context_key(p.blocks[o])
+    end
+  end
+  for o = p.next, #p.blocks do
+    if doc.sigs[o] == nil then
+      doc.sigs[o] = false -- (never the same: written)
+    end
+  end
+end
+
+function M.finish_all() -- (every document's: before a change from a command or a panel)
+  for buf, doc in pairs(M.docs) do
+    M.finish_sigs(buf)
+    doc.all_dirty = true -- (a change not to the text: every paragraph's fingerprint taken again at the save)
+  end
+end
+
 -- The buffer's paragraphs, and the style of each that the document has as it is (unchanged since
 -- read or written; nil for one edited or new): for the language server.
 function M.block_styles(buf)
@@ -1880,6 +2019,7 @@ local function align_numbers(buf, blocks, old_of)
 end
 
 function M.save(buf, target)
+  M.finish_sigs(buf)
   local doc = M.docs[buf]
   if not doc then
     return vim.notify("[neoffice] This document wasn't opened correctly: not saving it", vim.log.levels.ERROR)
@@ -1930,8 +2070,17 @@ function M.save(buf, target)
     end
 
     local plans, equations = {}, {}
+    local reusable = not doc.all_dirty and not doc.tracking and next(restyle) == nil
     for k, block in ipairs(blocks) do
-      local kind, list = pieces(buf, block)
+      assert(not (block.format and block.format.bad), block.format and block.format.bad) -- (its format's line: right)
+      local o = old_of[k]
+      if reusable and o and doc.sigs[o] and doc.ctx_keys[o] == context_key(block) and not touched(doc, block) then
+        -- (as it was, its text, rows and format: its fingerprint as it was; its pieces only if needed)
+        plans[k] = { old = o, lazy = block, sig = doc.sigs[o], cell = block.cell, box = block.box }
+        goto planned
+      end
+      do
+      local kind, list = pieces(buf, block, not old_of[k])
       for _, piece in ipairs(list) do
         local original = piece.image and piece.image.original and piece.image.original.image
         if piece.image and not (original and original.path == piece.image.path) then -- (a new file)
@@ -1955,6 +2104,13 @@ function M.save(buf, target)
         if piece.image and not piece.image.original and not piece.image.width then
           piece.image.width = block.box.parsed.width or "50%"
         end
+      end
+      end
+      ::planned::
+      if block.box and not block.box.parsed then -- (a box's attributes: for a box that is new)
+        local attrs, bad = floats.parse_box(block.box.attrs)
+        assert(attrs, bad)
+        block.box.parsed = attrs
       end
     end
 
@@ -2074,6 +2230,9 @@ function M.save(buf, target)
       local restyled = next(restyle) and node and plan.old and not plan.cell and restyle[doc.fmt.style_of(ctx, node)]
       if not plan.old or plan.sig ~= doc.sigs[plan.old] or restyled then
         plan.written = true
+        if not plan.pieces then -- (one taken as it was, written all the same: moved into a table, a box...)
+          plan.block, plan.pieces = pieces(buf, plan.lazy, false)
+        end
         local list = plan.pieces
         local kind = plan.block.caption
         if kind and doc.fmt.caption_number then -- a caption: its word, number and separator first
@@ -2165,10 +2324,10 @@ function M.save(buf, target)
     for _, ch in pairs(doc.change) do
       live.changes[ch] = true
     end
-    local entries = doc.fmt.save(ctx, live)
+    local entries, trees = doc.fmt.save(ctx, live)
     for name, bytes in pairs(entries) do -- (never a part Word or LibreOffice couldn't read: nothing is written then)
       if type(bytes) == "string" and (name:match("%.xml$") or name:match("%.rels$")) then
-        local ok, why = xml.check(bytes)
+        local ok, why = xml.check((trees or {})[name] or bytes) -- (the tree it was written from: as good, and quick)
         assert(ok, ("neoffice would have written a broken %s (%s): this is a bug in neoffice, please report it"):format(name, why))
       end
     end
@@ -2197,7 +2356,9 @@ function M.save(buf, target)
     end
     for k, block in ipairs(blocks) do -- (those written may have new marks: new images, equations...)
       doc.sigs[k] = plans[k].written and signature(pieces(buf, block)) or plans[k].sig
+      doc.ctx_keys[k] = context_key(block)
     end
+    doc.touched, doc.all_dirty = {}, false -- (the fingerprints are the buffer's as it now is)
     local alone = {} -- (empty paragraphs are paragraphs of their own, as when opened: see M.blocks)
     for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.empty, 0, -1, {})) do
       alone[m[2]] = true

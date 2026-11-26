@@ -9,10 +9,10 @@ local function spans_of(line)
     local last = spans[#spans]
     if c.image then
       spans[#spans + 1] = { image = c.image }
-    elseif last and last.text and last.b == c.b and last.i == c.i and last.u == c.u and last.link == c.link then
+    elseif last and last.text and last.b == (c.b or false) and last.i == (c.i or false) and last.u == (c.u or false) and last.link == c.link then
       last.text = last.text .. c.ch
-    else
-      spans[#spans + 1] = { text = c.ch, b = c.b, i = c.i, u = c.u, link = c.link }
+    else -- (a flag it hasn't: nil from parse, false here)
+      spans[#spans + 1] = { text = c.ch, b = c.b or false, i = c.i or false, u = c.u or false, link = c.link }
     end
   end
   return spans, level -- (the block)
@@ -147,15 +147,15 @@ describe("markup", function()
     local line = markup.render({ span("a"), span("lit", { h = "yellow" }), span("b"), span("g", { h = "green" }), span("r", { h = "#a1b2c3" }) })
     assert.equals("a==lit==b==g=={green}==r=={#a1b2c3}", line)
     local _, chars = markup.parse(line)
-    assert.same({ false, "yellow", "yellow", "yellow", false, "green", "#a1b2c3" }, vim.tbl_map(function(c) return c.h end, chars))
+    assert.same({ false, "yellow", "yellow", "yellow", false, "green", "#a1b2c3" }, vim.tbl_map(function(c) return c.h or false end, chars)) -- (none: nil)
     local _, upper = markup.parse("==x=={Green}")
     assert.equals("green", upper[1].h)
     local _, unknown = markup.parse("==x=={nope}") -- (not a colour: yellow, then text)
-    assert.same({ "yellow", false, false }, { unknown[1].h, unknown[2].h, unknown[#unknown].h })
+    assert.same({ "yellow", false, false }, { unknown[1].h, unknown[2].h or false, unknown[#unknown].h or false })
     -- text that reads as a colour after a highlight is escaped
     local escaped = markup.render({ span("x", { h = "yellow" }), span("{green}") })
     local _, back = markup.parse(escaped)
-    assert.same({ "yellow", false }, { back[1].h, back[2].h })
+    assert.same({ "yellow", false }, { back[1].h, back[2].h or false })
     assert.equals("x{green}", table.concat(vim.tbl_map(function(c) return c.ch end, back)))
   end)
 

@@ -254,7 +254,7 @@ function M.run_font(ctx, r)
   if not ctx.run_fonts[r] then
     ctx.run_fonts[r] = own_font(ctx, xml.child(r, "w:rPr"))
   end
-  return vim.deepcopy(ctx.run_fonts[r])
+  return ctx.run_fonts[r] -- (as it is: not to be changed)
 end
 function M.font_default(ctx) -- (the document's: its default paragraph style's, else Normal's, as LibreOffice writes it)
   local styles = part(ctx, STYLES) or {}
@@ -2609,14 +2609,14 @@ function M.save(ctx, live)
       end
     end
   end
-  local entries = {}
+  local entries, trees = {}, {}
   for name in pairs(ctx.dirty) do
-    entries[name] = xml.serialize(ctx.parts[name])
+    entries[name], trees[name] = xml.serialize(ctx.parts[name]), ctx.parts[name]
   end
   for name, bytes in pairs(ctx.files) do
     entries[name] = bytes
   end
-  return entries
+  return entries, trees -- (trees: the XML each part was written from, to check: see init.lua)
 end
 
 return M

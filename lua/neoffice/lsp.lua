@@ -13,22 +13,42 @@
 local api = vim.api
 local M = { NAME = "neoffice_ls" }
 
--- The fonts installed (their families' names, from fontconfig: once a session; none without it).
-local installed
-function M.fonts()
-  if not installed then
-    installed = {}
-    local ok, out = pcall(vim.fn.systemlist, { "fc-list", ":", "family" })
-    local seen = {}
-    for _, line in ipairs(ok and vim.v.shell_error == 0 and out or {}) do
-      for family in line:gmatch("[^,]+") do
-        family = vim.trim(family)
-        if family ~= "" and not seen[family] and not family:find("\\") then
-          seen[family], installed[#installed + 1] = true, family
-        end
+-- The fonts installed (their families' names, from fontconfig: once a session, asked for in the
+-- background when a document opens; none without it).
+local installed, asking
+local function families(out)
+  local list, seen = {}, {}
+  for line in (out or ""):gmatch("[^\n]+") do
+    for family in line:gmatch("[^,]+") do
+      family = vim.trim(family)
+      if family ~= "" and not seen[family] and not family:find("\\") then
+        seen[family], list[#list + 1] = true, family
       end
     end
-    table.sort(installed)
+  end
+  table.sort(list)
+  return list
+end
+function M.prefetch_fonts()
+  if installed or asking then
+    return
+  end
+  local ok, job = pcall(vim.system, { "fc-list", ":", "family" }, { text = true }, function(r)
+    vim.schedule(function()
+      installed = installed or (r.code == 0 and families(r.stdout) or {})
+    end)
+  end)
+  asking = ok and job or nil
+end
+function M.fonts()
+  if not installed then
+    if asking then -- (asked already: its answer)
+      local r = asking:wait(2000)
+      installed = r and r.code == 0 and families(r.stdout) or {}
+    else
+      local ok, r = pcall(function() return vim.system({ "fc-list", ":", "family" }, { text = true }):wait() end)
+      installed = ok and r.code == 0 and families(r.stdout) or {}
+    end
   end
   return installed
 end
@@ -356,20 +376,23 @@ local function completion(buf, pos)
       if doc and doc.fmt.font_default then
         mine(doc.fmt.font_default(doc.ctx).font)
       end
-      if doc and doc.fmt.run_font then -- (those its text has: most used first)
-        local count, known = {}, {}
-        for _, props in pairs(doc.run) do
-          if known[props] == nil then
-            known[props] = doc.fmt.run_font(doc.ctx, props).font or false
+      if doc and doc.fmt.run_font then -- (those its text has: most used first; as read or last written)
+        if not doc.text_fonts or doc.text_fonts.paras ~= doc.paras then
+          local count, known = {}, {}
+          for _, props in pairs(doc.run) do
+            if known[props] == nil then
+              known[props] = doc.fmt.run_font(doc.ctx, props).font or false
+            end
+            local f = known[props]
+            if f then
+              count[f] = (count[f] or 0) + 1
+            end
           end
-          local f = known[props]
-          if f then
-            count[f] = (count[f] or 0) + 1
-          end
+          local used = vim.tbl_keys(count)
+          table.sort(used, function(x, y) return count[x] > count[y] or count[x] == count[y] and x < y end)
+          doc.text_fonts = { paras = doc.paras, list = used }
         end
-        local used = vim.tbl_keys(count)
-        table.sort(used, function(x, y) return count[x] > count[y] or count[x] == count[y] and x < y end)
-        for _, f in ipairs(used) do
+        for _, f in ipairs(doc.text_fonts.list) do
           mine(f)
         end
       end
@@ -744,6 +767,7 @@ function M.server(dispatchers)
 end
 
 function M.start(buf)
+  M.prefetch_fonts()
   if neo().config.lsp == false then
     return
   end

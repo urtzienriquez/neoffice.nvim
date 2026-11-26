@@ -56,7 +56,8 @@ exports your manuscript to Word, and brings your collaborators' revisions back i
 ## Requirements
 
 - Neovim 0.10+ (to show images: 0.12+, in a terminal like Kitty, Ghostty or WezTerm)
-- `zip` and `unzip` (as for Neovim's own zip plugin)
+- zlib (on every Linux and macOS system: documents are read and written in Neovim itself); without
+  it, the `zip` and `unzip` commands
 - Optional: [pandoc](https://pandoc.org) to edit equations (without it they are kept as they
   are, shown as `￼`), LibreOffice for `.doc` files; to show images other than PNG (made in the
   background, so opening never waits): ImageMagick (JPEG, GIF, TIFF, WebP...), `pdftoppm` (PDF),

@@ -249,3 +249,125 @@ describe("a part that would come out broken", function()
     assert.truthy(table.concat(errors, "\n"):find("broken word/document.xml", 1, true))
   end)
 end)
+
+describe("a change right after opening, before all is worked out", function()
+  local zip = require("neoffice.zip")
+  local function open_now(path) -- (as H.open, but without letting what waits for the text to show run)
+    vim.cmd("silent! %bwipeout!")
+    vim.cmd("edit " .. vim.fn.fnameescape(path))
+  end
+  -- a long document: what its paragraphs are as opened is worked out a few at a time, after the text
+  -- shows (see M.finish_sigs); a change before that is done must still be saved, and only it
+  local function long(ext)
+    return H.copy("rich." .. ext, function(name, text)
+      local many = {}
+      for n = 1, 120 do
+        many[#many + 1] = ext == "docx" and ("<w:p><w:r><w:t>Paragraph %d.</w:t></w:r></w:p>"):format(n)
+          or ("<text:p>Paragraph %d.</text:p>"):format(n)
+      end
+      if ext == "docx" and name == "word/document.xml" then
+        return (text:gsub("<w:body>", "<w:body>" .. table.concat(many), 1))
+      elseif ext == "odt" and name == "content.xml" then
+        return (text:gsub("<office:text>", "<office:text>" .. table.concat(many), 1))
+      end
+      return text
+    end)
+  end
+  for _, ext in ipairs({ "docx", "odt" }) do
+    it("saves an edit to a paragraph not worked out yet, and rewrites no other (" .. ext .. ")", function()
+      local path = long(ext)
+      open_now(path)
+      assert.truthy(H.doc().pending, "(the document is long enough for this test)")
+      local k = vim.fn.index(H.paras(), "Paragraph 100.") + 1
+      H.replace(k, "100", "one hundred")
+      local xml = require("neoffice.xml")
+      local before = xml.serialize(xml.parse(zip.read(path, H.MAIN[ext]))) -- (as written: "<a/>" for "<a />"...)
+      H.save()
+      local after = zip.read(path, H.MAIN[ext])
+      assert.truthy(after:find("Paragraph one hundred.", 1, true))
+      -- (only that paragraph changed: the paragraphs before and after it as they were)
+      local function between(x, a, b)
+        return x:sub((x:find(a, 1, true)), (x:find(b, 1, true)))
+      end
+      assert.equals(between(before, "Paragraph 1.", "Paragraph 99."), between(after, "Paragraph 1.", "Paragraph 99."))
+      local rest = before:find("Paragraph 101.", 1, true)
+      assert.equals(before:sub(rest), after:sub((after:find("Paragraph 101.", 1, true))))
+    end)
+
+    it("saves a deletion tracked right after opening (" .. ext .. ")", function()
+      local path = long(ext)
+      open_now(path)
+      vim.cmd("Neoffice track on")
+      local k = vim.fn.index(H.paras(), "Paragraph 90.") + 1
+      H.replace(k, "90", "")
+      H.reopen()
+      assert.equals(1, #H.changes(require("neoffice").config.author))
+    end)
+
+    it("saves a comment added right after opening (" .. ext .. ")", function()
+      local path = long(ext)
+      open_now(path)
+      local k = vim.fn.index(H.paras(), "Paragraph 80.") + 1
+      H.cursor(k, "80")
+      H.input = "Said early."
+      require("neoffice.comments").add()
+      H.save()
+      assert.truthy((zip.read(path, ext == "docx" and "word/comments.xml" or "content.xml") or ""):find("Said early.", 1, true))
+    end)
+
+    it("takes a paragraph typed again the same as changed: its marks may not be (" .. ext .. ")", function()
+      local path = long(ext)
+      open_now(path)
+      local k = vim.fn.index(H.paras(), "Paragraph 110.") + 1
+      H.replace(k, "110", "")
+      H.replace(k, "Paragraph .", "Paragraph 110.")
+      require("neoffice").finish_sigs(vim.api.nvim_get_current_buf())
+      local doc = H.doc()
+      assert.is_false(doc.sigs[vim.fn.index(doc.texts, "Paragraph 110.") + 1]) -- (written at the next save)
+      H.save()
+      assert.truthy(zip.read(path, H.MAIN[ext]):find("Paragraph 110.", 1, true))
+    end)
+  end
+end)
+
+describe("saving again and again in one session", function()
+  local function markup_para_line(line)
+    return line:sub(1, 1) == "{" and require("neoffice.markup").para_line(line) or nil
+  end
+  -- (at a save, a paragraph as it was since the last one keeps its fingerprint: what changed is
+  -- still found, whatever changed it)
+  local zip = require("neoffice.zip")
+  for _, ext in ipairs({ "docx", "odt" }) do
+    it("writes each change: text, a format's line, a comment (" .. ext .. ")", function()
+      local path = H.copy("rich." .. ext)
+      H.open(path)
+      local function main() return zip.read(path, H.MAIN[ext]) end
+      H.replace(1, "Introduction", "Edited title")
+      H.save()
+      assert.truthy(main():find("Edited title", 1, true))
+      local r = H.row(3)
+      vim.api.nvim_buf_set_lines(0, r - 1, r - 1, false, { "{align = center}" }) -- (a format: rows not of the paragraphs)
+      H.save()
+      -- (also for a paragraph further down, whose rows the new line didn't touch)
+      H.reopen()
+      local k = vim.fn.index(H.paras(), "Text with inserted words and deleted words inside.") + 1
+      assert.truthy(k > 0, table.concat(H.lines(), "\n"))
+      local above
+      for row = H.row(k) - 1, 1, -1 do
+        above = above or markup_para_line(H.lines()[row])
+      end
+      assert.equals("center", above and above.align, table.concat(H.lines(), "\n"))
+      H.cursor(4, "inserted")
+      H.input = "Late note."
+      require("neoffice.comments").add()
+      H.save()
+      assert.truthy((zip.read(path, ext == "docx" and "word/comments.xml" or "content.xml") or ""):find("Late note.", 1, true))
+      H.replace(4, "words", "WORDS")
+      H.save()
+      H.reopen()
+      assert.truthy(vim.tbl_contains(H.paras(), "Edited title") or table.concat(H.paras(), "\n"):find("Edited title", 1, true))
+      assert.truthy(table.concat(H.paras(), "\n"):find("WORDS", 1, true))
+      assert.equals("Late note.", H.comments()[#H.comments()].text)
+    end)
+  end
+end)

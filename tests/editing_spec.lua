@@ -313,3 +313,25 @@ describe("a new paragraph", function()
     end)
   end
 end)
+
+describe("an edited paragraph whose text has no formatting of its own (odt)", function()
+  it("doesn't take the formatting of the paragraph next to it", function()
+    local path = H.copy("rich.odt", function(name, text)
+      if name ~= "content.xml" then
+        return text
+      end
+      local style = '<style:style style:name="Sized" style:family="text"><style:text-properties style:font-name="Times New Roman" fo:font-size="11pt" fo:color="#ff0000"/></style:style>'
+      local p = '<text:p><text:span text:style-name="Sized">Sized text.</text:span></text:p><text:p>Plain text.</text:p>'
+      return (text:gsub("<office:automatic%-styles>", "%0" .. style, 1):gsub("<office:text>", "%0" .. p, 1))
+    end)
+    H.open(path)
+    local k = vim.fn.index(H.paras(), "Plain text.") + 1
+    assert.truthy(k > 0)
+    H.replace(k, "Plain text.", "Plain text, edited.")
+    H.reopen()
+    local main = zip.read(path, "content.xml")
+    local p = main:match("<text:p[^>]*>[^<]*Plain text, edited%.[^<]*</text:p>") or main:match("<text:p[^>]*>.-Plain text, edited.-</text:p>")
+    assert.truthy(p, main:sub(1, 2000))
+    assert.is_nil(p:find("text:span", 1, true), p) -- (no span: as it was)
+  end)
+end)

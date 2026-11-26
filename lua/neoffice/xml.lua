@@ -7,6 +7,9 @@ local M = {}
 local ENTITIES = { lt = "<", gt = ">", amp = "&", quot = '"', apos = "'" }
 
 local function decode(s)
+  if not s:find("&", 1, true) then -- (most text: nothing to decode)
+    return s
+  end
   return (s:gsub("&(#?)(x?)(%w+);", function(hash, hex, v)
     if hash == "" then
       return ENTITIES[v]
@@ -29,8 +32,11 @@ end
 
 -- Whether XML text is a document Word and LibreOffice can read: one root element, and every
 -- prefix it uses (w:, text:, svg: ...) declared where it is used. true, or nil and why.
-function M.check(s)
-  local ok, doc = pcall(M.parse, s)
+function M.check(s) -- (s: the text, or the tree it was written from, as M.parse makes them)
+  local ok, doc = true, s
+  if type(s) == "string" then
+    ok, doc = pcall(M.parse, s)
+  end
   if not ok or type(doc) ~= "table" then
     return nil, "it can't be read back"
   end
@@ -80,33 +86,39 @@ end
 
 function M.parse(s)
   local doc = { children = {} }
-  local node, pos = doc, 1
-  while pos <= #s do
-    local lt = s:find("<", pos, true) or #s + 1
+  local node, pos, n = doc, 1, #s
+  local find, match, sub, byte = string.find, string.match, string.sub, string.byte
+  while pos <= n do
+    local lt = find(s, "<", pos, true) or n + 1
     if lt > pos then
-      M.append(node, { text = decode(s:sub(pos, lt - 1)) })
+      local kids = node.children
+      kids[#kids + 1] = { text = decode(sub(s, pos, lt - 1)), parent = node }
     end
-    if lt > #s then
+    if lt > n then
       break
     end
-    local next_char = s:sub(lt + 1, lt + 1)
-    if next_char == "/" then -- closing tag
-      pos = s:find(">", lt, true) + 1
+    local next_char = byte(s, lt + 1)
+    if next_char == 47 then -- closing tag ("/")
+      pos = find(s, ">", lt, true) + 1
       node = node.parent
-    elseif next_char == "?" or next_char == "!" then -- <?..?>, <!--..-->, <![CDATA[..]]>, <!DOCTYPE..>
-      local close = (s:sub(lt, lt + 3) == "<!--" and "-->") or (s:sub(lt, lt + 8) == "<![CDATA[" and "]]>") or ">"
-      local _, stop = s:find(close, lt, true)
-      M.append(node, { raw = s:sub(lt, stop) })
+    elseif next_char == 63 or next_char == 33 then -- <?..?>, <!--..-->, <![CDATA[..]]>, <!DOCTYPE..> ("?", "!")
+      local close = (sub(s, lt, lt + 3) == "<!--" and "-->") or (sub(s, lt, lt + 8) == "<![CDATA[" and "]]>") or ">"
+      local _, stop = find(s, close, lt, true)
+      local kids = node.children
+      kids[#kids + 1] = { raw = sub(s, lt, stop), parent = node }
       pos = stop + 1
     else -- opening or self-closing tag
-      local tag, p = s:match("^([^%s/>]+)()", lt + 1)
-      local el = M.append(node, M.elem(tag))
+      local tag, p = match(s, "^([^%s/>]+)()", lt + 1)
+      local attrs = {}
+      local el = { tag = tag, attrs = attrs, children = {}, parent = node }
+      local kids = node.children
+      kids[#kids + 1] = el
       while true do
-        local name, _, value, after = s:match("^%s*([^%s=/>]+)%s*=%s*([\"'])(.-)%2()", p)
+        local name, _, value, after = match(s, "^%s*([^%s=/>]+)%s*=%s*([\"'])(.-)%2()", p)
         if not name then
           break
         end
-        table.insert(el.attrs, { name, decode(value) })
+        attrs[#attrs + 1] = { name, decode(value) }
         p = after
       end
       local slash, after = s:match("^%s*(/?)>()", p)
@@ -207,9 +219,13 @@ end
 -- ── Querying ────────────────────────────────────────────────────────────────
 
 function M.attr(n, name)
-  for _, kv in ipairs(n.attrs or {}) do
-    if kv[1] == name then
-      return kv[2]
+  local attrs = n.attrs
+  if attrs then
+    for i = 1, #attrs do
+      local kv = attrs[i]
+      if kv[1] == name then
+        return kv[2]
+      end
     end
   end
   return nil

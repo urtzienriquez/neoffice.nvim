@@ -124,6 +124,7 @@ local NAMES = vim.tbl_keys(SUBCOMMANDS)
 table.sort(NAMES)
 
 api.nvim_create_user_command("Neoffice", function(o)
+  require("neoffice").finish_all() -- (what the documents are as opened: worked out before any change)
   local sub, arg = o.args:match("^%s*(%S*)%s*(.-)%s*$")
   if sub == "" then
     return vim.ui.select(NAMES, { prompt = "Neoffice" }, function(choice)

@@ -17,7 +17,8 @@ settings, ...) is kept, and only what you change is written (see
 |neoffice-safety|). It defines one command, |:Neoffice|, and no keymaps (see
 |neoffice-keymaps|).
 
-Requires Nvim 0.10+ and the `zip` and `unzip` commands. Optional: pandoc
+Requires Nvim 0.10+ and zlib (documents are read and written in Nvim itself,
+through LuaJIT; without zlib, the `zip` and `unzip` commands). Optional: pandoc
 (|neoffice-equations|), LibreOffice (`soffice`, for .doc files: converted to
 .docx when opened, once a session, and back when written), and to show images
 other than PNG (|neoffice-images|): ImageMagick, `pdftoppm`, `rsvg-convert`.

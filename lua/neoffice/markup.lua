@@ -794,45 +794,55 @@ function M.render(spans, block, strict)
 end
 
 -- Whether a line reads back as these spans: the same characters, formatting and objects.
-local function signature(entry, token)
-  if token then
-    return "\0" .. token
+-- (compared character by character, by what each reads as: a flag it hasn't is false, a highlight
+-- that is true is yellow; an object by its kind)
+local NONE = {}
+local function flag_value(v, k)
+  if not v then
+    return ""
   end
-  local flags = {}
-  for _, k in ipairs(M.FLAGS) do
-    flags[#flags + 1] = entry[k] and k .. (entry[k] == true and k == "h" and "yellow" or tostring(entry[k])) or ""
-  end
-  return table.concat(flags, ",") .. "|" .. (entry.link or "") .. "|" .. (entry.font or "") .. "|" .. (entry.size or "") .. "|" .. entry.ch
+  return v == true and k == "h" and "yellow" or tostring(v)
+end
+local function kind_of(c)
+  return c.image and "image" or c.math and "math" or c.footnote and "footnote" or c.field and "field" or c.page_break and "page_break" or nil
 end
 function M.same(line, spans)
-  local want = {}
+  local _, chars = M.parse(line)
+  local k = 0
+  local function reads(ch, fmt) -- (the next character reads as ch, formatted so)
+    k = k + 1
+    local c = chars[k]
+    if not c or kind_of(c) or c.ch ~= ch or (c.link or "") ~= (fmt.link or "") or (c.font or "") ~= (fmt.font or "")
+      or (c.size or "") ~= (fmt.size or "") then
+      return false
+    end
+    if not (c.b or c.i or c.u or c.s or c.h or c.sup or c.sub) then -- (most: none, on both sides)
+      return not (fmt.b or fmt.i or fmt.u or fmt.s or fmt.h or fmt.sup or fmt.sub)
+    end
+    return not c.b == not fmt.b and not c.i == not fmt.i and not c.u == not fmt.u and not c.s == not fmt.s
+      and not c.sup == not fmt.sup and not c.sub == not fmt.sub and flag_value(c.h, "h") == flag_value(fmt.h, "h")
+  end
   for _, s in ipairs(spans) do
-    local token = s.image and "image" or s.math and "math" or s.footnote and "footnote" or s.field and "field"
-      or s.page_break and "page_break"
+    local token = kind_of(s)
     if token then
-      want[#want + 1] = signature(nil, token)
+      k = k + 1
+      if not chars[k] or kind_of(chars[k]) ~= token then
+        return false
+      end
     elseif s.line_break then
-      want[#want + 1] = signature({ ch = "\n" })
+      if not reads("\n", NONE) then
+        return false
+      end
     elseif s.text then
-      local fmt = s.raw and {} or s
+      local fmt = s.raw and NONE or s
       for ch in s.text:gmatch("[^\128-\191][\128-\191]*") do
-        want[#want + 1] = signature({ ch = ch, link = fmt.link, b = fmt.b, i = fmt.i, u = fmt.u, s = fmt.s, h = fmt.h, sup = fmt.sup, sub = fmt.sub,
-          font = fmt.font, size = fmt.size })
+        if not reads(ch, fmt) then
+          return false
+        end
       end
     end
   end
-  local _, chars = M.parse(line)
-  if #chars ~= #want then
-    return false
-  end
-  for k, c in ipairs(chars) do
-    local token = c.image and "image" or c.math and "math" or c.footnote and "footnote" or c.field and "field"
-      or c.page_break and "page_break"
-    if signature(c, token) ~= want[k] then
-      return false
-    end
-  end
-  return true
+  return k == #chars
 end
 
 -- An image "![alt](path)" or "![alt](path){width = 12cm, float = right}" at `pos`: alt, path,
@@ -931,6 +941,7 @@ for c in ("\\*[]$<>^_~=+|#%-.!{}:\n" .. "⟦⟧¶"):gmatch("[^\128-\191][\128-\1
 end
 
 -- The first bytes of everything that isn't plain text (marks, escapes, images, equations...).
+local PLAIN_STOP = "[\\!%$%^_%*~=%+}%[\226]" -- (the same, as a pattern: where plain text stops)
 local MARKS = {}
 for c in ("\\!$^_*~=+}[" .. "\226"):gmatch(".") do -- (\226: the first byte of ⟦)
   MARKS[c:byte()] = true
@@ -952,9 +963,9 @@ function M.parse(line)
   local function emit(at)
     local byte = line:byte(at) -- (the character's bytes, from its first: UTF-8)
     local ch = line:sub(at, at + (byte < 0xC0 and 0 or byte < 0xE0 and 1 or byte < 0xF0 and 2 or 3))
-    local c = { -- (the flags of M.FLAGS)
-      col = at - 1, ch = ch, link = cur.link, b = cur.b == true, i = cur.i == true, u = cur.u == true,
-      s = cur.s == true, h = cur.h or false, sup = cur.sup == true, sub = cur.sub == true,
+    local c = { -- (the flags of M.FLAGS: only those it has, nil for the others)
+      col = at - 1, ch = ch, link = cur.link, b = cur.b == true or nil, i = cur.i == true or nil, u = cur.u == true or nil,
+      s = cur.s == true or nil, h = cur.h or nil, sup = cur.sup == true or nil, sub = cur.sub == true or nil,
     }
     if span_close then -- (in a span of text in another font)
       c.font, c.size, c.span_bad = cur.font, cur.size, cur.span_bad
@@ -1015,9 +1026,39 @@ function M.parse(line)
     end
   end
 
-  while pos <= #line do
+  local n = #line
+  while pos <= n do
     if not MARKS[line:byte(pos)] and pos ~= link_close and pos ~= span_close then -- (most characters: just text)
-      pos = emit(pos)
+      -- (up to the next character that could start a mark, or close a link or a span: all at once,
+      -- with the formatting as it is)
+      local stop = line:find(PLAIN_STOP, pos) or n + 1
+      if link_close and link_close > pos and link_close < stop then
+        stop = link_close
+      end
+      if span_close and span_close > pos and span_close < stop then
+        stop = span_close
+      end
+      local link, b, i, u, s, h, sup, sub = cur.link, cur.b == true or nil, cur.i == true or nil, cur.u == true or nil,
+        cur.s == true or nil, cur.h or nil, cur.sup == true or nil, cur.sub == true or nil
+      local in_span, font, size, bad = span_close, cur.font, cur.size, cur.span_bad
+      local bare = not (link or b or i or u or s or h or sup or sub or in_span) -- (plain text: just where it is, and what)
+      local count = #chars
+      while pos < stop do
+        local byte = line:byte(pos)
+        local len = byte < 0xC0 and 1 or byte < 0xE0 and 2 or byte < 0xF0 and 3 or 4
+        local c
+        if bare then
+          c = { col = pos - 1, ch = line:sub(pos, pos + len - 1) }
+        else
+          c = { col = pos - 1, ch = line:sub(pos, pos + len - 1), link = link, b = b, i = i, u = u, s = s, h = h, sup = sup, sub = sub }
+          if in_span then
+            c.font, c.size, c.span_bad = font, size, bad
+          end
+        end
+        count = count + 1
+        chars[count] = c
+        pos = pos + len
+      end
       goto continue
     end
     local c = line:sub(pos, pos)

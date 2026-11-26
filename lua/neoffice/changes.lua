@@ -694,6 +694,7 @@ end
 -- of the changes a visual selection touches (use_marks: the last selection, for
 -- :'<,'>Neoffice accept), or the change at the cursor.
 function M.resolve(action, all, use_marks, author)
+  neo().finish_all()
   local buf = api.nvim_get_current_buf()
   if not neo().docs[buf] then
     return vim.notify("[neoffice] Not a document buffer", vim.log.levels.WARN)
