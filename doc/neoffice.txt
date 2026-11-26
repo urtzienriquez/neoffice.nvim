@@ -130,7 +130,9 @@ Escapes ~
 A `\` makes the next character plain text when it could be read as a mark:
 `\*`, `\[`, `\#`, `\$`, `\_{`, `\-`, `\>`, `\|`, `\=`, `\+`, `\~`, `\\`, ...
 Before any other character it is just a backslash (`C:\Users` stays as it
-is), and a mark that is never closed is just text (`if a == b`). Text that
+is), and a mark that is never closed is just text (`if a == b`). Brackets
+are text (`[B]`, `[1, 2]`) unless they start a link, an image or a footnote:
+only then is one written `\[` (as in `\[not a link](x)`). Text that
 would read as something else is written escaped, so what you see is always
 what the document has. The backslash shows faint (|hl-NonText|):
 

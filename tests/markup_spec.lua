@@ -95,6 +95,12 @@ describe("markup", function()
     assert.equals("#1", markup.render({ span("#1") })) -- (not a heading: no need)
   end)
 
+  it("writes brackets as they are, unless they would start a link, an image or a footnote", function()
+    assert.equals("J Comp Physiol [B] 173, refs [1, 2]", markup.render({ span("J Comp Physiol [B] 173, refs [1, 2]") }))
+    assert.equals("not a \\[link](x)", markup.render({ span("not a [link](x)") }))
+    assert.equals("x^\\[n]", markup.render({ span("x^[n]") }))
+  end)
+
   it("keeps a paragraph of only a tab from looking blank, and reads it back as a tab", function()
     local line = markup.render({ span("\t") })
     assert.equals("\\\t", line)
@@ -205,6 +211,8 @@ describe("what is written reads back as it was", function()
     "<<- x", "<=>", "{x} y", "{first = 1cm} y", "Table: x", "Figure: x", ":::", "::: {float = right}", "|a|", "| a | b |",
     "{a}", "\\", "\\\\", "==x==", "++x++", "~~x~~", "*x*", "x\ny", "x\n- y", "x\n# y", "a ==b=={green} c", "![a](b)",
     "x\\", "[x](y)", "$x$", "^[n]", "⟦f⟧", "C++ and C++", "n = 20", "a_{b}", "x^{2}",
+    "J Physiol [B] 173", "[1]", "[1, 2] and [3]", "[a] [b](c)", "a]b[c", "[x]", "![x](y)", "x^[n]", "[[x]](y)", "]",
+    "[", "[x] (y)", "\\[ x \\]",
   }
   local BLOCKS = {
     {}, { align = "justify" }, { align = "center" }, { align = "left" }, { align = "justify", para = { first = "1cm" } },

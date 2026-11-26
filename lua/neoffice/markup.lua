@@ -433,6 +433,56 @@ local function could_misread(line)
 end
 
 -- Returns the line and, for every span, the { start, end } byte columns of its text.
+-- A line without the backslashes before brackets that start nothing: a "[" not in a link's text,
+-- not after ^ or ! and with no "](" before the next "[", and a "]" not in a link's text. (And the
+-- columns of cols, moved as the backslashes go.)
+local function unbracket(line, cols)
+  local out, removed, inlink, i = {}, {}, false, 1
+  while i <= #line do
+    local c, nx = line:sub(i, i), line:sub(i + 1, i + 1)
+    if c == "\\" and (nx == "[" or nx == "]") then
+      local rest = line:sub(i + 2)
+      local upto = rest:find("[", 1, true)
+      local drop = not inlink and (nx == "]" or not line:sub(i - 1, i - 1):match("[%^!]")
+        and not (upto and rest:sub(1, upto - 1) or rest):find("](", 1, true) and not (upto and rest:sub(1, upto - 1) or rest):find("\\](", 1, true))
+      if drop then
+        removed[#removed + 1] = i - 1
+      else
+        out[#out + 1] = c
+      end
+      out[#out + 1] = nx
+      i = i + 2
+    elseif c == "\\" then
+      out[#out + 1] = line:sub(i, i + 1)
+      i = i + 2
+    else
+      if c == "[" then
+        inlink = true
+      elseif c == "]" and nx == "(" then
+        inlink = false
+      end
+      out[#out + 1] = c
+      i = i + 1
+    end
+  end
+  if #removed == 0 then
+    return line, cols
+  end
+  local moved = {}
+  for k, col in ipairs(cols or {}) do
+    local pair = {}
+    for j = 1, 2 do
+      local n = 0
+      for _, r in ipairs(removed) do
+        n = n + (r < col[j] and 1 or 0)
+      end
+      pair[j] = col[j] - n
+    end
+    moved[k] = vim.tbl_extend("force", col, pair)
+  end
+  return table.concat(out), moved
+end
+
 function M.render(spans, block, strict)
   local parts, cols, len, cur = {}, {}, 0, {}
   local function put(s)
@@ -525,6 +575,14 @@ function M.render(spans, block, strict)
     end
     start = line:find("\n", start, true)
     start = start and start + 1
+  end
+  -- brackets that start no link, image or footnote are written as they are ("[B]", "[1, 2]": no
+  -- "\[", which reads as LaTeX's display math), if the line still reads back the same
+  if not strict and line:find("\\[%[%]]") then
+    local plain, pcols = unbracket(line, cols)
+    if M.same(plain, spans) then
+      line, cols = plain, pcols
+    end
   end
   -- what is written must read back as the same text: if not (marks next to text that looks like
   -- marks), it is written again escaping every character that could start a mark

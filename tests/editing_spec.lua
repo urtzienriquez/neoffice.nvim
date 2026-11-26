@@ -126,10 +126,13 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
 
     it("keeps any text: unicode, symbols, tabs, runs of spaces", function()
-      local text = "Ñandú — 日本語 😀 & < > \" ' \\* \\[x\\] # a\tb  c   d"
+      local text = "Ñandú — 日本語 😀 & < > \" ' \\* [x] # a\tb  c   d"
       H.set(12, text)
       H.reopen()
       assert.equals(text, H.paras()[12])
+      H.set(12, "\\[x\\] too") -- (typed escaped: the same brackets, shown without the backslashes)
+      H.reopen()
+      assert.equals("[x] too", H.paras()[12])
     end)
 
     it("keeps an empty paragraph you type in a paragraph of its own", function()
