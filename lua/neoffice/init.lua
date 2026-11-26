@@ -164,7 +164,7 @@ function M.paragraphs(lines, alone)
       end
     elseif prev and prev.text ~= "" and not prev.cell and not prev.alone and not alone[row] and #blanks == 0 and not cut and not next((markup.block(line))) then -- continues it
       local hard = #(prev.text:match("\\*$")) % 2 == 1 -- (after a "\": a line break, else a space)
-      local floating = not hard and markup.floats_only(lines[row - 1]) -- (its floating images, on a line of their own: nothing between)
+      local floating = not hard and (markup.floats_only(lines[row - 1]) or markup.floats_only(line)) -- (its floating images, on a line of their own, before or after its text: nothing between)
       if floating then
         prev.joins = prev.joins or {}
         prev.joins[row - prev.first] = 0
@@ -430,13 +430,17 @@ local function pieces(buf, para, new)
   -- field that shows that text and is at no field's place any more, rather than text that looks like it
   -- (lost: its mark is empty, its text deleted; this paragraph's first, then any, as when a paragraph
   -- was moved with dd and p; its mark then goes to its new place)
+  -- (an image the same way: the one of the same file inside the document)
+  local used_image = {} -- (image marks already matched: each once)
   local function lost_field(ch)
     local everywhere = api.nvim_buf_get_extmarks(buf, M.ns.object, 0, -1, { details = true })
     for _, list in ipairs({ objects, everywhere }) do
       for _, m in ipairs(list) do
         local object = doc.object[m[1]]
         local empty = m[4].end_row == m[2] and m[4].end_col == m[3]
-        if empty and object and object.visible and object.field and object.field.text == ch.field.text then
+        local same = object and (ch.field and object.field and object.field.text == ch.field.text
+          or ch.image and object.image and object.image.path == ch.image.path and doc.ctx.entries[ch.image.path])
+        if empty and object and object.visible and same then
           api.nvim_buf_set_extmark(buf, M.ns.object, ch.row, ch.col, {
             id = m[1], end_row = ch.end_row, end_col = ch.end_col, right_gravity = false, end_right_gravity = false,
           })
@@ -535,6 +539,28 @@ local function pieces(buf, para, new)
       end
     end
     local object = mark and doc.object[mark[1]]
+    if ch.image and not (object and object.image and object.image.path == ch.image.path and not used_image[mark[1]]) then
+      -- (its line typed again, or one above it: this paragraph's image of that file not yet taken,
+      -- else one whose text was deleted anywhere, moved with dd and p)
+      local found
+      for _, m in ipairs(doc.ctx.entries[ch.image.path] and objects or {}) do
+        local o = doc.object[m[1]]
+        if not found and not used_image[m[1]] and o and o.visible and o.image and o.image.path == ch.image.path then
+          found = m
+        end
+      end
+      if found then
+        mark, object = found, doc.object[found[1]]
+        api.nvim_buf_set_extmark(buf, M.ns.object, ch.row, ch.col, {
+          id = found[1], end_row = ch.end_row, end_col = ch.end_col, right_gravity = false, end_right_gravity = false,
+        })
+      else
+        object = lost_field(ch) or object
+      end
+    end
+    if ch.image and mark then
+      used_image[mark[1]] = true
+    end
     if ch.image then -- unchanged, edited (another path or alt text) or new
       local same = object and object.image and object.image.path == ch.image.path and object.image.alt == ch.image.alt
         and floats.key(object.image) == floats.key(ch.image)
@@ -924,20 +950,70 @@ local function find_captions(paras)
   end
 end
 
+-- A picture's height in the document (cm), from its element.
+local function image_height(s)
+  local o = s.object
+  local extent = o and xml.find(o, "wp:extent")
+  if extent then
+    return (tonumber(xml.attr(extent, "cy") or "") or 0) / 360000
+  end
+  return o and markup.cm(xml.attr(o, "svg:height") or "") or nil
+end
+
 -- A floating image (anchored to its paragraph: see floats.lua) shows at the start of its
 -- paragraph, wherever its anchor is in the text (its place is measured from the paragraph, so it
--- doesn't move); written, it goes there. (Not one inside a tracked change or a comment's range.)
-local function hoist_floats(paras)
+-- doesn't move); written, it goes there. Its paragraph's floating images all placed below the
+-- middle of its pictures (a figure with a picture on top, others under it): at its end, as they
+-- show. (Not one inside a tracked change or a comment's range.)
+local function hoist_floats(paras, page)
   for _, para in ipairs(paras) do
-    local depth, moved = 0, {}
+    local depth, moved, all = 0, {}, {}
+    local inline, below = 0, true
     for k, s in ipairs(para.spans) do
       depth = depth + ((s.insert_start or s.comment_start) and 1 or 0) - ((s.insert_end or s.comment_end) and 1 or 0)
-      if k > 1 and depth == 0 and s.image and floats.floating(s.image) then
-        moved[#moved + 1] = k
+      if s.image and floats.floating(s.image) then
+        all[#all + 1] = k
+        if depth == 0 then
+          moved[#moved + 1] = k
+        end
+      elseif s.image then
+        inline = math.max(inline, image_height(s) or 0)
       end
     end
-    for n = #moved, 1, -1 do
-      table.insert(para.spans, 1, table.remove(para.spans, moved[n] + (#moved - n)))
+    for _, k in ipairs(all) do
+      local top = page and floats.top(para.spans[k].image, page)
+      below = below and (top == true or type(top) == "number" and top >= inline / 2)
+    end
+    if inline > 0 and below and #moved == #all and #moved > 0 then
+      local list = {}
+      for n = #moved, 1, -1 do
+        table.insert(list, 1, table.remove(para.spans, moved[n]))
+      end
+      -- (at the end, from left to right, as they show side by side)
+      local SIDE = { left = 0, center = 1, right = 2 }
+      local function across(s)
+        local x = s.image.x and floats.signed_cm(s.image.x)
+        return x or (SIDE[s.image.float or "left"] or 0) * 100
+      end
+      for n, s in ipairs(list) do
+        s._order = n
+      end
+      table.sort(list, function(a, b)
+        local xa, xb = across(a), across(b)
+        if xa ~= xb then
+          return xa < xb
+        end
+        return a._order < b._order
+      end)
+      for _, s in ipairs(list) do
+        s._order = nil
+        para.spans[#para.spans + 1] = s
+      end
+    else
+      moved = vim.tbl_filter(function(k) return k > 1 end, moved) -- (one first already: where it is)
+      for n = #moved, 1, -1 do
+        table.insert(para.spans, 1, table.remove(para.spans, moved[n] + (#moved - n)))
+      end
     end
   end
 end
@@ -970,7 +1046,7 @@ local function open(buf, path)
   local fmt = require("neoffice." .. (ext == "doc" and "docx" or ext))
   local ctx, paras = fmt.load(base)
   find_captions(paras)
-  hoist_floats(paras)
+  hoist_floats(paras, fmt.page and fmt.page(ctx))
   ctx.dirty, ctx.files = {}, {} -- parts to write on save (name -> true, or content for new files)
   local doc = { path = path, base = base, is_doc = ext == "doc", fmt = fmt, ctx = ctx, paras = {}, run = {}, object = {}, comment = {}, change = {}, caption_seps = {}, caption_as = {}, boxes = {} }
   doc.stamp, doc.synced = stamp(path), not new -- (synced: the file has the base's content)
@@ -1225,8 +1301,26 @@ local function open(buf, path)
           lead = { prefix = #prefix, floats = split - #prefix }
         end
       end
+      -- (or last, on a line of their own after the text: placed under it, see hoist_floats)
+      local trailing = 0
+      while floating == 0 and para.spans[#para.spans - trailing] and para.spans[#para.spans - trailing].image
+        and floats.floating(para.spans[#para.spans - trailing].image) do
+        trailing = trailing + 1
+      end
+      local tail = trailing > 0 and trailing < #para.spans and cols[k][#para.spans - trailing + 1]
+      local cut = tail and tail[1]
+      local head = cut and text:sub(1, cut)
+      if head and head ~= "" and not head:match("[\n\\]$") and not head:match("^%s*$") and markup.floats_only(text:sub(cut + 1)) then
+        text = head
+      else
+        cut = nil
+      end
       for _, line in ipairs(vim.split(text, "\n", { plain = true })) do
         parts[#parts + 1] = line
+      end
+      if cut then
+        joins[#parts] = 0
+        parts[#parts + 1] = texts[k]:sub(cut + 1)
       end
       local starts, offset = {}, 0
       for i, line in ipairs(parts) do
@@ -1582,6 +1676,32 @@ function M.decorate_marks(buf, para, lines)
     end
   end
   gray(at, #text)
+  -- a link or an image, all of it, in links' colour ("[text](url)", "![alt](path)": not an image's
+  -- attributes, which are its format)
+  local function paint(from, to, group) -- (bytes from..to-1 of the text)
+    if to > from then
+      local r1, c1 = position(from)
+      local r2, c2 = position(to, true)
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r1, c1, { end_row = r2, end_col = c2, hl_group = group, priority = 125 })
+    end
+  end
+  for k, c in ipairs(chars) do
+    local len = c.len or #c.ch
+    if c.image then
+      local brace = text:sub(c.col + 1, c.col + len):find("){", 1, true)
+      paint(c.col, brace and c.col + brace or c.col + len, "NeofficeLink")
+    elseif c.link and not (chars[k - 1] and chars[k - 1].link == c.link) then
+      local j = k
+      while chars[j + 1] and chars[j + 1].link == c.link do
+        j = j + 1
+      end
+      local before = chars[k - 1] and chars[k - 1].col + (chars[k - 1].len or #chars[k - 1].ch) or 0
+      local open_at = text:sub(before + 1, c.col):match(".*()%[") -- (its "[": after marks before it)
+      local after = chars[j].col + (chars[j].len or #chars[j].ch)
+      local close = text:sub(after + 1, after + 2) == "](" and text:find(")", after + 3 + #c.link, true)
+      paint(open_at and before + open_at - 1 or c.col, close or after, "NeofficeLink")
+    end
+  end
   local function mark(from, to, group) -- (chars from..to)
     local r1, c1 = position(chars[from].col)
     local r2, c2 = position(chars[to].col + (chars[to].len or #chars[to].ch), true)

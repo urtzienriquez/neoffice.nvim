@@ -227,6 +227,21 @@ describe("showing images", function()
     assert.equals(1, #marks[1][4].virt_lines)
   end)
 
+  it("draws the images of one line side by side, each as wide as its share of the document's widths", function()
+    H.open(H.copy("rich.docx"))
+    local line = "![](" .. DOT .. "){width = 4cm, float = left, place = page, x = -0.1cm, y = 1cm}![](" .. DOT .. "){width = 12cm}"
+    api.nvim_buf_set_lines(0, 0, -1, false, { "Text above.", "", line, "", "Text below." })
+    calls = {}
+    images.refresh(api.nvim_get_current_buf())
+    vim.wait(500, function() return #calls >= 2 end)
+    assert.equals(2, #calls)
+    local a, b = calls[1].opts, calls[2].opts
+    assert.equals(a.row, b.row) -- (next to each other)
+    assert.truthy(b.col > a.col + a.width, vim.inspect({ a, b }))
+    local marks = api.nvim_buf_get_extmarks(0, api.nvim_get_namespaces().neoffice_images, 0, -1, {})
+    assert.equals(1, #marks) -- (one set of reserved lines, for both)
+  end)
+
   it("shows nothing for a missing image, and stops when the buffer is hidden", function()
     H.open(H.copy("rich.docx"))
     api.nvim_buf_set_lines(0, 0, -1, false, { "![](missing.png)", "", "![](" .. DOT .. ")" })

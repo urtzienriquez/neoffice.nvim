@@ -73,6 +73,7 @@ local function signed_cm(v)
   local cm = markup.cm(rest)
   return cm and (sign == "-" and -cm or cm)
 end
+M.signed_cm = signed_cm
 
 -- The attribute a value alone stands for ("right": float, "12cm": width), or nil.
 function M.name_of(value)
@@ -139,6 +140,20 @@ function M.place_key(img)
     copy[key] = not key:match("^crop%-") and value or nil
   end
   return M.render(copy)
+end
+
+-- Where a floating image's top is from its paragraph's (cm; for a place on the page, as if the
+-- paragraph started the page's text, as a figure's often does), true at the bottom of the page,
+-- nil if it isn't said.
+function M.top(attrs, page)
+  local y = attrs.y and signed_cm(attrs.y)
+  if attrs.place == "bottom" then
+    return true
+  elseif attrs.place == "page" then
+    return y and y - page.top
+  elseif attrs.place ~= "top" then
+    return y
+  end
 end
 
 -- Whether attributes place it out of the line.

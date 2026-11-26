@@ -253,3 +253,33 @@ describe("an image placed a little left of or above where it is measured from", 
     assert.is_true(math.abs(geo.h.offset + 0.1) < 1e-9, vim.inspect(geo))
   end)
 end)
+
+for _, ext in ipairs({ "docx", "odt" }) do
+  describe(ext .. " a figure: a picture with others floating under it", function()
+    it("shows the floating pictures after the picture they are under, left to right, and keeps them so", function()
+      local path = H.copy("rich." .. ext)
+      H.open(path)
+      local r = H.row(1)
+      local figure = {
+        "![](" .. DOT .. "){width = 4cm}",
+        "![](" .. DOT .. "){width = 3cm, float = left, place = page, x = 2cm, y = 20cm}![](" .. DOT .. "){width = 3cm, float = left, place = page, x = 9cm, y = 20cm}",
+      }
+      api.nvim_buf_set_lines(0, r - 1, r - 1, false, vim.list_extend(vim.deepcopy(figure), { "" }))
+      H.reopen()
+      local function bare(line) return (line or ""):gsub("%]%([^)]*%)", "]()") end -- (its pictures now inside it)
+      r = vim.iter(ipairs(H.lines())):find(function(_, l) return bare(l) == bare(figure[1]) end)
+      assert.truthy(r, table.concat(H.lines(), "\n"))
+      assert.equals(bare(figure[2]), bare(H.lines()[r + 1]))
+      figure = { H.lines()[r], H.lines()[r + 1] }
+      local main = zip.read(path, H.MAIN[ext])
+      assert.is_true(require("neoffice.xml").check(main))
+      -- its line typed again (cc): the same pictures, none added
+      local before = #vim.tbl_filter(function(n) return n:find("media/") or n:find("Pictures/") end, vim.tbl_keys(zip.list(path)))
+      api.nvim_buf_set_lines(0, r, r + 1, false, { (figure[2]:gsub("x = 9cm", "x = 10cm")) })
+      api.nvim_buf_set_lines(0, r - 1, r, false, { figure[1] })
+      H.reopen()
+      assert.equals((figure[2]:gsub("x = 9cm", "x = 10cm")), H.lines()[r + 1])
+      assert.equals(before, #vim.tbl_filter(function(n) return n:find("media/") or n:find("Pictures/") end, vim.tbl_keys(zip.list(path))))
+    end)
+  end)
+end

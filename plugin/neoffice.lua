@@ -73,6 +73,8 @@ local function highlights()
     NeofficeBold = { link = "@markup.strong" }, -- (bold, italics, strikethrough: as neoffice reads them)
     NeofficeItalic = { link = "@markup.italic" },
     NeofficeStrike = { link = "@markup.strikethrough" },
+    -- (a link or an image, all of it: "[text](url)", "![alt](path)"; as a colour scheme shows links)
+    NeofficeLink = { link = next(api.nvim_get_hl(0, { name = "@markup.link.label.markdown_inline" })) and "@markup.link.label.markdown_inline" or "@markup.link.label" },
     NeofficeStyleName = { link = "@label" }, -- (a style's name, in the styles at the top)
     NeofficeEscape = { link = "NeofficeMark" }, -- (a backslash that makes the next character plain text)
     NeofficeChangeInfo = { link = "Comment" },
@@ -86,6 +88,14 @@ local function highlights()
   }) do
     hl.default = true
     api.nvim_set_hl(0, name, hl)
+  end
+  -- a colour scheme's colours for markdown (headings, links, code...), for documents too (their
+  -- languages: "neoffice", "neoffice_inline", see neoffice.languages)
+  for name in pairs(api.nvim_get_hl(0, {})) do
+    local base, lang = name:match("^(@.+)%.(markdown[_inline]*)$")
+    if base and (lang == "markdown" or lang == "markdown_inline") then
+      api.nvim_set_hl(0, base .. (lang == "markdown" and ".neoffice" or ".neoffice_inline"), { link = name, default = true })
+    end
   end
   -- tracked changes: a colour for each author (insertions underlined, deletions struck through)
   for n, color in ipairs({ "#98c379", "#61afef", "#c678dd", "#e5c07b", "#56b6c2", "#e06c75" }) do

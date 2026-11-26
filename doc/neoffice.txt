@@ -446,7 +446,11 @@ paragraph's text (after the paragraph's marks, if it has any: `<=> `), wherever
 its anchor is in the text; written, it goes at the start of its paragraph (its
 place is measured from its paragraph: it stays where it was on the page). A
 line that holds only floating images is joined to the next with nothing
-between: the text is the paragraph's as it was. (Without `float`, an image on
+between: the text is the paragraph's as it was. In a figure, floating images
+placed under its picture (a map on top, two plots under it) show on a line of
+their own after it, as they are on the page, left to right; that line is
+joined to the one before it with nothing. Several images on a line show side
+by side. (Without `float`, an image on
 its own line is in the line, and joined to the text with a space, as lines
 are.) A floating image and its caption go together in a box
 (|neoffice-boxes|).
@@ -743,8 +747,10 @@ one gray, quieter than the text but readable (NeofficeMark: made from your
 colour scheme, half way between its text and background colours, again when it
 changes); what says what a paragraph is in that element's colour (a heading's
 `#`, a title's `%`, a list's `-`, a quote's `>`, a caption's word, a table's
-`|`, a box's `:::`); fields and numbers as your scheme shows special things;
-comments and changes in their own colours.
+`|`, a box's `:::`); a link or an image, all of it (`[text](url)`,
+`![alt](path)`), as your scheme shows links; fields and numbers as your scheme
+shows special things; comments and changes in their own colours. Your scheme's
+colours for markdown (headings, links, code) are a document's too.
 
 Highlight groups (all `default`, so your colour scheme can set them):
 
@@ -765,6 +771,11 @@ Highlight groups (all `default`, so your colour scheme can set them):
   NeofficeNumber            heading numbers
   NeofficeAlign             the alignment marks and format lines
   NeofficeStyleName         a style's name, in the styles at the top
+  NeofficeLink              a link or an image (not an image's attributes)
+  NeofficeBold              bold text (`**...**`)
+  NeofficeItalic            italic text (`*...*`)
+  NeofficeStrike            struck-through text (`~~...~~`; a single `~` is
+                            just text)
   NeofficeUnderline         underlined text (`++...++`)
   NeofficeHighlight_rrggbb  highlighted text, by colour (`==...==`)
   NeofficeTableOptions      a table's options line (`{width = full}`)

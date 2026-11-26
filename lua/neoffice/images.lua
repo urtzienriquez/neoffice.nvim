@@ -266,23 +266,43 @@ local function draw(buf)
   local config = require("neoffice").config
   api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   local wanted = {}
+  local markup = require("neoffice.markup")
   for row, line in ipairs(api.nvim_buf_get_lines(buf, 0, -1, false)) do
-    local pos = line:find("![", 1, true)
+    -- the line's images, side by side (as a figure of pictures next to each other), each as much of
+    -- the width as it is of theirs in the document (else the same)
+    local found, pos = {}, line:find("![", 1, true)
     while pos do
-      local _, path, after, _, attrs = require("neoffice.markup").image_at(line, pos)
-      local data = path and png(buf, path, attrs and attrs.attrs and require("neoffice.floats").crop(attrs.attrs))
-      if data then
-        local _, w, h = M.info(data)
-        local cols, rows = M.cells(w, h, config.image_width, config.image_height)
-        local blank = {}
-        for k = 1, rows do
-          blank[k] = { { " " } }
-        end
-        api.nvim_buf_set_extmark(buf, ns, row - 1, 0, { virt_lines = blank })
-        table.insert(wanted, { row = row, data = data, cols = cols, rows = rows, key = row .. ":" .. path })
-        break -- (one image per line is shown)
+      local _, path, after, _, attrs = markup.image_at(line, pos)
+      if path then
+        local a = attrs and attrs.attrs
+        found[#found + 1] = { path = path, data = png(buf, path, a and require("neoffice.floats").crop(a)),
+          width = a and a.width and markup.cm(a.width) }
       end
       pos = line:find("![", after or pos + 2, true)
+    end
+    local total, all_widths = 0, true
+    for _, f in ipairs(found) do
+      total, all_widths = total + (f.width or 0), all_widths and f.width ~= nil
+    end
+    local room = config.image_width - (#found - 1) -- (a column between them)
+    local left, most = 0, 0
+    for n, f in ipairs(found) do
+      local share = all_widths and total > 0 and f.width / total or 1 / #found
+      local max_cols = math.max(1, math.floor(room * share))
+      if f.data then
+        local _, w, h = M.info(f.data)
+        local cols, rows = M.cells(w, h, max_cols, config.image_height)
+        most = math.max(most, rows)
+        table.insert(wanted, { row = row, data = f.data, cols = cols, rows = rows, left = left, key = row .. ":" .. n .. ":" .. f.path })
+      end
+      left = left + max_cols + 1
+    end
+    if most > 0 then
+      local blank = {}
+      for k = 1, most do
+        blank[k] = { { " " } }
+      end
+      api.nvim_buf_set_extmark(buf, ns, row - 1, 0, { virt_lines = blank })
     end
   end
   vim.schedule(function() -- (once the reserved lines are on screen)
@@ -310,7 +330,7 @@ local function draw(buf)
           local line = api.nvim_buf_get_lines(buf, image.row - 1, image.row, false)[1] or ""
           local pos = vim.fn.screenpos(win, image.row, math.max(#line, 1))
           local top = pos.row + 1 -- (the reserved lines start right under the line)
-          local left = info.wincol + info.textoff
+          local left = info.wincol + info.textoff + image.left
           if pos.row > 0 and top + image.rows - 1 <= info.winrow + info.height - 1 and not covered(win, top, left, image.rows, image.cols) then
             local key = win .. ":" .. image.key
             local opts = { row = top, col = left, width = image.cols, height = image.rows }
