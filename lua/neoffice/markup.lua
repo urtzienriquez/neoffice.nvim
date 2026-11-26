@@ -135,7 +135,7 @@ function M.prefix(block)
   elseif block.quote then
     kind = "> "
   elseif list then
-    kind = ("  "):rep(list.level - 1) .. (list.kind == "bullet" and "- " or (list.n or 1) .. ". ")
+    kind = ("  "):rep(list.level - 1) .. (list.kind == "bullet" and "- " or (list.pattern or "1.") .. " ")
   end
   -- its own format's attributes, in braces (after its mark, if it has one: see paras.lua)
   local attrs = block.para and require("neoffice.paras").render(block.para) or ""
@@ -275,11 +275,53 @@ end
 -- The block a line starts with; where its text begins; where its kind's and its alignment's
 -- marker characters are (to escape them in a paragraph that isn't of that kind). Escaped markers
 -- (\#, \- ...) don't count.
+-- A numbered item's marker at the start of a line: not its number but its numbering's pattern, one
+-- part for each level shown, each ending in "." or ")": "1." "1.1." "1.a." "1)" "a)" "i)" (1:
+-- numbers, a or A: letters, i or I: roman numerals; letters and numerals alone only with ")", as
+-- "A. Smith" or "e.g. this" are text). Returns its pattern (as 1, a, A, i, I: "2.b." is "1.a."),
+-- its level (its parts' number, or with one part its indentation: two spaces a level), where its
+-- first separator is, and where its text starts; nil if the line doesn't start with one.
+local function part_class(part)
+  if part:match("^%d+$") then
+    return "1"
+  elseif part:match("^[ivxlcdm]+$") and (#part > 1 or part == "i") then
+    return "i"
+  elseif part:match("^[IVXLCDM]+$") and (#part > 1 or part == "I") then
+    return "I"
+  elseif part:match("^%l$") then
+    return "a"
+  elseif part:match("^%u$") then
+    return "A"
+  end
+end
+function M.list_marker(line)
+  local indent, rest_at = line:match("^( *)()")
+  local p, parts, first_sep = rest_at, {}, nil
+  while true do
+    local part, sep, after = line:match("^(%w+)([.)])()", p)
+    local class = part and part_class(part)
+    if not class then
+      return nil
+    end
+    parts[#parts + 1] = class .. sep
+    first_sep = first_sep or (after - 1)
+    p = after
+    if line:sub(p, p) == " " then
+      local first = line:match("^(%w+)", rest_at)
+      if not first:match("^%d+$") and (#parts > 1 or sep ~= ")") then
+        return nil -- (letters and numerals alone: only with ")")
+      end
+      local level = #parts > 1 and #parts or math.floor(#indent / 2) + 1
+      return table.concat(parts), level, first_sep, p + 1
+    end
+  end
+end
+
 function M.block(line)
   local block, start, kind_at = {}, 1, nil
   local hashes = line:match("^(#+) ")
   local indent, after = line:match("^( *)%- ()")
-  local number, dot, after_dot = line:match("^( *)%d+()%. ()")
+  local pattern, level, sep_at, after_marker = M.list_marker(line)
   local word, after_word = line:match("^([^%s:\\]+): ()")
   local caption = word and caption_kind(word)
   if M.box_line(line) then -- (a box's line: text that reads as one is escaped, "\:::")
@@ -296,8 +338,8 @@ function M.block(line)
     return { row = true }, 1, 1, nil
   elseif indent then
     block, start, kind_at = { list = { kind = "bullet", level = math.floor(#indent / 2) + 1 } }, after, #indent + 1
-  elseif number then
-    block, start, kind_at = { list = { kind = "number", level = math.floor(#number / 2) + 1 } }, after_dot, dot
+  elseif pattern then
+    block, start, kind_at = { list = { kind = "number", level = level, pattern = pattern } }, after_marker, sep_at
   end
   local align_at
   for _, align in ipairs({ "center", "justify", "right", "left" }) do
@@ -936,7 +978,7 @@ end
 -- What a "\\" escapes (the characters escape() and render() escape); before anything else, it is
 -- just a backslash. (A "\\" ending the text is a line break; "\\ " starting a line, a space.)
 local ESCAPED = {}
-for c in ("\\*[]$<>^_~=+|#%-.!{}:\n" .. "⟦⟧¶"):gmatch("[^\128-\191][\128-\191]*") do
+for c in ("\\*[]$<>^_~=+|#%-.!{}:)\n" .. "⟦⟧¶"):gmatch("[^\128-\191][\128-\191]*") do
   ESCAPED[c] = true
 end
 

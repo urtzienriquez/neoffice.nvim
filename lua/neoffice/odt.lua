@@ -122,7 +122,40 @@ local function list_kind(ctx, style_name, level)
   return level_style and level_style.tag == "text:list-level-style-number" and xml.attr(level_style, "style:num-format") ~= "" and "number" or "bullet"
 end
 
--- The list a paragraph is an item of: { kind = "bullet" | "number", level = 1.., id = its outermost list }.
+-- A numbered level's pattern (see markup.list_marker): the numbers it shows (its parents', as
+-- display-levels says, then its own), each in its level's format, and its suffix; "1." if it isn't
+-- one that can be written so (a prefix, "(1)"; no number).
+local ODF_SAMPLE = { ["1"] = "1", a = "a", A = "A", i = "i", I = "I" }
+local function level_style(ctx, style_name, level)
+  local style = style_name and ctx.list_styles[style_name]
+  for _, c in ipairs(style and element_children(style) or {}) do
+    if xml.attr(c, "text:level") == tostring(level) then
+      return c
+    end
+  end
+end
+local function list_pattern(ctx, style_name, level)
+  local own = level_style(ctx, style_name, level)
+  local fmt = own and xml.attr(own, "style:num-format")
+  if not own or own.tag ~= "text:list-level-style-number" or not ODF_SAMPLE[fmt or ""] or (xml.attr(own, "style:num-prefix") or "") ~= "" then
+    return "1."
+  end
+  local display = tonumber(xml.attr(own, "text:display-levels") or "1") or 1
+  local parts = {}
+  for l = level - display + 1, level - 1 do
+    local parent = level_style(ctx, style_name, l)
+    local pf = parent and xml.attr(parent, "style:num-format")
+    if not ODF_SAMPLE[pf or ""] then
+      return "1."
+    end
+    parts[#parts + 1] = ODF_SAMPLE[pf] .. "."
+  end
+  local pattern = table.concat(parts) .. ODF_SAMPLE[fmt] .. (xml.attr(own, "style:num-suffix") or "")
+  return markup.list_marker(pattern .. " x") == pattern and pattern or "1."
+end
+
+-- The list a paragraph is an item of: { kind = "bullet" | "number", level = 1.., id = its outermost
+-- list, pattern (numbered: see list_pattern), style (its list style's name) }.
 local function list_of(ctx, p)
   local level, style, top, node = 0, nil, nil, p.parent
   while node and LISTS[node.tag] do
@@ -134,7 +167,53 @@ local function list_of(ctx, p)
     end
     node = node.parent
   end
-  return top and { kind = list_kind(ctx, style, level), level = level, id = top }
+  if not top then
+    return nil
+  end
+  local kind = list_kind(ctx, style, level)
+  return { kind = kind, level = level, id = top, style = style, pattern = kind == "number" and list_pattern(ctx, style, level) or nil }
+end
+
+-- A list's level numbered as a pattern says ("1.a.": its own number in letters, after its parent's).
+-- Only where it is: the list it is in (its sub-list, for a sub-item: the sub-items under another
+-- item may be numbered their own way) gets a copy of its list style.
+local function set_pattern(ctx, p, pattern)
+  local list = list_of(ctx, p)
+  if not list or list.kind ~= "number" or list.pattern == pattern then
+    return
+  end
+  local target = list.level > 1 and p.parent and p.parent.parent or list.id -- (its sub-list, or its list)
+  local original = list.style and ctx.list_styles[list.style]
+  if not original then
+    return
+  end
+  local copy = xml.copy(original)
+  local name, n = nil, 1
+  repeat
+    name, n = "NeoList" .. n, n + 1
+  until not ctx.list_styles[name]
+  xml.set_attr(copy, "style:name", name)
+  xml.set_attr(copy, "style:display-name", nil)
+  xml.append(automatic(ctx), copy)
+  ctx.list_styles[name] = copy
+  xml.set_attr(target, "text:style-name", name)
+  for _, l in ipairs(xml.collect(target, { ["text:list"] = true })) do -- (the lists in it that said the same)
+    if l ~= target and xml.attr(l, "text:style-name") == list.style then
+      xml.set_attr(l, "text:style-name", name)
+    end
+  end
+  local own = level_style(ctx, name, list.level)
+  if not own or own.tag ~= "text:list-level-style-number" then
+    return
+  end
+  local parts = {}
+  for part in pattern:gmatch("[%w]+[.)]") do
+    parts[#parts + 1] = part
+  end
+  xml.set_attr(own, "style:num-format", parts[#parts]:sub(1, -2))
+  xml.set_attr(own, "style:num-suffix", parts[#parts]:sub(-1))
+  xml.set_attr(own, "style:num-prefix", nil)
+  xml.set_attr(own, "text:display-levels", #parts > 1 and tostring(#parts) or nil)
 end
 
 local function based_on(ctx, p, names) -- in one of these styles, or in a style based on one
@@ -754,10 +833,43 @@ end
 -- Make paragraph p an item of a list like `want` ({ kind, level }), or of no list: lift it out of
 -- its list (splitting the list around it), then put it in the list just before it, if that is of
 -- the same kind, or in a new one. List items that don't change are left as they are.
+-- (a list after a blank line is a list of its own; without one, it goes on with the list above it)
+local function join_or_split(ctx, p, want)
+  local list = list_of(ctx, p)
+  if not list or list.level ~= 1 or not want then
+    return
+  end
+  local item, top = p.parent, list.id
+  local items = element_children(top)
+  local first = items[1] == item and element_children(item)[1] == p
+  local siblings = element_children(top.parent)
+  local at = vim.iter(ipairs(siblings)):find(function(_, c) return c == top end)
+  local before = at and siblings[at - 1]
+  if want.continues and first and before and before.tag == "text:list" and list_kind(ctx, xml.attr(before, "text:style-name"), 1) == want.kind then
+    for _, c in ipairs(vim.list_slice(top.children)) do -- (its items join the list above it)
+      xml.remove(c)
+      xml.append(before, c)
+    end
+    xml.remove(top)
+  elseif not want.continues and not first and element_children(item)[1] == p then
+    local attrs = vim.tbl_filter(function(kv) return kv[1] ~= "xml:id" and kv[1] ~= "text:continue-numbering" and kv[1] ~= "text:continue-list" end,
+      vim.deepcopy(top.attrs))
+    local rest = xml.append(top.parent, xml.elem("text:list", attrs), xml.index(top) + 1)
+    for _, c in ipairs(vim.list_slice(top.children, xml.index(item))) do -- (it and what follows: a list of their own)
+      xml.remove(c)
+      xml.append(rest, c)
+    end
+  end
+end
+
 local function set_list(ctx, p, want)
   local have = list_of(ctx, p)
   local own_item = not have or element_children(p.parent)[1] == p -- (a new paragraph may share one)
   if own_item and (have and have.kind) == (want and want.kind) and (have and have.level) == (want and want.level) then
+    join_or_split(ctx, p, want)
+    if want and want.kind == "number" and want.pattern then
+      set_pattern(ctx, p, want.pattern)
+    end
     return
   end
   while p.parent and LISTS[p.parent.tag] do
@@ -781,7 +893,7 @@ local function set_list(ctx, p, want)
     local siblings = element_children(p.parent)
     local index = vim.iter(ipairs(siblings)):find(function(_, c) return c == p end)
     local prev = siblings[index - 1]
-    local container = prev and prev.tag == "text:list" and list_kind(ctx, xml.attr(prev, "text:style-name"), 1) == want.kind and prev
+    local container = want.continues and prev and prev.tag == "text:list" and list_kind(ctx, xml.attr(prev, "text:style-name"), 1) == want.kind and prev
     container = container or xml.append(p.parent, xml.elem("text:list", { { "text:style-name", list_style(ctx, want.kind) } }), xml.index(p))
     local top = container
     for _ = 2, want.level do -- down to its level, in the last item
@@ -801,6 +913,9 @@ local function set_list(ctx, p, want)
         xml.append(top, c)
       end
       xml.remove(next_list)
+    end
+    if want.kind == "number" and want.pattern then
+      set_pattern(ctx, p, want.pattern)
     end
   end
 end

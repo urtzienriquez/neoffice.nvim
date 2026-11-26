@@ -295,6 +295,10 @@ local function pieces(buf, para, new)
   local doc = M.docs[buf]
   local block, chars = markup.parse(para.text)
   block.cell = para.cell and true or nil
+  if block.list and not para.cell then -- (no blank line before it: it goes on with the list above it)
+    local above = para.first > 1 and api.nvim_buf_get_lines(buf, para.first - 2, para.first - 1, true)[1] or nil
+    block.list.continues = above and not above:match("^%s*$") or nil
+  end
   if para.cell and not block.align and para.cell.align ~= "left" then -- (its column's, unless it has its own)
     block.align = para.cell.align
   end
@@ -704,7 +708,7 @@ local function signature(block, list)
   local l = block.list
   local out = { table.concat({ tostring(block.heading), tostring(block.title), tostring(block.quote), tostring(block.align), tostring(block.caption),
     block.para and pformat.key({ attrs = block.para }) or "",
-    tostring(block.cell), l and table.concat({ l.kind, l.level, tostring(l.n), tostring(l.id) }, ",") or "" }, "|") }
+    tostring(block.cell), l and table.concat({ l.kind, l.level, tostring(l.pattern), tostring(l.id), tostring(l.continues) }, ",") or "" }, "|") }
   for _, piece in ipairs(list) do
     local keys = {}
     for key in pairs(piece) do
@@ -937,20 +941,7 @@ local function open(buf, path)
     api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   end
 
-  -- numbered list items show their numbers (counted per list and level)
-  local counters = {}
-  for _, para in ipairs(paras) do
-    local list = para.block.list
-    if list then
-      local count = counters[list.id or ""] or {}
-      counters[list.id or ""] = count
-      count[list.level] = (count[list.level] or 0) + 1
-      for deeper = list.level + 1, #count do
-        count[deeper] = nil
-      end
-      list.n = count[list.level]
-    end
-  end
+  -- (numbered list items show their numbering's pattern, "1." "1.1." "a)": the document counts)
 
   -- Each table's format, shown in its line of dashes (see markup.table_format): its attributes,
   -- and a column's alignment when all its paragraphs have it (then not shown in each).
@@ -1209,7 +1200,8 @@ local function open(buf, path)
         return r + row - 1, col - starts[row]
       end
       local next_list = paras[k + 1] and paras[k + 1].block.list
-      local tight = para.block.list and next_list and next_list.id == para.block.list.id and texts[k + 1] ~= ""
+      local tight = para.block.list and next_list and (next_list.group or next_list.id) == (para.block.list.group or para.block.list.id)
+        and texts[k + 1] ~= ""
       if texts[k] ~= "" and k < last_text and not tight and not ends_box then
         lines[#lines + 1] = ""
       end

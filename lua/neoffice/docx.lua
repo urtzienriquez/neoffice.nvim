@@ -150,13 +150,51 @@ local function read_comments(ctx)
 end
 
 -- Whether level `ilvl` of list `num_id` (numbering.xml) has bullets or numbers.
-local function list_kind(ctx, num_id, ilvl)
+local function abstract_of(ctx, num_id) -- (a list's definition: its w:abstractNum, and its w:num)
   local root = part(ctx, NUMBERING)
   local num = root and has(root, "w:num", "w:numId", num_id)
   local abstract_id = num and xml.attr(xml.child(num, "w:abstractNumId") or {}, "w:val")
-  local abstract = abstract_id and has(root, "w:abstractNum", "w:abstractNumId", abstract_id)
-  local lvl = abstract and has(abstract, "w:lvl", "w:ilvl", tostring(ilvl))
+  return abstract_id and has(root, "w:abstractNum", "w:abstractNumId", abstract_id), num
+end
+local function lvl_of(abstract, ilvl)
+  return abstract and has(abstract, "w:lvl", "w:ilvl", tostring(ilvl))
+end
+-- (a level as a list's instance has it: its own override, else its definition's)
+local function override_of(num, ilvl)
+  for _, o in ipairs(num and xml.collect(num, { ["w:lvlOverride"] = true }) or {}) do
+    if xml.attr(o, "w:ilvl") == tostring(ilvl) then
+      return o
+    end
+  end
+end
+local function eff_lvl(ctx, num_id, ilvl)
+  local abstract, num = abstract_of(ctx, num_id)
+  local o = override_of(num, ilvl)
+  return o and xml.child(o, "w:lvl") or lvl_of(abstract, ilvl)
+end
+local function list_kind(ctx, num_id, ilvl)
+  local lvl = eff_lvl(ctx, num_id, ilvl)
   return lvl and xml.attr(xml.child(lvl, "w:numFmt") or {}, "w:val") == "bullet" and "bullet" or "number"
+end
+-- A numbered level's pattern (see markup.list_marker): its text ("%1.%2."), each number in its
+-- level's format; "1." if it isn't one that can be written so ("(1)", "Step 1:").
+local SAMPLE = { decimal = "1", decimalZero = "1", lowerLetter = "a", upperLetter = "A", lowerRoman = "i", upperRoman = "I" }
+local FORMAT = { ["1"] = "decimal", a = "lowerLetter", A = "upperLetter", i = "lowerRoman", I = "upperRoman" }
+local function list_pattern(ctx, num_id, ilvl)
+  local lvl = eff_lvl(ctx, num_id, ilvl)
+  local text = lvl and xml.attr(xml.child(lvl, "w:lvlText") or {}, "w:val")
+  if not text then
+    return "1."
+  end
+  local ok = true
+  local pattern = text:gsub("%%(%d)", function(d)
+    local of = eff_lvl(ctx, num_id, tonumber(d) - 1)
+    local sample = of and SAMPLE[xml.attr(xml.child(of, "w:numFmt") or {}, "w:val") or ""]
+    ok = ok and sample ~= nil
+    return sample or "?"
+  end)
+  local back = ok and markup.list_marker(pattern .. " x")
+  return back == pattern and pattern or "1."
 end
 
 -- The list a paragraph (its pPr) is an item of, from its own numbering or its style's:
@@ -169,7 +207,117 @@ local function list_of(ctx, ppr)
     return nil
   end
   local ilvl = tonumber(xml.attr(xml.child(num_pr, "w:ilvl") or {}, "w:val") or "") or 0
-  return { kind = list_kind(ctx, num_id, ilvl), level = ilvl + 1, id = num_id }
+  local kind = list_kind(ctx, num_id, ilvl)
+  local abstract, num = abstract_of(ctx, num_id)
+  local restarts = false -- (an instance numbering again from 1: a list of its own, where it starts)
+  for _, o in ipairs(num and xml.collect(num, { ["w:lvlOverride"] = true }) or {}) do
+    restarts = restarts or (xml.attr(o, "w:ilvl") == "0" and xml.child(o, "w:startOverride") ~= nil)
+  end
+  return { kind = kind, level = ilvl + 1, id = num_id, pattern = kind == "number" and list_pattern(ctx, num_id, ilvl) or nil,
+    abstract = abstract and xml.attr(abstract, "w:abstractNumId"), restarts = restarts }
+end
+
+-- Lists' instances (w:num): one list (its w:abstractNum) can have several, which count on from
+-- each other (Word and LibreOffice do so), each with its own levels where it overrides them. A
+-- level numbered as a pattern says ("1.a.") other than the list's is an instance of it with that
+-- level overridden: the sub-items under one item "a), b)", under another "1., 2.", the same list.
+local function new_num(ctx, abstract_id, overrides) -- (overrides: w:lvlOverride elements)
+  local root = xml.find(part(ctx, NUMBERING), "w:numbering")
+  local id = tostring(vim.iter(xml.collect(root, { ["w:num"] = true })):fold(0, function(n, el)
+    return math.max(n, tonumber(xml.attr(el, "w:numId")) or 0)
+  end) + 1)
+  local num = xml.elem("w:num", { { "w:numId", id } }, { xml.elem("w:abstractNumId", { { "w:val", abstract_id } }) })
+  for _, o in ipairs(overrides or {}) do
+    xml.append(num, o)
+  end
+  local nums = xml.collect(root, { ["w:num"] = true })
+  local last = nums[#nums]
+  xml.append(root, num, last and last.parent == root and xml.index(last) + 1 or nil)
+  ctx.dirty[NUMBERING] = true
+  return id
+end
+local function lvl_for(ctx, num_id, ilvl, pattern) -- (the level as num_id has it, numbered as pattern says)
+  local lvl = xml.copy(eff_lvl(ctx, num_id, ilvl) or xml.elem("w:lvl", { { "w:ilvl", tostring(ilvl) } }))
+  local parts = {}
+  for part in pattern:gmatch("[%w]+[.)]") do
+    parts[#parts + 1] = part
+  end
+  local text = {}
+  for k, part in ipairs(parts) do -- (each part: the number of its level, the last this one's)
+    text[k] = "%" .. (ilvl + 1 - #parts + k) .. part:sub(-1)
+  end
+  local function child(tag)
+    return xml.child(lvl, tag) or xml.append(lvl, xml.elem(tag), 2)
+  end
+  xml.set_attr(child("w:numFmt"), "w:val", FORMAT[parts[#parts]:sub(1, -2)] or "decimal")
+  xml.set_attr(child("w:lvlText"), "w:val", table.concat(text))
+  return lvl
+end
+-- The instances the list items just before p have (back to the first item of their list).
+local function nums_before(ctx, p)
+  local out = {}
+  for k = xml.index(p) - 1, 1, -1 do
+    local sibling = p.parent.children[k]
+    if sibling.tag == "w:p" then
+      local list = list_of(ctx, xml.child(sibling, "w:pPr"))
+      if not list then
+        break
+      end
+      out[#out + 1] = list.id
+    elseif sibling.tag then
+      break
+    end
+  end
+  return out
+end
+-- The instance of base's list for an item of level ilvl numbered as pattern: base itself, one the
+-- items before it have, or a new one overriding that level (and keeping base's overrides of the
+-- levels under it: a restart there).
+local function num_for(ctx, p, base, ilvl, pattern)
+  if not pattern or list_pattern(ctx, base, ilvl) == pattern then
+    return base
+  end
+  local abstract, num = abstract_of(ctx, base)
+  local id = abstract and xml.attr(abstract, "w:abstractNumId")
+  for _, other in ipairs(nums_before(ctx, p)) do
+    if xml.attr(select(2, abstract_of(ctx, other)) and xml.child(select(2, abstract_of(ctx, other)), "w:abstractNumId") or {}, "w:val") == id
+      and list_pattern(ctx, other, ilvl) == pattern then
+      return other
+    end
+  end
+  local overrides = {}
+  for _, o in ipairs(num and xml.collect(num, { ["w:lvlOverride"] = true }) or {}) do
+    if (tonumber(xml.attr(o, "w:ilvl")) or 0) > ilvl then -- (deeper levels' own: as they were)
+      overrides[#overrides + 1] = xml.copy(o)
+    elseif tonumber(xml.attr(o, "w:ilvl")) == ilvl and xml.child(o, "w:startOverride") then
+      overrides[#overrides + 1] = xml.elem("w:lvlOverride", { { "w:ilvl", tostring(ilvl) } }, { xml.copy(xml.child(o, "w:startOverride")) })
+    end
+  end
+  local mine = vim.iter(overrides):find(function(o) return xml.attr(o, "w:ilvl") == tostring(ilvl) end)
+  if not mine then
+    mine = xml.elem("w:lvlOverride", { { "w:ilvl", tostring(ilvl) } })
+    table.insert(overrides, 1, mine)
+  end
+  xml.append(mine, lvl_for(ctx, base, ilvl, pattern))
+  return new_num(ctx, id, overrides)
+end
+-- A list's new instance numbering from 1 again (an item after a blank line, from the same list).
+local function restart_num(ctx, base)
+  local abstract, num = abstract_of(ctx, base)
+  local overrides = {}
+  for _, o in ipairs(num and xml.collect(num, { ["w:lvlOverride"] = true }) or {}) do
+    local lvl = xml.child(o, "w:lvl")
+    if lvl then
+      overrides[#overrides + 1] = xml.elem("w:lvlOverride", { { "w:ilvl", xml.attr(o, "w:ilvl") } }, { xml.copy(lvl) })
+    end
+  end
+  local first = vim.iter(overrides):find(function(o) return xml.attr(o, "w:ilvl") == "0" end)
+  if not first then
+    first = xml.elem("w:lvlOverride", { { "w:ilvl", "0" } })
+    table.insert(overrides, 1, first)
+  end
+  xml.append(first, xml.elem("w:startOverride", { { "w:val", "1" } }), 1)
+  return new_num(ctx, xml.attr(abstract, "w:abstractNumId"), overrides)
 end
 
 -- The block of a paragraph (see markup.prefix), from its properties.
@@ -776,6 +924,21 @@ function M.load(path)
     local direct = para.block.heading and xml.child(xml.child(para.node, "w:pPr") or {}, "w:numPr")
     return direct and xml.attr(xml.child(direct, "w:numId") or {}, "w:val") ~= "0"
   end)
+  -- (which items are one list, as Word counts them: those of one definition, its instances counting
+  -- on from each other, until one that numbers again from 1 is first used)
+  local seen, group_of, groups = {}, {}, 0
+  for _, para in ipairs(paras) do
+    local l = para.block.list
+    if l and l.abstract then
+      local first = not seen[l.id]
+      seen[l.id] = true
+      if not group_of[l.abstract] or first and l.restarts then
+        groups = groups + 1
+        group_of[l.abstract] = groups
+      end
+      l.group = group_of[l.abstract]
+    end
+  end
   return ctx, paras
 end
 
@@ -1007,14 +1170,45 @@ end
 -- or of no list. Returns ppr.
 local function set_list(ctx, p, ppr, want)
   local have = list_of(ctx, ppr)
-  if have and want and have.kind == want.kind and have.level == want.level then
-    return ppr
-  end
-  ppr = ppr or xml.elem("w:pPr")
   if want then
-    local num_id = have and have.kind == want.kind and have.id or previous_list(ctx, p, want.kind) or new_list(ctx, want.kind)
+    -- its list: the one of the item just before it (no blank line between), else its own (a new
+    -- instance numbering again, if that is the one before it), else a new one
+    local before = previous_list(ctx, p, want.kind)
+    local base
+    if want.continues and before then
+      base = before
+    elseif have and have.kind == want.kind then
+      local before_any = previous_list(ctx, p, have.kind)
+      local _, num = abstract_of(ctx, have.id)
+      local restarts = num and vim.iter(xml.collect(num, { ["w:startOverride"] = true })):any(function() return true end)
+      local same = before_any and (before_any == have.id or abstract_of(ctx, before_any) == abstract_of(ctx, have.id) and not restarts)
+      base = same and restart_num(ctx, have.id) or have.id -- (after a blank line: numbered again from 1)
+    else
+      base = new_list(ctx, want.kind)
+    end
+    local num_id = want.kind == "number" and num_for(ctx, p, base, want.level - 1, want.pattern) or base
+    if have and have.id == num_id and have.level == want.level then
+      return ppr
+    end
+    ppr = ppr or xml.elem("w:pPr")
     set_numbering(ppr, num_id, want.level - 1)
+    if have and have.id ~= num_id then -- (the rest of its list after it comes along)
+      for k = xml.index(p) + 1, #p.parent.children do
+        local next_p = p.parent.children[k]
+        if next_p.tag == "w:p" then
+          local next_ppr = xml.child(next_p, "w:pPr")
+          local list = list_of(ctx, next_ppr)
+          if not list or list.id ~= have.id then
+            break
+          end
+          set_numbering(next_ppr, num_for(ctx, next_p, num_id, list.level - 1, list.pattern), list.level - 1)
+        elseif next_p.tag then
+          break
+        end
+      end
+    end
   else
+    ppr = ppr or xml.elem("w:pPr")
     set_numbering(ppr, nil)
     if list_of(ctx, ppr) then -- its style is a list: this paragraph isn't
       set_numbering(ppr, "0")

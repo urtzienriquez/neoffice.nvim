@@ -19,7 +19,9 @@ else in the file stays exactly as it was.
   0.5cm}` sets what the paragraphs after it have of their own, against their style, until the next;
   one that differs says how (`<|> A centred one.`, `{before = 12pt} More space.`). A few words in
   another font: `[words]{font = Arial}`. A code action moves a format into its style.
-- Paragraphs: `# ` headings (numbered on demand), `% ` title, `> ` quote, `- ` and `1. ` lists,
+- Paragraphs: `# ` headings (numbered on demand), `% ` title, `> ` quote, `- ` and numbered lists
+  written as their numbering's pattern (`1.` for every item, `1.1.` or `1.a.` for sub-items: the
+  document counts),
   and alignment `<|> centered`, `->> right`, `<=> justified`.
 - Line breaks (`\` at the end of a line) and page breaks (`\newpage`).
 - Tables as pipe tables (`| a | b |`): edit cells, add or remove rows and columns, new tables.

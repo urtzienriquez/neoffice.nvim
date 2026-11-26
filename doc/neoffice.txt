@@ -63,14 +63,36 @@ A paragraph's kind is written at the start of its line:
   `% `                    the title (the document's Title style)
   `> `                    a quote (its Quote style)
   `- `                    a bullet list item
-  `1. `                   a numbered list item
+  `1. `, `1.1. `, `a) `   a numbered list item (|neoffice-lists|)
   `Table: `, `Figure: `   a caption (|neoffice-captions|)
 
 List items are indented two spaces per level, and can follow each other with
-no blank line between them. The numbers shown are those the document shows:
-the number you type doesn't matter. Headings are found by their style,
+no blank line between them. Headings are found by their style,
 whatever its name in your language; a heading of a level the document has no
 style for gets a "heading N" style.
+
+                                                              *neoffice-lists*
+A numbered item's marker isn't its number but its numbering's pattern: the
+document counts. Write every item of a level the same, and Word or
+LibreOffice number them: >
+
+  1. first item                 1. first item
+  1. second item                2. second item
+    1.1. second sub one           2.1. second sub one
+    1.1. second sub two           2.2. second sub two
+<
+A pattern has a part for each level it shows, each ending in `.` or `)`:
+`1` numbers, `a` `A` letters, `i` `I` roman numerals: `1.` `1.1.` `1.a.` `1)`
+`a)` `i)`. Its level is its number of parts (`1.1.` is a sub-item), or, with
+one part, its indentation. Letters and numerals alone take `)`: `a)`, not
+`a.` ("A. Smith" and "e.g." are text). A list opens with its patterns, from
+its definition (Word's numbering, LibreOffice's list style). Each item is
+numbered as its own pattern says, so the sub-items under one item can be
+`1.1.` and those under the next `1.a.`: 1.1, 1.2, 2, 2.a, 2.b, 3 (in Word, an
+instance of the list overriding that level; in LibreOffice, the sub-list's own
+list style). One that can't be written so ("(1)", "Step 1:") shows as `1.` and
+is kept as it is unless you change it. Items one after another are one list;
+a blank line (or a paragraph) between them starts another, numbered from 1.
 
                                                               *neoffice-align*
 Its alignment comes after its kind:

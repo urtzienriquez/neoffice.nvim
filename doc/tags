@@ -21,6 +21,7 @@ neoffice-format-into-style	neoffice.txt	/*neoffice-format-into-style*
 neoffice-highlights	neoffice.txt	/*neoffice-highlights*
 neoffice-images	neoffice.txt	/*neoffice-images*
 neoffice-keymaps	neoffice.txt	/*neoffice-keymaps*
+neoffice-lists	neoffice.txt	/*neoffice-lists*
 neoffice-lsp	neoffice.txt	/*neoffice-lsp*
 neoffice-marks	neoffice.txt	/*neoffice-marks*
 neoffice-options	neoffice.txt	/*neoffice-options*
