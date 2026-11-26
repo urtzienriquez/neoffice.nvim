@@ -190,3 +190,81 @@ describe("the language server, on fonts", function()
     assert.truthy(vim.iter(items):find(function(i) return i.label == "11pt" end))
   end)
 end)
+
+-- a table whose text has a font of its own (as forms have it: Arial over a Calibri style)
+local TABLED = {
+  docx = function(name, text)
+    if name ~= "word/document.xml" then
+      return text
+    end
+    local function tc(t)
+      return '<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p><w:r><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr><w:t>' .. t .. "</w:t></w:r></w:p></w:tc>"
+    end
+    local tbl = '<w:tbl><w:tblPr><w:tblW w:w="6000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>'
+      .. "<w:tr>" .. tc("Period") .. tc("Place") .. "</w:tr><w:tr>" .. tc("2016") .. tc("Here") .. "</w:tr></w:tbl><w:p/>"
+    return (text:gsub("<w:body>", "<w:body>" .. tbl, 1))
+  end,
+  odt = function(name, text)
+    if name ~= "content.xml" then
+      return text
+    end
+    local style = '<style:style style:name="Mono" style:family="text"><style:text-properties style:font-name="Courier New" fo:font-family="\'Courier New\'"/></style:style>'
+    local function tc(t)
+      return '<table:table-cell><text:p><text:span text:style-name="Mono">' .. t .. "</text:span></text:p></table:table-cell>"
+    end
+    local tbl = '<table:table table:name="Form"><table:table-column table:number-columns-repeated="2"/>'
+      .. "<table:table-row>" .. tc("Period") .. tc("Place") .. "</table:table-row><table:table-row>" .. tc("2016") .. tc("Here") .. "</table:table-row></table:table><text:p/>"
+    return (text:gsub("<office:automatic%-styles>", "%0" .. style, 1):gsub("<office:text>", "%0" .. tbl, 1))
+  end,
+}
+
+for _, ext in ipairs({ "docx", "odt" }) do
+  describe(ext .. " new text takes the formatting of what it is next to", function()
+    it("in a row pasted in a table: its column's, not the style's", function()
+      local path = H.copy("rich." .. ext, TABLED[ext])
+      H.open(path)
+      local r = vim.iter(ipairs(H.lines())):find(function(_, l) return l:find("^| 2016") end)
+      assert.truthy(r, table.concat(H.lines(), "\n"))
+      local line = H.lines()[r]
+      api.nvim_buf_set_lines(0, r, r, false, { line }) -- (yyp)
+      api.nvim_buf_set_text(0, r, 2, r, 6, { "2024" })
+      H.reopen()
+      assert.truthy(vim.tbl_contains(H.paras(), "2024"), table.concat(H.lines(), "\n"))
+      assert.is_nil(H.lines()[r + 1]:find("font", 1, true), H.lines()[r + 1]) -- (as the rest: nothing to say)
+      local main = zip.read(path, H.MAIN[ext])
+      if ext == "docx" then
+        local before = main:sub(1, main:find(">2024<", 1, true))
+        assert.truthy(before:sub(before:match(".*()<w:r>")):find("Courier New", 1, true), before:sub(-300))
+      else
+        local span = main:match('<text:span text:style%-name="([^"]+)">2024</text:span>')
+        assert.truthy(span, main:match("<table:table .-</table:table>"))
+        assert.truthy(main:find('style:name="' .. span .. '"[^>]*>%s*<style:text%-properties[^>]*Courier New') or span == "Mono", span)
+      end
+    end)
+
+    it("a list item where there are none: the text near it's (its number not in bold or italics)", function()
+      local path = H.copy("rich." .. ext, SIZED[ext])
+      H.open(path)
+      for r = #H.lines(), 1, -1 do -- (a document without lists, as a form)
+        if H.lines()[r]:match("^%s*[-*] ") or H.lines()[r]:match("^%s*%d+[.)] ") then
+          api.nvim_buf_set_lines(0, r - 1, r, false, {})
+        end
+      end
+      H.reopen()
+      local r = H.row(2)
+      api.nvim_buf_set_lines(0, r, r, false, { "", "1. A new item" })
+      H.reopen()
+      local k = vim.fn.index(H.paras(), "1. A new item") + 1
+      assert.truthy(k > 0, table.concat(H.paras(), "\n"))
+      local main = zip.read(path, H.MAIN[ext])
+      if ext == "docx" then
+        local p = main:match("<w:p>(<w:pPr><w:numPr>.-)A new item")
+        assert.truthy(p and p:find("Times New Roman", 1, true), p)
+        assert.is_nil(p:match("<w:pPr>.-<w:rPr>(.-)</w:rPr>.-</w:pPr>") and p:match("<w:pPr>.-<w:rPr>(.-)</w:rPr>.-</w:pPr>"):find("<w:i/>", 1, true))
+      else
+        assert.truthy(main:find("Times New Roman", 1, true))
+        assert.is_nil(H.lines()[H.row(k) - 1]:find("^{font"), H.lines()[H.row(k) - 1])
+      end
+    end)
+  end)
+end

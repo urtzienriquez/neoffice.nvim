@@ -959,7 +959,9 @@ function M.new_para(template)
     end
   end
   local mark = ppr and xml.child(ppr, "w:rPr")
-  for _, tag in ipairs({ "w:ins", "w:del", "w:moveFrom", "w:moveTo", "w:rPrChange" }) do
+  -- (nor its mark's bold, italics...: a list item's number is shown with them; its font and size stay)
+  for _, tag in ipairs({ "w:ins", "w:del", "w:moveFrom", "w:moveTo", "w:rPrChange", "w:b", "w:bCs", "w:i", "w:iCs", "w:u", "w:strike",
+    "w:dstrike", "w:caps", "w:smallCaps", "w:highlight", "w:vertAlign", "w:shd" }) do
     local el = mark and xml.child(mark, tag)
     if el then
       xml.remove(el)
@@ -1560,6 +1562,20 @@ function M.paragraph_styles(ctx) -- (the names of all its paragraph styles)
     end
   end
   return out
+end
+-- The paragraph styles in use: in the text, headers, footers and notes (ids).
+function M.styles_in_use(ctx)
+  local used = {}
+  for name in pairs(ctx.entries or {}) do
+    if name == M.MAIN or name:match("^word/header%d*%.xml$") or name:match("^word/footer%d*%.xml$") or name == "word/footnotes.xml" or name == "word/endnotes.xml" then
+      local root = name == M.MAIN and ctx.root or part(ctx, name)
+      for _, el in ipairs(root and xml.collect(root, { ["w:pStyle"] = true }) or {}) do
+        used[xml.attr(el, "w:val") or ""] = true
+      end
+    end
+  end
+  used[""] = nil
+  return vim.tbl_keys(used)
 end
 function M.style_id(ctx, name) -- (by its name, whatever its case; nil if it has none)
   for _, st in ipairs(xml.collect(styles_el(ctx), { ["w:style"] = true })) do

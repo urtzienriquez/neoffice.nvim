@@ -127,7 +127,9 @@ the document's defaults): `font`, `size`, `align`, `bold`, `italic`, and the
 format's attributes below. Editing a line changes the style itself, so every
 paragraph of it follows (in the whole document: its headers and footnotes
 too), as in Word and LibreOffice; a style based on it keeps what its own line
-shows. Deleting a line, or the whole header, changes nothing; a line naming
+shows, and so does one in use that isn't at the top (a header's, a footer's, a
+footnote's): only what you changed changes. A paragraph keeps the format of
+its own (an empty one too, which shows as a blank line and has none to say). Deleting a line, or the whole header, changes nothing; a line naming
 a style the document hasn't, or an attribute that isn't one, makes the write
 fail, saying so. The language server completes the styles' names (those the
 document has) and their attributes, and folds the header out of the way
@@ -307,8 +309,9 @@ side of a cell); after typing, |vim.lsp.buf.format()| aligns them again
 <
 Edit the cells' text, add a row by adding a line, delete a row by deleting its
 line, and add or remove a column by adding or removing a cell in every row.
-New rows and cells are formatted like the ones next to them; those you don't
-touch keep their exact XML. To make a new table, type one, with a blank line
+New rows and cells are formatted like the ones next to them (a row pasted:
+its text as its column's in the row above, whatever the style says; a new
+table's, as the text near it); those you don't touch keep their exact XML. To make a new table, type one, with a blank line
 before and after it. Cells merged across columns show as one cell (those rows
 have fewer cells), and a line break inside a cell shows as `￼`. Such a row
 keeps its merged cells: empty cells added after them (as a formatter may add

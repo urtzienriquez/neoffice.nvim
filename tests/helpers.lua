@@ -22,7 +22,7 @@ function H.copy(name, edit)
   assert(vim.uv.fs_copyfile(H.FIXTURES .. name, path))
   if edit then
     local entries = {}
-    for _, entry in ipairs({ "word/document.xml", "word/styles.xml", "content.xml" }) do
+    for _, entry in ipairs({ "word/document.xml", "word/styles.xml", "word/footnotes.xml", "content.xml" }) do
       local text = zip.read(path, entry)
       if text then
         entries[entry] = edit(entry, text)

@@ -293,28 +293,73 @@ local function neighbour_props(buf, para, block)
   end
   local want = kind(block)
   local last = api.nvim_buf_line_count(buf) - 1
-  for _, dir in ipairs({ -1, 1 }) do
-    local from = dir < 0 and { para.first - 2, -1 } or { para.owns, 0 }
-    while from[1] >= 0 and from[1] <= last do
-      local found = api.nvim_buf_get_extmarks(buf, M.ns.run, from, dir < 0 and 0 or -1, { limit = 1 })[1]
-      if not found then
-        break
+  -- (a list item or a quote with none of its kind near: as the plain paragraphs, as a form's text)
+  local wants = { want }
+  if block.list or block.quote then
+    wants[2] = kind({})
+  end
+  for _, wanted in ipairs(wants) do
+    want = wanted
+    for _, dir in ipairs({ -1, 1 }) do
+      local from = dir < 0 and { para.first - 2, -1 } or { para.owns, 0 }
+      while from[1] >= 0 and from[1] <= last do
+        local found = api.nvim_buf_get_extmarks(buf, M.ns.run, from, dir < 0 and 0 or -1, { limit = 1 })[1]
+        if not found then
+          break
+        end
+        local row = found[2]
+        local line = api.nvim_buf_get_lines(buf, row, row + 1, true)[1]
+        if kind((markup.block(line))) == want then
+          local best, size
+          for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.run, { row, 0 }, { row, -1 }, { details = true })) do
+            local len = (m[4].end_row == row and m[4].end_col or #line) - m[3]
+            if doc.run[m[1]] and (not size or len > size) then
+              best, size = doc.run[m[1]], len
+            end
+          end
+          if best then
+            return best
+          end
+        end
+        from = dir < 0 and { row - 1, -1 } or { row + 1, 0 }
       end
-      local row = found[2]
-      local line = api.nvim_buf_get_lines(buf, row, row + 1, true)[1]
-      if kind((markup.block(line))) == want then
+    end
+  end
+end
+
+-- The run properties for the text of a new paragraph in a table cell (a row pasted, a cell typed):
+-- those of most of the cell in its column in the nearest row above it (else below) that has text,
+-- else of any cell in the nearest rows: as its row and column look.
+local function cell_props(buf, para)
+  local doc = M.docs[buf]
+  local last = api.nvim_buf_line_count(buf) - 1
+  local here = para.first - 1
+  for _, any in ipairs({ false, true }) do
+    for _, dir in ipairs({ -1, 1 }) do
+      local r = here + dir
+      while r >= 0 and r <= last do
+        local line = api.nvim_buf_get_lines(buf, r, r + 1, true)[1]
+        if not line:match("^|") then
+          break
+        end
+        local spans = not markup.table_format(line) and markup.cell_spans(line) or {}
         local best, size
-        for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.run, { row, 0 }, { row, -1 }, { details = true })) do
-          local len = (m[4].end_row == row and m[4].end_col or #line) - m[3]
-          if doc.run[m[1]] and (not size or len > size) then
-            best, size = doc.run[m[1]], len
+        for c, sp in ipairs(spans) do
+          if any or c == para.cell.col then
+            for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.run, { r, sp.s - 1 }, { r, sp.e }, { details = true, overlap = true })) do
+              local s = math.max(m[3], sp.s - 1)
+              local e = m[4].end_row == r and math.min(m[4].end_col, sp.e) or sp.e
+              if doc.run[m[1]] and e > s and (not size or e - s > size) then
+                best, size = doc.run[m[1]], e - s
+              end
+            end
           end
         end
         if best then
           return best
         end
+        r = r + dir
       end
-      from = dir < 0 and { row - 1, -1 } or { row + 1, 0 }
     end
   end
 end
@@ -481,6 +526,13 @@ local function pieces(buf, para, new)
 
   -- the font and size its text is to have where it says nothing: its format's (a plain paragraph's),
   -- else what most of its text has now (false: none of its own, its style's)
+  -- (a new paragraph with no runs of its own: its text as the one next to it, in a table its row's
+  -- and column's; what its font and size are counted from too)
+  local inherited
+  if new and not runs[1] and #chars > 0 then
+    -- (a new table's first cells: as the text near it)
+    inherited = para.cell and cell_props(buf, para) or neighbour_props(buf, para, para.cell and {} or block)
+  end
   local fonts = {}
   local own_of, known = doc.fmt.run_font or function() return {} end, {}
   local function own(props) -- (once for each run's properties)
@@ -491,7 +543,7 @@ local function pieces(buf, para, new)
     if block.para then -- (none: its style's)
       fonts[key] = block.para[key] or false
     else
-      local weight, order, at, props_now = {}, {}, walker(runs), runs[1] and doc.run[runs[1][1]]
+      local weight, order, at, props_now = {}, {}, walker(runs), runs[1] and doc.run[runs[1][1]] or inherited
       for _, ch in ipairs(chars) do
         if ch.ch ~= "" and ch.ch ~= "\n" and not ch[key] then
           local run = at(ch)
@@ -514,9 +566,7 @@ local function pieces(buf, para, new)
 
   local out, e, parts = {}, 1, {} -- (parts: how many pieces of each deletion so far)
   local props = runs[1] and doc.run[runs[1][1]] -- text before the first run takes its properties
-  if new and not props and not para.cell and #chars > 0 then -- (a new paragraph: its text as the paragraph next to it's)
-    props = neighbour_props(buf, para, block)
-  end
+  props = props or inherited
   local has_inserts = false
   for _, m in ipairs(changes) do
     has_inserts = has_inserts or m[5].type == "insert"
@@ -2419,13 +2469,28 @@ function M.save(buf, target)
     end
     local restore = checkpoint(ctx, notes)
     local written, failure = pcall(function()
+    -- (the other styles in use, not at the top, as they look: those based on one that changes
+    -- keep it, as those at the top do; a footer's, a footnote's...)
+    local others = {}
+    if next(restyle) and doc.fmt.styles_in_use then
+      local listed = {}
+      for _, st in ipairs(header.styles) do
+        listed[st.id] = true
+      end
+      for _, id in ipairs(doc.fmt.styles_in_use(ctx)) do
+        local ok, view = pcall(doc.fmt.style_view, ctx, id)
+        if not listed[id] and not restyle[id] and ok and view then
+          others[#others + 1] = { id = id, attrs = view }
+        end
+      end
+    end
     for id, changes in pairs(restyle) do -- the styles first (what the paragraphs are written against)
       doc.fmt.set_style(ctx, id, changes)
     end
     -- (a style based on one that changed gives what its line says still: said by it, then)
     for _ = 1, next(restyle) and 3 or 0 do
       local pinned = false
-      for _, st in ipairs(header.styles) do
+      for _, st in ipairs(vim.list_extend(vim.list_slice(header.styles), others)) do
         local now, pin = doc.fmt.style_view(ctx, st.id), {}
         for _, key in ipairs(pformat.STYLE_KEYS) do
           if not pformat.same_style_value(key, now[key], st.attrs[key]) then
@@ -2515,7 +2580,8 @@ function M.save(buf, target)
       seps[k] = plan.old and doc.caption_seps[plan.old] or nil
       written_as[k] = plan.old and doc.caption_as[plan.old] or nil
       -- (a paragraph whose style changed: written again, so what it says of its own is against it)
-      local restyled = next(restyle) and node and plan.old and not plan.cell and restyle[doc.fmt.style_of(ctx, node)]
+      -- (not an empty one: its format isn't in the buffer, a blank line has none; it keeps its own)
+      local restyled = next(restyle) and node and plan.old and not plan.cell and blocks[k].text ~= "" and restyle[doc.fmt.style_of(ctx, node)]
       if not plan.old or plan.sig ~= doc.sigs[plan.old] or restyled then
         plan.written = true
         if not plan.pieces then -- (one taken as it was, written all the same: moved into a table, a box...)

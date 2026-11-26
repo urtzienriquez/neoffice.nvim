@@ -163,3 +163,58 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
   end)
 end
+
+-- an empty paragraph with spacing of its own between two paragraphs (as forms have them), and (docx)
+-- a style of a footnote based on the default one
+local EMPTY = {
+  docx = function(name, text)
+    if name == "word/document.xml" then
+      local p = function(t, spaced)
+        return "<w:p>" .. (spaced and '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>' or "")
+          .. (t and "<w:r><w:t>" .. t .. "</w:t></w:r>" or "") .. "</w:p>"
+      end
+      return (text:gsub("<w:body>", "<w:body>" .. p("Spaced A.") .. p(nil, true) .. p("Spaced B."), 1))
+    elseif name == "word/styles.xml" then
+      return (text:gsub("</w:styles>", '<w:style w:type="paragraph" w:styleId="NoteX"><w:name w:val="Note X"/><w:basedOn w:val="Normal"/></w:style></w:styles>', 1))
+    elseif name == "word/footnotes.xml" then
+      return (text:gsub("</w:footnotes>", '<w:footnote w:id="9"><w:p><w:pPr><w:pStyle w:val="NoteX"/></w:pPr><w:r><w:t>A note.</w:t></w:r></w:p></w:footnote></w:footnotes>', 1))
+    end
+    return text
+  end,
+  odt = function(name, text)
+    if name ~= "content.xml" then
+      return text
+    end
+    local style = '<style:style style:name="Tight" style:family="paragraph" style:parent-style-name="Standard"><style:paragraph-properties fo:margin-bottom="0cm" fo:line-height="100%"/></style:style>'
+    local p = '<text:p text:style-name="Standard">Spaced A.</text:p><text:p text:style-name="Tight"/><text:p text:style-name="Standard">Spaced B.</text:p>'
+    return (text:gsub("<office:automatic%-styles>", "%0" .. style, 1):gsub("<office:text>", "%0" .. p, 1))
+  end,
+}
+
+for _, ext in ipairs({ "docx", "odt" }) do
+  describe(ext .. " a style changed, and what isn't in it", function()
+    before_each(function() neo.config.styles = true end)
+    after_each(function() neo.config.styles = false end)
+
+    it("leaves an empty paragraph's own format as it was (a blank line has none to say)", function()
+      local path = H.copy("rich." .. ext, EMPTY[ext])
+      H.open(path)
+      local default = header().styles[1]
+      local text = H.lines()[default.row]
+      api.nvim_buf_set_lines(0, default.row - 1, default.row, false, { (text:gsub("font = [^,}]+", "font = Arial")) })
+      if not text:find("font =", 1, true) then
+        api.nvim_buf_set_lines(0, default.row - 1, default.row, false, { (text:gsub("{", "{font = Arial, ", 1)) })
+      end
+      H.save()
+      local main = zip.read(path, H.MAIN[ext])
+      if ext == "docx" then
+        assert.truthy(main:find('<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:p>', 1, true), main:sub(1, 1500))
+        local note_style = zip.read(path, "word/styles.xml"):match('<w:style w:type="paragraph" w:styleId="NoteX">.-</w:style>')
+        assert.truthy(note_style:find("<w:rFonts", 1, true), note_style) -- (the footnote's: as it was)
+        assert.is_nil(note_style:find('w:ascii="Arial"', 1, true))
+      else
+        assert.truthy(main:find('<text:p text:style%-name="Tight"/>'), main:sub(1, 3000))
+      end
+    end)
+  end)
+end

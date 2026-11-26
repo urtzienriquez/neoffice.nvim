@@ -1341,6 +1341,34 @@ function M.paragraph_styles(ctx) -- (the names of all its named paragraph styles
   table.sort(out)
   return out
 end
+-- The named paragraph styles in use: those of the paragraphs in the text and in the page styles
+-- (headers, footers), an automatic style's for its paragraphs.
+function M.styles_in_use(ctx)
+  local auto = {} -- (the automatic paragraph styles: of the text, and of the page styles)
+  for _, root in ipairs({ ctx.root, ctx.styles_doc }) do
+    local list = xml.find(root, "office:automatic-styles")
+    for _, st in ipairs(list and list.children or {}) do
+      if st.tag == "style:style" and xml.attr(st, "style:family") == "paragraph" then
+        auto[root == ctx.root and "c|" or "s|"] = auto[root == ctx.root and "c|" or "s|"] or {}
+        auto[root == ctx.root and "c|" or "s|"][xml.attr(st, "style:name") or ""] = st
+      end
+    end
+  end
+  local used = {}
+  for _, root in ipairs({ ctx.root, ctx.styles_doc }) do
+    local mine = auto[root == ctx.root and "c|" or "s|"] or {}
+    for _, el in ipairs(xml.collect(root, { ["text:p"] = true, ["text:h"] = true })) do
+      local name = xml.attr(el, "text:style-name")
+      if name and mine[name] then
+        name = xml.attr(mine[name], "style:parent-style-name")
+      end
+      if name then
+        used[name] = true
+      end
+    end
+  end
+  return vim.tbl_keys(used)
+end
 function M.style_id(ctx, shown) -- (by its name, whatever its case: a named style, in styles.xml)
   style_attrs(ctx, nil)
   for name, el in pairs(ctx.para_style_el) do
