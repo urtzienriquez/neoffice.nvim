@@ -272,8 +272,7 @@ for _, name in ipairs({ "rich.docx", "rich.odt" }) do
 
     it("keeps comments and tracked changes in cells in their place", function()
       H.cursor(11, "two")
-      H.input = "On a cell"
-      require("neoffice.comments").add()
+      require("neoffice.comments").add(nil, "On a cell")
       vim.cmd("Neoffice track on")
       H.replace(10, "one", "uno")
       H.reopen()

@@ -765,6 +765,10 @@ function M.resolve(action, all, use_marks, author)
     api.nvim_buf_set_text(buf, 0, 0, 0, 1, {})
   end
   vim.bo[buf].modified = true
+  local doc = require("neoffice").docs[buf]
+  if doc then
+    doc.unsaved_other = true -- (see comments.settle)
+  end
   M.snapshot(buf) -- (reviewing isn't recorded as a new change)
   M.after_edit(buf) -- (this state remembers its changes now)
 end

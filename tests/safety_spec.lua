@@ -309,8 +309,7 @@ describe("a change right after opening, before all is worked out", function()
       open_now(path)
       local k = vim.fn.index(H.paras(), "Paragraph 80.") + 1
       H.cursor(k, "80")
-      H.input = "Said early."
-      require("neoffice.comments").add()
+      require("neoffice.comments").add(nil, "Said early.")
       H.save()
       assert.truthy((zip.read(path, ext == "docx" and "word/comments.xml" or "content.xml") or ""):find("Said early.", 1, true))
     end)
@@ -358,8 +357,7 @@ describe("saving again and again in one session", function()
       end
       assert.equals("center", above and above.align, table.concat(H.lines(), "\n"))
       H.cursor(4, "inserted")
-      H.input = "Late note."
-      require("neoffice.comments").add()
+      require("neoffice.comments").add(nil, "Late note.")
       H.save()
       assert.truthy((zip.read(path, ext == "docx" and "word/comments.xml" or "content.xml") or ""):find("Late note.", 1, true))
       H.replace(4, "words", "WORDS")

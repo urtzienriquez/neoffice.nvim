@@ -90,6 +90,19 @@ local function part(ctx, name, empty)
   return ctx.parts[name] or nil
 end
 
+-- A style of the document for comments ("CommentText", "CommentReference"), by its id or its
+-- name, if it has one.
+local function comment_style(ctx, id, kind)
+  local styles = part(ctx, STYLES)
+  for _, st in ipairs(styles and xml.collect(styles, { ["w:style"] = true }) or {}) do
+    local name = xml.child(st, "w:name")
+    local shown = name and xml.attr(name, "w:val") or ""
+    if xml.attr(st, "w:type") == kind and (xml.attr(st, "w:styleId") == id or shown:gsub("%s", ""):lower() == id:lower()) then
+      return xml.attr(st, "w:styleId")
+    end
+  end
+end
+
 local function ensure_ns(el, prefix)
   if not xml.attr(el, "xmlns:" .. prefix) then
     xml.set_attr(el, "xmlns:" .. prefix, NS[prefix])
@@ -2911,16 +2924,22 @@ function M.fill(ctx, p, block, pieces)
         xml.append(p, image_node(ctx, piece.image))
       elseif piece.math then
         xml.append(p, piece.math.node)
-      elseif piece.comment_start then
-        xml.append(p, xml.elem("w:commentRangeStart", { { "w:id", comment_id(ctx, piece.comment_start) } }))
+      elseif piece.comment_start then -- (a reply on the same text as its comment, as Word writes it:
+        -- an application that doesn't follow threads finds it there)
+        for _, x in ipairs({ piece.comment_start, unpack(piece.comment_start.replies) }) do
+          xml.append(p, xml.elem("w:commentRangeStart", { { "w:id", comment_id(ctx, x) } }))
+        end
       end
       local c = piece.comment_end or (piece.point and piece.comment_start)
       if c then
-        xml.append(p, xml.elem("w:commentRangeEnd", { { "w:id", comment_id(ctx, c) } }))
+        for _, x in ipairs({ c, unpack(c.replies) }) do
+          xml.append(p, xml.elem("w:commentRangeEnd", { { "w:id", comment_id(ctx, x) } }))
+        end
+        local style = comment_style(ctx, "CommentReference", "character")
         for _, x in ipairs({ c, unpack(c.replies) }) do
           if not held[comment_id(ctx, x)] then
             local ref = xml.elem("w:commentReference", { { "w:id", comment_id(ctx, x) } })
-            xml.append(p, xml.elem("w:r", {}, { ref }))
+            xml.append(p, xml.elem("w:r", {}, { style and xml.elem("w:rPr", {}, { xml.elem("w:rStyle", { { "w:val", style } }) }), ref }))
           end
         end
       end
@@ -2941,14 +2960,21 @@ local function para_id(ctx)
   return id
 end
 
-local function comment_el(x)
+-- (as Word writes a comment: its paragraphs in the comment style, its reference mark first)
+local function comment_el(ctx, x)
   local el = xml.elem("w:comment", {
     { "w:id", x.id }, { "w:author", x.author }, { "w:date", x.date }, { "w:initials", vim.fn.strcharpart(x.author, 0, 2) },
   })
+  local pstyle, rstyle = comment_style(ctx, "CommentText", "paragraph"), comment_style(ctx, "CommentReference", "character")
   local lines = vim.split(x.text, "\n")
   for k, line in ipairs(lines) do
     local attrs = k == #lines and { { "w14:paraId", x.para } } or {}
-    xml.append(el, xml.elem("w:p", attrs, { xml.elem("w:r", {}, { xml.elem("w:t", { { "xml:space", "preserve" } }, { { text = line } }) }) }))
+    local p = xml.elem("w:p", attrs, { pstyle and xml.elem("w:pPr", {}, { xml.elem("w:pStyle", { { "w:val", pstyle } }) }) })
+    if k == 1 then
+      xml.append(p, xml.elem("w:r", {}, { rstyle and xml.elem("w:rPr", {}, { xml.elem("w:rStyle", { { "w:val", rstyle } }) }), xml.elem("w:annotationRef") }))
+    end
+    xml.append(p, xml.elem("w:r", {}, { xml.elem("w:t", { { "xml:space", "preserve" } }, { { text = line } }) }))
+    xml.append(el, p)
   end
   return el
 end
@@ -2979,14 +3005,40 @@ local function set_comment_text(x)
   x.was_text = x.text
 end
 
+-- A new comment in Word's newer parts, if the document has them (commentsIds.xml: its durable id;
+-- commentsExtensible.xml: its date), as Word writes one.
+local function comment_ids(ctx, x)
+  local ids = x.para and part(ctx, IDS)
+  local root = ids and xml.find(ids, "w16cid:commentsIds")
+  if not root then
+    return
+  end
+  local durable
+  repeat
+    durable = ("%08X"):format(math.random(1, 0x7FFFFFFE))
+  until not has(ids, "w16cid:commentId", "w16cid:durableId", durable)
+  xml.append(root, xml.elem("w16cid:commentId", { { "w16cid:paraId", x.para }, { "w16cid:durableId", durable } }))
+  ctx.dirty[IDS] = true
+  local extensible = part(ctx, EXTENSIBLE)
+  local ext_root = extensible and xml.find(extensible, "w16cex:commentsExtensible")
+  if ext_root then
+    local date = (x.date or ""):match("^[%d%-]+T[%d:]+") or os.date("!%Y-%m-%dT%H:%M:%S")
+    xml.append(ext_root, xml.elem("w16cex:commentExtensible", { { "w16cex:durableId", durable }, { "w16cex:dateUtc", date .. "Z" } }))
+    ctx.dirty[EXTENSIBLE] = true
+  end
+end
+
 -- A deleted comment (or reply) leaves every part that mentions it.
 local function forget(ctx, x)
   xml.remove(x.node)
+  ctx.comment_of[x.node] = nil
+  x.node = nil -- (a comment put back, undone: written again, as a new one)
   ctx.dirty[COMMENTS] = true
   if x.ex and x.ex.parent then
     xml.remove(x.ex)
     ctx.dirty[EXTENDED] = true
   end
+  x.ex = nil
   local ids = x.para and part(ctx, IDS)
   local entry = ids and has(ids, "w16cid:commentId", "w16cid:paraId", x.para)
   if entry then
@@ -3043,7 +3095,8 @@ local function save_comments(ctx, live)
         end
         if not x.node then
           comment_id(ctx, x)
-          x.node = xml.append(comments, comment_el(x))
+          x.node = xml.append(comments, comment_el(ctx, x))
+          comment_ids(ctx, x)
           ctx.comment_of[x.node] = x
         end
         if not x.ex then

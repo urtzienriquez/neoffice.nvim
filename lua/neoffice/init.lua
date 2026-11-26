@@ -46,7 +46,7 @@ M.config = {
     help = "g?", -- in documents: this help
     comments = {
       go = "<CR>", reply = "aa", edit = "ee", resolve = "rr", delete = "dd", text = "tt",
-      next = "]]", prev = "[[", close = { "gq", "q" }, help = "g?",
+      next = "]]", prev = "[[", undo = "u", redo = "<C-r>", close = { "gq", "q" }, help = "g?",
     },
   },
 }
@@ -1749,6 +1749,8 @@ local function open(buf, path)
   end
   vim.schedule(step)
   vim.bo[buf].modified = false
+  doc.unsaved_other = nil -- (a change neither to its text nor to its comments, not saved yet: see comments.settle)
+  require("neoffice.comments").reset(buf) -- (as opened: what was done to its comments before is gone)
   setup_buffer(buf)
   require("neoffice.changes").start(buf)
   if new then
@@ -2054,6 +2056,7 @@ function M.numbers(arg)
   if on ~= doc.ctx.numbered then
     doc.fmt.number_headings(doc.ctx, on)
     vim.bo[buf].modified = true
+    doc.unsaved_other = true
   end
   M.decorate(buf)
   vim.notify("[neoffice] Heading numbers " .. (on and "on" or "off"))
@@ -2951,6 +2954,8 @@ function M.save(buf, target)
   end
   if target == doc.path then
     vim.bo[buf].modified = false
+    doc.unsaved_other = nil
+    require("neoffice.comments").saved(buf) -- (as saved: where undoing its comments makes it unmodified)
   end
   vim.notify("[neoffice] Saved " .. vim.fn.fnamemodify(target, ":~:."))
 end

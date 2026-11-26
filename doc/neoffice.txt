@@ -601,28 +601,47 @@ replies. It opens on the comment closest to the cursor, and follows the cursor
 as you move in the document; the text of the comment it is on is highlighted
 in the document (NeofficeCommentCurrent), and moving in the panel scrolls the
 document to it when it is out of view. Each comment shows its author and date,
-the text it is on (its first words, quoted), its text and its replies; a
-resolved one, marked ✓, is dimmed. Its bar says how many are open and
-resolved. Its keys are two keys a family, as fugitive's (each can be changed,
-or dropped: |neoffice-keymaps|); g? in it opens this:
+its text and its replies; a resolved one, marked ✓, is dimmed. Its bar says
+how many are open and resolved. :w in it saves the document (its comments
+are the document's). Its keys are two keys a family, as fugitive's (each can
+be changed, or dropped: |neoffice-keymaps|); g? in it opens this:
 
   <CR>     go to the comment under the cursor in the document
-  aa       add a reply to it
-  ee       edit its text (or the reply's under the cursor), in a window:
-           :w writes it into the document, q closes it as it was
+  aa       add a reply to it (in a buffer: |neoffice-comment-buffer|)
+  ee       edit its text (or the reply's under the cursor), in a buffer
   rr       resolve it, or reopen it
   dd       delete it (or the reply under the cursor)
   ]] [[    go to the next / previous comment
   tt       each comment's text at the end of its line in the document, or
            not (as :Neoffice comments text)
+  u <C-r>  undo / redo what you did to the comments: a reply, a resolve, a
+           deletion (the comment comes back on its text), an edit, a new
+           comment (they aren't the document's text: its own undo doesn't
+           reach them)
   gq  q    close the panel
   g?       this help
 
 :Neoffice edit edits the text of the comment under the cursor in the document
 too.
 
-Comments you don't touch keep their exact XML, also in Word's own comment
-parts.
+                                                     *neoffice-comment-buffer*
+A comment is written in a buffer of its own (a reply, a new comment, a
+comment's text edited), as fugitive's commit message: a split across the
+whole width (at the bottom, or the top: as 'splitbelow' says), the text on
+top and, in lines starting with `#` under it, what it answers and what to do;
+those lines are left out. As git takes a commit's message, what you write is
+added to the document when the buffer closes: :wq (or :w, then :q); :q! with
+nothing written leaves it, adding nothing; an empty text adds nothing, also
+one written before (to change your mind after a :w, delete the text and
+:wq, as with an empty commit message). u in
+it undoes only what you typed. A new comment goes on the text it was asked
+for, also if the document changed meanwhile. Then save the document (:w in
+it, or in the panel), as for any change.
+
+A reply is written as Word writes one: in its thread (commentsExtended.xml),
+on the same text as its comment, with its own reference mark, so an
+application that doesn't show threads still finds it. Comments you don't
+touch keep their exact XML, also in Word's own comment parts.
 
 ==============================================================================
 TRACKED CHANGES                                             *neoffice-changes*
@@ -802,7 +821,8 @@ Each can be changed, or dropped with false (all of them: `keymaps = false`): >lu
       help = "g?",
       comments = {
         go = "<CR>", reply = "aa", edit = "ee", resolve = "rr", delete = "dd",
-        text = "tt", next = "]]", prev = "[[", close = { "gq", "q" }, help = "g?",
+        text = "tt", next = "]]", prev = "[[", undo = "u", redo = "<C-r>",
+        close = { "gq", "q" }, help = "g?",
       },
     },
   })
@@ -867,7 +887,8 @@ setup() is optional. Every field is optional too; these are the defaults: >lua
       help = "g?",         -- keymaps = false all): in documents, its help;
       comments = {         -- in the comments panel
         go = "<CR>", reply = "aa", edit = "ee", resolve = "rr", delete = "dd",
-        text = "tt", next = "]]", prev = "[[", close = { "gq", "q" }, help = "g?",
+        text = "tt", next = "]]", prev = "[[", undo = "u", redo = "<C-r>",
+        close = { "gq", "q" }, help = "g?",
       },
     },
   })
@@ -901,10 +922,10 @@ Highlight groups (all `default`, so your colour scheme can set them):
   NeofficeCommentCurrent    the text of the comment the panel is on
   NeofficeCommentAuthor     in the comments panel: an author
   NeofficeCommentDate       its dates, and its bar's counts
-  NeofficeCommentQuote      the text a comment is on
   NeofficeCommentDone       a resolved comment (NeofficeCommentDoneMark: its ✓)
   NeofficeCommentTitle      its bar's title
   NeofficeCommentRule       the line between comments
+  NeofficeCommentHelp       in a comment's buffer, its `#` lines
   NeofficeTitle             the title
   NeofficeNumber            heading numbers
   NeofficeAlign             the alignment marks and format lines

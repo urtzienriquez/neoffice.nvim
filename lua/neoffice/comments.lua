@@ -60,7 +60,8 @@ end
 -- shown at its end: { action, what it does }.
 M.KEYS = {
   { "go", "go to it" }, { "reply", "reply" }, { "edit", "edit" }, { "resolve", "resolve" }, { "delete", "delete" },
-  { "next", "next" }, { "prev", "previous" }, { "text", "text in lines" }, { "close", "close" }, { "help", "help" },
+  { "next", "next" }, { "prev", "previous" }, { "text", "text in lines" }, { "undo", "undo" }, { "redo", "redo" },
+  { "close", "close" }, { "help", "help" },
 }
 function M.keys()
   local km = neo().config.keymaps
@@ -78,22 +79,6 @@ local function render()
     lines[#lines + 1], rows[#lines + 1] = text, { mark, reply }
     marks_of[#lines] = { hl = hl, date = date }
   end
-  -- (what a comment is on, in the document: its first words, as Word shows them beside it)
-  local function quote(m)
-    if m.row == m.end_row and m.col == m.end_col then
-      return nil
-    end
-    local ok, text = pcall(api.nvim_buf_get_text, panel.doc, m.row, m.col, m.end_row, m.end_col, {})
-    text = ok and vim.trim(table.concat(text, " "):gsub("%s+", " ")) or ""
-    if text == "" then
-      return nil
-    end
-    local room = math.max(width - 6, 10)
-    if vim.fn.strdisplaywidth(text) > room then
-      text = vim.fn.strcharpart(text, 0, room - 1) .. "…"
-    end
-    return "“" .. text .. "”"
-  end
   local open, resolved = 0, 0
   panel.threads = {} -- (the first line of each comment)
   for i, m in ipairs(marks(panel.doc)) do
@@ -110,10 +95,6 @@ local function render()
     panel.threads[#panel.threads + 1] = #lines + 1
     add((c.resolved and "✓ " or "● ") .. c.author, m, nil, { { 0, #"● ", c.resolved and "NeofficeCommentDoneMark" or "NeofficeCommentSign" },
       { #"● ", -1, dim or "NeofficeCommentAuthor" } }, c.date:sub(1, 10))
-    local q = quote(m)
-    if q then
-      add("  " .. q, m, nil, { { 2, -1, dim or "NeofficeCommentQuote" } })
-    end
     for _, l in ipairs(vim.split(c.text, "\n")) do
       add("  " .. l, m, nil, dim and { { 0, -1, dim } } or nil)
     end
@@ -133,6 +114,7 @@ local function render()
   vim.bo[panel.buf].modifiable = true
   api.nvim_buf_set_lines(panel.buf, 0, -1, false, lines)
   vim.bo[panel.buf].modifiable = false
+  vim.bo[panel.buf].modified = false -- (drawn, not changed: nothing of its own to save, :q closes it)
   api.nvim_buf_clear_namespace(panel.buf, ns, 0, -1)
   for row, mk in pairs(marks_of) do
     for _, h in ipairs(mk.hl or {}) do
@@ -189,23 +171,199 @@ local function changed(m)
   render()
 end
 
-function M.reply()
+
+-- ── Undo ──────────────────────────────────────────────────────────────────
+-- What you did to a document's comments (they aren't its text: its own undo doesn't reach them):
+-- u and <C-r> in the panel undo and redo it. Each step { what, undo, redo }.
+local history = {}
+local function record(buf, step)
+  history[buf] = history[buf] or { done = {}, undone = {} }
+  table.insert(history[buf].done, step)
+  history[buf].undone = {}
+end
+local function mark_of(buf, c) -- (a comment's mark, by its data: marks are made again when restored)
+  for id, x in pairs(neo().docs[buf].comment) do
+    if x == c then
+      return id
+    end
+  end
+end
+local function refresh(buf, c) -- (after a step: its mark's look, the document to save, the panel)
+  local id = c and mark_of(buf, c)
+  if id then
+    changed({ buf = buf, id = id, c = c })
+  else
+    M.modified(buf)
+    render()
+  end
+end
+-- A comment taken out of the document, and put back where it was (both: as steps to undo).
+local function take_out(buf, c)
+  local id = mark_of(buf, c)
+  local pos = id and api.nvim_buf_get_extmark_by_id(buf, neo().ns.comment, id, { details = true })
+  if not (pos and pos[1]) then
+    return nil
+  end
+  api.nvim_buf_del_extmark(buf, neo().ns.comment, id)
+  neo().docs[buf].comment[id] = nil
+  refresh(buf, nil)
+  return { pos[1], pos[2], pos[3].end_row, pos[3].end_col }
+end
+local function put_back(buf, c, where)
+  local line_count = api.nvim_buf_line_count(buf)
+  local r1, r2 = math.min(where[1], line_count - 1), math.min(where[3], line_count - 1)
+  local function col(r, c0) return math.min(c0, #(api.nvim_buf_get_lines(buf, r, r + 1, false)[1] or "")) end
+  neo().place(buf, "comment", c, r1, col(r1, where[2]), r2, col(r2, where[4]))
+  refresh(buf, c)
+end
+-- Where its comments and its text were when it was opened or saved: undone back there (and nothing
+-- else changed meanwhile: heading numbers, changes reviewed), the document is as saved again.
+function M.reset(buf)
+  history[buf] = nil
+  M.saved(buf)
+end
+function M.saved(buf)
+  local doc = neo().docs[buf]
+  if doc then
+    local h = history[buf]
+    doc.comments_saved = h and h.done[#h.done] or false
+    doc.text_saved = vim.fn.undotree(buf).seq_cur
+  end
+end
+local function settle(buf)
+  local doc = neo().docs[buf]
+  local h = history[buf]
+  if not doc or doc.unsaved_other then
+    return
+  end
+  local at = h and h.done[#h.done] or false
+  if at == doc.comments_saved and vim.fn.undotree(buf).seq_cur == doc.text_saved then
+    vim.bo[buf].modified = false
+  end
+end
+
+local function step(dir)
+  local buf = panel.doc and api.nvim_buf_is_valid(panel.doc) and panel.doc or api.nvim_get_current_buf()
+  local h = history[buf]
+  local s = h and table.remove(dir > 0 and h.undone or h.done)
+  if not s then
+    return vim.notify(dir > 0 and "[neoffice] Nothing to redo" or "[neoffice] Nothing to undo")
+  end
+  if dir > 0 then
+    s.redo()
+    table.insert(h.done, s)
+  else
+    s.undo()
+    table.insert(h.undone, s)
+  end
+  settle(buf)
+  vim.notify(("[neoffice] %s: %s"):format(dir > 0 and "Redone" or "Undone", s.what))
+end
+function M.undo() step(-1) end
+function M.redo() step(1) end
+
+-- A buffer to write a comment in (a reply, a new one, or one's text edited), as fugitive's commit
+-- message: a split across the whole width, the text on top and what to do in "#" lines under it
+-- (left out of what is written). :w writes it into the document (the next :w edits what it wrote),
+-- :wq writes it and closes, :q! leaves it. spec = { title, about (lines: what it answers), lines,
+-- write(text) }.
+local composed = 0
+local function compose(spec)
+  composed = composed + 1
+  local from = api.nvim_get_current_win()
+  vim.cmd((vim.o.splitbelow and "botright" or "topleft") .. " split")
+  local win = api.nvim_get_current_win()
+  local buf = api.nvim_create_buf(true, false)
+  api.nvim_win_set_buf(win, buf)
+  pcall(api.nvim_buf_set_name, buf, ("neoffice://comment/%d"):format(composed))
+  vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].swapfile = "acwrite", "wipe", false
+  vim.bo[buf].filetype, vim.bo[buf].commentstring, vim.bo[buf].textwidth = "neoffice-comment", "# %s", 0
+  local help = { "", "# " .. spec.title }
+  for _, l in ipairs(spec.about or {}) do
+    help[#help + 1] = "#   " .. l
+  end
+  vim.list_extend(help, {
+    "#",
+    "# Lines starting with '#' are left out. :wq (or :w, then :q) adds it to",
+    "# the document; then save the document to keep it. An empty text adds",
+    "# nothing (delete it and :wq to change your mind), nor does :q! before :w.",
+  })
+  local undolevels = vim.bo[buf].undolevels -- (what it opens with: not to be undone, only your changes)
+  vim.bo[buf].undolevels = -1
+  api.nvim_buf_set_lines(buf, 0, -1, false, vim.list_extend(vim.deepcopy(spec.lines), help))
+  vim.bo[buf].undolevels = undolevels
+  vim.bo[buf].modified = false
+  api.nvim_buf_call(buf, function()
+    vim.cmd([[syntax match NeofficeCommentHelp /^#.*/]])
+  end)
+  api.nvim_win_set_cursor(win, { 1, 0 })
+  -- (as git takes a commit's message: what :w wrote, once the buffer closes; :q! with nothing
+  -- written leaves it)
+  local written
+  api.nvim_create_autocmd("BufWipeout", { buffer = buf, once = true, callback = function()
+    vim.schedule(function()
+      if api.nvim_win_is_valid(from) then -- (back where you were)
+        api.nvim_set_current_win(from)
+      end
+      if written then
+        local ok, err = pcall(spec.write, written)
+        if not ok then
+          vim.notify("[neoffice] " .. tostring(err), vim.log.levels.ERROR)
+        end
+      end
+    end)
+  end })
+  api.nvim_create_autocmd("BufWriteCmd", { buffer = buf, callback = function()
+    local kept = vim.tbl_filter(function(l) return not l:match("^#") end, api.nvim_buf_get_lines(buf, 0, -1, false))
+    local text = table.concat(kept, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+    if text == "" then -- (as git: an empty message aborts, also one written before)
+      written = nil
+      vim.bo[buf].modified = false
+      return vim.notify("[neoffice] The text is empty: nothing will be added")
+    end
+    written = text
+    vim.bo[buf].modified = false
+  end })
+end
+
+-- Reply to the comment under the cursor: in a buffer (see compose), or `text` at once (as tests do).
+function M.reply(text)
   neo().finish_all()
   local m = at_cursor()
   if not m then
-    return
+    return vim.notify("[neoffice] No comment here", vim.log.levels.WARN)
   end
-  vim.ui.input({ prompt = "Reply to " .. m.c.author .. ": " }, function(text)
-    if text and text ~= "" then
-      table.insert(m.c.replies, { author = neo().config.author, date = now(), text = text, replies = {} })
-      changed(m)
-    end
-  end)
+  local function write(t)
+    local c, reply = m.c, { author = neo().config.author, date = now(), text = t, replies = {} }
+    table.insert(c.replies, reply)
+    changed(m)
+    record(m.buf, {
+      what = "a reply",
+      undo = function()
+        for k, r in ipairs(c.replies) do
+          if r == reply then
+            table.remove(c.replies, k)
+          end
+        end
+        refresh(m.buf, c)
+      end,
+      redo = function()
+        table.insert(c.replies, reply)
+        refresh(m.buf, c)
+      end,
+    })
+  end
+  if text then
+    return text ~= "" and write(text) or nil
+  end
+  local about = { ("%s, %s:"):format(m.c.author, m.c.date:sub(1, 10)) }
+  for _, l in ipairs(vim.split(m.c.text, "\n")) do
+    about[#about + 1] = "  " .. l
+  end
+  compose({ title = "Replying to:", about = about, lines = { "" }, write = write })
 end
 
--- Edit the text of the comment (or reply) under the cursor, in a small window: :w writes it into
--- the document (saved with it), q closes it as it was.
-local editing = 0
+-- Edit the text of the comment (or reply) under the cursor, in a buffer (see compose).
 function M.edit()
   neo().finish_all()
   local m, reply = at_cursor()
@@ -213,49 +371,28 @@ function M.edit()
     return vim.notify("[neoffice] No comment here", vim.log.levels.WARN)
   end
   local x = reply and m.c.replies[reply] or m.c
-  local from = api.nvim_get_current_win()
-  local buf = api.nvim_create_buf(false, true)
-  editing = editing + 1
-  api.nvim_buf_set_name(buf, ("neoffice://comment/%d"):format(editing))
-  vim.bo[buf].buftype, vim.bo[buf].bufhidden = "acwrite", "wipe"
-  local lines = vim.split(x.text, "\n")
-  api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modified = false
-  local width = math.min(math.max(50, unpack(vim.tbl_map(vim.fn.strdisplaywidth, lines))) + 2, vim.o.columns - 4)
-  local win = api.nvim_open_win(buf, true, {
-    relative = "editor", width = width, height = math.min(math.max(#lines, 3), vim.o.lines - 6),
-    row = math.floor((vim.o.lines - #lines) / 2) - 2, col = math.floor((vim.o.columns - width) / 2),
-    border = "rounded", title = (" %s · %s "):format(x.author, x.date:sub(1, 10)), title_pos = "center",
-    footer = " :w save · q close ", footer_pos = "center",
-  })
-  vim.wo[win].wrap = true
-  local function done()
-    if api.nvim_win_is_valid(win) then
-      api.nvim_win_close(win, true)
-    end
-    if api.nvim_win_is_valid(from) then
-      api.nvim_set_current_win(from)
-    end
-  end
-  api.nvim_create_autocmd("BufWriteCmd", { buffer = buf, callback = function()
-    local text = table.concat(api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
-    if vim.trim(text) == "" then
-      return vim.notify("[neoffice] A comment needs text (dd in the panel deletes it)", vim.log.levels.ERROR)
-    end
-    x.text = text
-    vim.bo[buf].modified = false
-    changed(m)
-    done()
-  end })
-  vim.keymap.set("n", "q", done, { buffer = buf, nowait = true, desc = "neoffice: close, as it was" })
+  compose({ title = ("Editing %s's %s of %s."):format(x.author, reply and "reply" or "comment", x.date:sub(1, 10)), lines = vim.split(x.text, "\n"),
+    write = function(t)
+      local old = x.text
+      x.text = t
+      changed(m)
+      record(m.buf, {
+        what = "an edit",
+        undo = function() x.text = old; refresh(m.buf, m.c) end,
+        redo = function() x.text = t; refresh(m.buf, m.c) end,
+      })
+    end })
 end
 
 function M.resolve()
   neo().finish_all()
   local m = at_cursor()
   if m then
-    m.c.resolved = not m.c.resolved
+    local c = m.c
+    c.resolved = not c.resolved
     changed(m)
+    local function toggle() c.resolved = not c.resolved; refresh(m.buf, c) end
+    record(m.buf, { what = c.resolved and "resolved" or "reopened", undo = toggle, redo = toggle })
   end
 end
 
@@ -265,14 +402,29 @@ function M.delete()
   if not m or vim.fn.confirm(reply and "Delete reply?" or "Delete comment and its replies?", "&Yes\n&No") ~= 1 then
     return
   end
+  local c, buf = m.c, m.buf
   if reply then
-    table.remove(m.c.replies, reply)
-    return changed(m)
+    local r = table.remove(c.replies, reply)
+    changed(m)
+    return record(buf, {
+      what = "a reply deleted",
+      undo = function() table.insert(c.replies, reply, r); refresh(buf, c) end,
+      redo = function()
+        for k, x in ipairs(c.replies) do
+          if x == r then
+            table.remove(c.replies, k)
+          end
+        end
+        refresh(buf, c)
+      end,
+    })
   end
-  api.nvim_buf_del_extmark(m.buf, neo().ns.comment, m.id)
-  neo().docs[m.buf].comment[m.id] = nil
-  M.modified(m.buf)
-  render()
+  local where = take_out(buf, c)
+  record(buf, {
+    what = "a comment deleted",
+    undo = function() put_back(buf, c, where) end,
+    redo = function() where = take_out(buf, c) or where end,
+  })
 end
 
 function M.jump()
@@ -391,6 +543,18 @@ function M.toggle_panel()
   if not (panel.buf and api.nvim_buf_is_valid(panel.buf)) then
     panel.buf = api.nvim_create_buf(false, true)
     vim.bo[panel.buf].filetype = "neoffice-comments"
+    -- :w in it saves the document (its comments are the document's): through neoffice's save, called
+    -- here (a :write of the document from this autocommand wouldn't run neoffice's own, and Vim would
+    -- write its text over the file)
+    api.nvim_buf_set_name(panel.buf, "neoffice://comments")
+    vim.bo[panel.buf].buftype = "acwrite"
+    api.nvim_create_autocmd("BufWriteCmd", { buffer = panel.buf, callback = function()
+      local doc = panel.doc
+      if doc and api.nvim_buf_is_valid(doc) and neo().docs[doc] then
+        neo().save(doc, api.nvim_buf_get_name(doc))
+      end
+      vim.bo[panel.buf].modified = false
+    end })
   end
   do -- keys of the panel only (it is neoffice's own buffer): keymaps.comments (false drops one); set
     -- each time it opens, as they are configured now
@@ -398,7 +562,7 @@ function M.toggle_panel()
       pcall(vim.keymap.del, "n", m.lhs, { buffer = panel.buf })
     end
     local actions = {
-      go = M.jump, reply = M.reply, edit = M.edit, resolve = M.resolve, delete = M.delete, close = close,
+      go = M.jump, reply = M.reply, edit = M.edit, resolve = M.resolve, delete = M.delete, close = close, undo = M.undo, redo = M.redo,
       next = function() to_comment(1) end, prev = function() to_comment(-1) end,
       text = function() M.text() end, help = function() neo().help("neoffice-comments-panel") end,
     }
@@ -435,14 +599,15 @@ end
 
 -- Comment the visual selection, or the cursor position in normal mode.
 -- `use_marks` takes the last selection instead (for :'<,'>Neoffice comment).
-function M.add(use_marks)
+local NS_PENDING = api.nvim_create_namespace("neoffice_comment_pending") -- (where a comment being written goes)
+function M.add(use_marks, text)
   neo().finish_all()
   local buf = api.nvim_get_current_buf()
   if not neo().docs[buf] then
     return vim.notify("[neoffice] Not a document buffer", vim.log.levels.WARN)
   end
   local mode = use_marks == true and vim.fn.visualmode() or vim.fn.mode()
-  local r1, c1, r2, c2
+  local r1, c1, r2, c2, pending
   if mode:match("^[vV\22]") then
     local s, e = vim.fn.getpos(use_marks == true and "'<" or "v"), vim.fn.getpos(use_marks == true and "'>" or ".")
     if s[2] > e[2] or (s[2] == e[2] and s[3] > e[3]) then
@@ -459,13 +624,35 @@ function M.add(use_marks)
     local cursor = api.nvim_win_get_cursor(0)
     r1, c1, r2, c2 = cursor[1] - 1, cursor[2], cursor[1] - 1, cursor[2]
   end
-  vim.ui.input({ prompt = "Comment: " }, function(text)
-    if text and text ~= "" then
-      neo().place(buf, "comment", { author = neo().config.author, date = now(), text = text, resolved = false, replies = {} }, r1, c1, r2, c2)
-      M.modified(buf)
-      render()
+  local c
+  local function write(t)
+    if c then -- (written already: edited)
+      c.text = t
+    else
+      local pos = pending and api.nvim_buf_get_extmark_by_id(buf, NS_PENDING, pending, { details = true })
+      if pos and pos[1] then -- (where its text is now: the document may have changed meanwhile)
+        r1, c1, r2, c2 = pos[1], pos[2], pos[3].end_row, pos[3].end_col
+        api.nvim_buf_del_extmark(buf, NS_PENDING, pending)
+      end
+      c = { author = neo().config.author, date = now(), text = t, resolved = false, replies = {} }
+      neo().place(buf, "comment", c, r1, c1, r2, c2)
+      local where
+      record(buf, {
+        what = "a comment",
+        undo = function() where = take_out(buf, c) or where end,
+        redo = function() put_back(buf, c, where or { r1, c1, r2, c2 }) end,
+      })
     end
-  end)
+    M.modified(buf)
+    render()
+  end
+  if text then
+    return text ~= "" and write(text) or nil
+  end
+  pending = api.nvim_buf_set_extmark(buf, NS_PENDING, r1, c1, { end_row = r2, end_col = c2, right_gravity = false, end_right_gravity = true })
+  local on = api.nvim_buf_get_text(buf, r1, c1, r2, c2, {})
+  local quoted = vim.trim(table.concat(on, " "):gsub("%s+", " "))
+  compose({ title = quoted ~= "" and "A comment on:" or "A comment here.", about = quoted ~= "" and { "  " .. quoted } or nil, lines = { "" }, write = write })
 end
 
 return M

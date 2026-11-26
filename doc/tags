@@ -8,6 +8,7 @@ neoffice-boxes	neoffice.txt	/*neoffice-boxes*
 neoffice-breaks	neoffice.txt	/*neoffice-breaks*
 neoffice-captions	neoffice.txt	/*neoffice-captions*
 neoffice-changes	neoffice.txt	/*neoffice-changes*
+neoffice-comment-buffer	neoffice.txt	/*neoffice-comment-buffer*
 neoffice-comments	neoffice.txt	/*neoffice-comments*
 neoffice-comments-panel	neoffice.txt	/*neoffice-comments-panel*
 neoffice-crop	neoffice.txt	/*neoffice-crop*

@@ -348,8 +348,7 @@ describe("comments", function()
     local path = H.copy("rich.docx")
     H.open(path)
     H.cursor(12, "Last")
-    H.input = "Why?"
-    require("neoffice.comments").add()
+    require("neoffice.comments").add(nil, "Why?")
     H.save()
     neo.config.author = vim.env.USER or "neoffice"
     assert.truthy(zip.read(path, "word/comments.xml"):find('w:initials="Jö"', 1, true))
