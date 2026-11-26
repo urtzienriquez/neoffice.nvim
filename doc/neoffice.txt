@@ -687,6 +687,27 @@ neoffice, and so is the documents' filetype). It answers:
   their values (and after `name =`, that option's values); in an image's
   braces and a box's, their attributes (|neoffice-floats|); after `=={`,
   highlight colours.
+                                                           *neoffice-snippets*
+- Snippets, in neoffice's markup (your completion plugin expands them, and
+  jumps between their fields). At a line's start:
+
+    `head`         the page and the paragraph styles, at the top
+    `table`        a table, its caption above it and its options' line
+    `figure`       an image and its caption under it
+    `floatfigure`  an image and its caption in a box the text goes around
+    `box`          a box (text box)
+    `landscape`    landscape pages, and portrait again after them
+    `section`      a section: a new page with its own settings
+    `newpage`      a page break
+    `equation`     an equation of its own
+    `numbered`     a numbered list, with an item under another
+    `bullets`      a bulleted list
+    `quote`        a quotation
+    `title`        the title
+    `format`       a format's line for the paragraphs after it
+
+  After a space: `footnote` (right after the word before it), `link`, `span`
+  (words in another font or size), `highlight`, `math`.
 
 `lsp = false` (|neoffice-options|) turns it off.
 

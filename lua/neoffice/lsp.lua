@@ -278,6 +278,34 @@ local function attribute_diagnostics(buf)
   return out
 end
 
+-- Snippets (LSP snippet syntax: $1, ${1:default}, $0 where it ends), in neoffice's markup: those
+-- of blocks at a line's start (the line holding only the word typed), those of text after a space.
+M.SNIPPETS = {
+  block = {
+    { "head", "the page and the paragraph styles, at the top", "---\npage: {size = ${1:A4}, margins = ${2:2.5cm}}\nstyles:\n  ${3:Normal}: {font = ${4:Times New Roman}, size = ${5:12pt}}\n---\n$0" },
+    { "table", "a table, its caption above it", "Table: ${1:Caption.}\n\n{rules = ${2:booktabs}}\n| ${3:Column} | ${4:Column} |\n|---|---|\n| $5 | $6 |\n$0" },
+    { "figure", "an image, its caption under it", "![${1:what it shows}](${2:figures/file.png}){width = ${3:12cm}}\n\nFigure: ${4:Caption.}\n$0" },
+    { "floatfigure", "an image and its caption in a box the text goes around", "::: {width = ${1:6cm}, float = ${2:right}}\n![](${3:figures/file.png})\n\nFigure: ${4:Caption.}\n:::\n\n$0" },
+    { "box", "a box (text box) the text goes around", "::: {width = ${1:6cm}, float = ${2:right}}\n${3:Text in the box.}\n:::\n\n$0" },
+    { "landscape", "landscape pages (a section), and portrait again after them", "\\\\newpage {orientation = landscape}\n\n${1:A wide table or figure.}\n\n\\\\newpage {orientation = portrait}\n\n$0" },
+    { "section", "a section: a new page with its own settings", "\\\\newpage {${1:orientation = landscape}}\n\n$0" },
+    { "newpage", "a page break", "\\\\newpage$0" },
+    { "equation", "an equation of its own (LaTeX)", "\\$\\$${1:E = mc^2}\\$\\$\n$0" },
+    { "numbered", "a numbered list, with an item under another (the document counts)", "1. ${1:First}\n1. ${2:Second}\n  1.1. ${3:Under it}\n$0" },
+    { "bullets", "a bulleted list", "- ${1:One}\n- ${2:Two}\n$0" },
+    { "quote", "a quotation", "> ${1:Quoted text.}\n$0" },
+    { "title", "the title", "% ${1:Title}\n$0" },
+    { "format", "the format of the paragraphs after it", "{align = ${1:justify}, first = ${2:0.5cm}}\n$0" },
+  },
+  inline = {
+    { "footnote", "a footnote (right after the word before it)", "^[${1:Note.}]$0", attach = true },
+    { "link", "a link", "[${1:text}](${2:https://})$0" },
+    { "span", "words in another font or size", "[${1:words}]{font = ${2:Arial}, size = ${3:10pt}}$0" },
+    { "highlight", "highlighted words", "==${1:words}==$0" },
+    { "math", "an equation in the text (LaTeX)", "\\$${1:x^2}\\$$0" },
+  },
+}
+
 -- Completion: inside a table's options line ("{" above a table), its options ("rules = grid") or,
 -- after "name =", that option's values; an image's width after "){width ="; a highlight's colour
 -- after "=={".
@@ -519,7 +547,22 @@ local function completion(buf, pos)
     return items
   end
   local inside = line:sub(1, 1) == "{" and not before:find("}", 1, true) and (lines[2] or ""):match("^|") and before:sub(2)
-  if not inside then
+  if not inside then -- snippets
+    local word = before:match("^(%a*)$")
+    local list = word and M.SNIPPETS.block or {}
+    if not word then
+      word = before:match("^(%a+)$") or before:match("%s(%a+)$")
+      list = word and M.SNIPPETS.inline or {}
+    end
+    for _, sn in ipairs(word and vim.list_extend(vim.list_slice(list), before:match("^%a*$") and M.SNIPPETS.inline or {}) or {}) do
+      if sn[1]:sub(1, #word) == word:lower() or word == "" then
+        items[#items + 1] = {
+          label = sn[1], kind = KIND.Snippet, detail = sn[2], filterText = sn[1], insertTextFormat = 2,
+          documentation = { kind = "markdown", value = "```\n" .. sn[3]:gsub("%${%d+:([^}]*)}", "%1"):gsub("%$%d", ""):gsub("\\(.)", "%1") .. "\n```" },
+          textEdit = { newText = sn[3], range = { start = { line = pos.line, character = #before - #word - (sn.attach and before:sub(-#word - 1, -#word - 1) == " " and 1 or 0) }, ["end"] = pos } },
+        }
+      end
+    end
     return items
   end
   local used = {}

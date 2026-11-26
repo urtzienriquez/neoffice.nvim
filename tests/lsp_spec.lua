@@ -243,3 +243,60 @@ describe("the language server, on highlights and captions", function()
     assert.same({ "Introduction", "  Table 1: Sprint speeds.", "  Figure 1: A lizard." }, outline(request("textDocument/documentSymbol")))
   end)
 end)
+
+describe("snippets", function()
+  local function complete(text)
+    local buf = api.nvim_get_current_buf()
+    assert(vim.wait(2000, function() return #vim.lsp.get_clients({ bufnr = buf, name = "neoffice_ls" }) > 0 end))
+    local n = api.nvim_buf_line_count(0)
+    api.nvim_buf_set_lines(0, n, n, false, { "", text })
+    local params = { textDocument = { uri = vim.uri_from_bufnr(buf) }, position = { line = n + 1, character = #text } }
+    local items = {}
+    for _, r in pairs(vim.lsp.buf_request_sync(buf, "textDocument/completion", params, 2000) or {}) do
+      items = r.result and (r.result.items or r.result) or items
+    end
+    return items, n + 2
+  end
+  local function expand(text, name)
+    local items, row = complete(text)
+    local item = vim.iter(items):find(function(i) return i.label == name end)
+    assert.truthy(item, name)
+    local e = item.textEdit
+    api.nvim_buf_set_text(0, row - 1, e.range.start.character, row - 1, e.range["end"].character, { "" })
+    vim.cmd("startinsert")
+    api.nvim_win_set_cursor(0, { row, e.range.start.character })
+    vim.snippet.expand(e.newText)
+    vim.snippet.stop()
+    vim.cmd("stopinsert")
+    return row
+  end
+
+  it("are offered for blocks at a line's start, for text after a space, and nowhere else", function()
+    H.open(H.copy("rich.docx"))
+    local labels = function(items) return vim.tbl_map(function(i) return i.label end, items) end
+    assert.same({ "table" }, vim.tbl_filter(function(l) return l == "table" end, labels((complete("tab")))))
+    assert.truthy(vim.tbl_contains(labels((complete("Some words foot"))), "footnote"))
+    assert.is_false(vim.tbl_contains(labels((complete("Some words tab"))), "table"))
+    assert.same({}, (complete("{rules = gr")))
+  end)
+
+  it("write neoffice's markup, which saves as a table with its caption, a figure, a section, a footnote", function()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir .. "/figures", "p")
+    assert(vim.uv.fs_copyfile(H.FIXTURES .. "rich.docx", dir .. "/s.docx"))
+    assert(vim.uv.fs_copyfile(H.FIXTURES .. "dot.png", dir .. "/figures/file.png"))
+    require("neoffice").config.page = true
+    H.open(dir .. "/s.docx")
+    for _, name in ipairs({ "table", "figure", "landscape" }) do
+      expand(name:sub(1, 3), name)
+    end
+    local row = expand("A word foot", "footnote")
+    assert.equals("A word^[Note.]", H.lines()[row])
+    H.reopen()
+    local lines = H.lines()
+    for _, want in ipairs({ "Table: Caption.", "Figure: Caption.", "\\newpage {orientation = landscape}", "\\newpage {orientation = portrait}", "A word^[Note.]" }) do
+      assert.truthy(vim.tbl_contains(lines, want), want .. "\n" .. table.concat(lines, "\n"))
+    end
+    require("neoffice").config.page = false
+  end)
+end)

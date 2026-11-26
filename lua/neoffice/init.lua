@@ -2511,6 +2511,11 @@ function M.save(buf, target)
     -- the sections' page settings (see pages.lua): the document's at its top, each section's from its
     -- line (by its mark: the section it was; without one, a new one); only if they changed
     local section_plan
+    if not doc.sections then -- (a section's line where they aren't shown: not dropped without a word)
+      for _, block in ipairs(blocks) do
+        assert(not block.section, block.section and ("line %d: sections aren't shown (setup({ page = false })), so a section's line can't be written"):format(block.section.row))
+      end
+    end
     if doc.sections then
       local pages = require("neoffice.pages")
       local top = markup.header(api.nvim_buf_get_lines(buf, 0, -1, false))
