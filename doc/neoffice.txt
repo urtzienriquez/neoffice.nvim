@@ -600,9 +600,11 @@ from the start with `comment_text = true`, |neoffice-options|).
 replies. It opens on the comment closest to the cursor, and follows the cursor
 as you move in the document; the text of the comment it is on is highlighted
 in the document (NeofficeCommentCurrent), and moving in the panel scrolls the
-document to it when it is out of view. Its keys are two keys a family, as
-fugitive's (each can be changed, or dropped: |neoffice-keymaps|), and are
-listed at its end:
+document to it when it is out of view. Each comment shows its author and date,
+the text it is on (its first words, quoted), its text and its replies; a
+resolved one, marked ✓, is dimmed. Its bar says how many are open and
+resolved. Its keys are two keys a family, as fugitive's (each can be changed,
+or dropped: |neoffice-keymaps|); g? in it opens this:
 
   <CR>     go to the comment under the cursor in the document
   aa       add a reply to it
@@ -897,6 +899,12 @@ Highlight groups (all `default`, so your colour scheme can set them):
   NeofficeCommentSign       the comment sign
   NeofficeCommentVirt       a comment's text at the end of its line
   NeofficeCommentCurrent    the text of the comment the panel is on
+  NeofficeCommentAuthor     in the comments panel: an author
+  NeofficeCommentDate       its dates, and its bar's counts
+  NeofficeCommentQuote      the text a comment is on
+  NeofficeCommentDone       a resolved comment (NeofficeCommentDoneMark: its ✓)
+  NeofficeCommentTitle      its bar's title
+  NeofficeCommentRule       the line between comments
   NeofficeTitle             the title
   NeofficeNumber            heading numbers
   NeofficeAlign             the alignment marks and format lines

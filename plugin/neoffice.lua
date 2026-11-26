@@ -86,6 +86,12 @@ local function highlights()
     NeofficeCommentSign = { link = "DiagnosticWarn" },
     NeofficeCommentVirt = { link = "Comment" },
     NeofficeCommentAuthor = { link = "Title" },
+    NeofficeCommentTitle = { link = "Title" }, -- (the comments panel: its bar, a comment's date, the text it is on, a resolved one)
+    NeofficeCommentDate = { link = "Comment" },
+    NeofficeCommentQuote = { link = "@markup.quote" },
+    NeofficeCommentDone = { link = "Comment" },
+    NeofficeCommentDoneMark = { link = "DiagnosticOk" },
+    NeofficeCommentRule = { link = "WinSeparator" },
     NeofficeCommentCurrent = { link = "Search" }, -- (the text of the comment the panel is on)
   }) do
     hl.default = true

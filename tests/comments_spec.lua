@@ -360,3 +360,35 @@ for _, name in ipairs({ "rich.docx", "office.docx", "rich.odt" }) do
     end)
   end)
 end
+
+describe("the comments panel's look", function()
+  it("has its counts and help in its bar, each comment's author, date and text it is on, and no keys listed", function()
+    H.open(H.copy("rich.docx"))
+    H.cursor(3, "Commented")
+    H.input = "Another"
+    comments.add(false)
+    vim.cmd("Neoffice comments")
+    local bar = vim.wo.winbar
+    assert.truthy(bar:find("2 open · 0 resolved", 1, true), bar)
+    assert.truthy(bar:find("g? help", 1, true), bar)
+    local lines = api.nvim_buf_get_lines(0, 0, -1, false)
+    local alice = vim.fn.index(lines, "● Alice") + 1
+    assert.truthy(alice > 0, table.concat(lines, "\n"))
+    assert.equals("  “Commented text”", lines[alice + 1])
+    assert.is_nil(vim.iter(lines):find(function(l) return l:find("aa reply", 1, true) end)) -- (the keys: in the help)
+    local rule = vim.iter(ipairs(lines)):find(function(_, l) return l:find("──", 1, true) end)
+    assert.truthy(rule)
+    api.nvim_win_set_cursor(0, { rule, 0 })
+    local notify = vim.notify
+    vim.notify = function() end
+    H.input = "To nothing"
+    comments.reply() -- (on the line between two comments: to none of them)
+    vim.notify = notify
+    local date = api.nvim_buf_get_extmarks(0, neo.ns.comment, { alice - 1, 0 }, { alice - 1, -1 }, { details = true })
+    assert.truthy(vim.iter(date):find(function(m) return m[4].virt_text and m[4].virt_text[1][1] == "2024-01-01" end))
+    vim.cmd("Neoffice comments")
+    for _, c in ipairs(H.comments()) do
+      assert.equals(0, #c.replies)
+    end
+  end)
+end)

@@ -71,47 +71,88 @@ local function render()
   if not (panel.buf and api.nvim_buf_is_valid(panel.buf) and neo().docs[panel.doc]) then
     return
   end
-  local lines, rows, headers = {}, {}, {}
-  local function add(text, mark, reply, header)
+  local ns = neo().ns.comment
+  local width = panel.win and api.nvim_win_is_valid(panel.win) and api.nvim_win_get_width(panel.win) or 50
+  local lines, rows, marks_of = {}, {}, {} -- (marks_of: each line's highlights, and its date on the right)
+  local function add(text, mark, reply, hl, date)
     lines[#lines + 1], rows[#lines + 1] = text, { mark, reply }
-    headers[#lines] = header
+    marks_of[#lines] = { hl = hl, date = date }
   end
+  -- (what a comment is on, in the document: its first words, as Word shows them beside it)
+  local function quote(m)
+    if m.row == m.end_row and m.col == m.end_col then
+      return nil
+    end
+    local ok, text = pcall(api.nvim_buf_get_text, panel.doc, m.row, m.col, m.end_row, m.end_col, {})
+    text = ok and vim.trim(table.concat(text, " "):gsub("%s+", " ")) or ""
+    if text == "" then
+      return nil
+    end
+    local room = math.max(width - 6, 10)
+    if vim.fn.strdisplaywidth(text) > room then
+      text = vim.fn.strcharpart(text, 0, room - 1) .. "…"
+    end
+    return "“" .. text .. "”"
+  end
+  local open, resolved = 0, 0
   panel.threads = {} -- (the first line of each comment)
-  for _, m in ipairs(marks(panel.doc)) do
+  for i, m in ipairs(marks(panel.doc)) do
     local c = m.c
+    if i > 1 then -- (between threads: a thin rule, as a comment may have empty lines of its own)
+      add("  " .. ("─"):rep(math.max(width - 4, 4)), nil, nil, { { 0, -1, "NeofficeCommentRule" } })
+    end
+    if c.resolved then
+      resolved = resolved + 1
+    else
+      open = open + 1
+    end
+    local dim = c.resolved and "NeofficeCommentDone" or nil
     panel.threads[#panel.threads + 1] = #lines + 1
-    add(("%s%s · %s"):format(c.resolved and "✓ " or "", c.author, c.date:sub(1, 10)), m, nil, true)
+    add((c.resolved and "✓ " or "● ") .. c.author, m, nil, { { 0, #"● ", c.resolved and "NeofficeCommentDoneMark" or "NeofficeCommentSign" },
+      { #"● ", -1, dim or "NeofficeCommentAuthor" } }, c.date:sub(1, 10))
+    local q = quote(m)
+    if q then
+      add("  " .. q, m, nil, { { 2, -1, dim or "NeofficeCommentQuote" } })
+    end
     for _, l in ipairs(vim.split(c.text, "\n")) do
-      add("  " .. l, m)
+      add("  " .. l, m, nil, dim and { { 0, -1, dim } } or nil)
     end
     for k, r in ipairs(c.replies) do
-      add(("  ↳ %s · %s"):format(r.author, r.date:sub(1, 10)), m, k, true)
+      add("  ↳ " .. r.author, m, k, { { 2, #"  ↳ ", dim or "NeofficeCommentDate" }, { #"  ↳ ", -1, dim or "NeofficeCommentAuthor" } }, r.date:sub(1, 10))
       for _, l in ipairs(vim.split(r.text, "\n")) do
-        add("    " .. l, m, k)
+        add("    " .. l, m, k, dim and { { 0, -1, dim } } or nil)
       end
     end
-    add("", m)
   end
   if #lines == 0 then
-    lines = { "No comments yet." }
+    add("")
+    add("  No comments.", nil, nil, { { 0, -1, "NeofficeCommentDate" } })
+    add("  :Neoffice comment adds one, on the", nil, nil, { { 0, -1, "NeofficeCommentDate" } })
+    add("  selection or the cursor's word.", nil, nil, { { 0, -1, "NeofficeCommentDate" } })
   end
-  -- its keys, at its end (as zotero.nvim's windows show theirs)
-  local help = {}
-  for _, k in ipairs(M.KEYS) do
-    local key = M.keys()[k[1]]
-    key = type(key) == "table" and key[1] or key
-    help[#help + 1] = key and key .. " " .. k[2] or nil
-  end
-  table.insert(lines, "")
-  table.insert(lines, table.concat(help, " · "))
   vim.bo[panel.buf].modifiable = true
   api.nvim_buf_set_lines(panel.buf, 0, -1, false, lines)
   vim.bo[panel.buf].modifiable = false
-  api.nvim_buf_clear_namespace(panel.buf, neo().ns.comment, 0, -1)
-  for row in pairs(headers) do
-    api.nvim_buf_set_extmark(panel.buf, neo().ns.comment, row - 1, 0, { end_col = #lines[row], hl_group = "NeofficeCommentAuthor" })
+  api.nvim_buf_clear_namespace(panel.buf, ns, 0, -1)
+  for row, mk in pairs(marks_of) do
+    for _, h in ipairs(mk.hl or {}) do
+      local e = h[2] < 0 and #lines[row] or h[2]
+      if e > h[1] then
+        api.nvim_buf_set_extmark(panel.buf, ns, row - 1, h[1], { end_col = e, hl_group = h[3] })
+      end
+    end
+    if mk.date then
+      api.nvim_buf_set_extmark(panel.buf, ns, row - 1, 0, { virt_text = { { mk.date, "NeofficeCommentDate" } }, virt_text_pos = "right_align" })
+    end
   end
-  api.nvim_buf_set_extmark(panel.buf, neo().ns.comment, #lines - 1, 0, { end_col = #lines[#lines], hl_group = "NeofficeCommentVirt" })
+  -- (at its top: how many, and its help)
+  if panel.win and api.nvim_win_is_valid(panel.win) and api.nvim_win_get_buf(panel.win) == panel.buf then
+    local help = M.keys().help
+    help = type(help) == "table" and help[1] or help
+    local bar = ("%%#NeofficeCommentTitle# Comments %%#NeofficeCommentDate# %d open · %d resolved%%=%s"):format(open, resolved,
+      help and ("%#NeofficeCommentDate#" .. help:gsub("%%", "%%%%") .. " help ") or "")
+    api.nvim_set_option_value("winbar", bar, { win = panel.win, scope = "local" })
+  end
   panel.rows = rows
 end
 
@@ -373,8 +414,11 @@ function M.toggle_panel()
   vim.cmd("botright 50vsplit")
   panel.win = api.nvim_get_current_win()
   api.nvim_win_set_buf(panel.win, panel.buf)
-  vim.wo[panel.win].number, vim.wo[panel.win].relativenumber, vim.wo[panel.win].wrap = false, false, true
-  vim.wo[panel.win].signcolumn, vim.wo[panel.win].winfixwidth, vim.wo[panel.win].cursorline = "no", true, true
+  -- (as :setlocal, for its window only: not inherited by the windows opened from it)
+  for name, value in pairs({ number = false, relativenumber = false, wrap = true, signcolumn = "no", winfixwidth = true, cursorline = true,
+    foldcolumn = "0", list = false, spell = false, statuscolumn = "", linebreak = true, breakindent = true }) do
+    api.nvim_set_option_value(name, value, { win = panel.win, scope = "local" })
+  end
   render()
   follow() -- (on the comment where you are; and as you move in the document, or in the panel)
   local group = api.nvim_create_augroup("neoffice_panel", {})
