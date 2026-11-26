@@ -161,6 +161,8 @@ local function list_of(ctx, p)
   while node and LISTS[node.tag] do
     if node.tag == "text:list-header" then -- (an unnumbered heading of the list)
       return nil
+    elseif node.tag == "text:list-item" and level == 0 then -- (its own list style, as LibreOffice writes one)
+      style = xml.attr(node, "text:style-override") or style
     elseif node.tag == "text:list" then
       level, top = level + 1, node
       style = style or xml.attr(node, "text:style-name")
@@ -769,6 +771,33 @@ function M.load(path)
   end
   -- (or the headings are numbered by being in a list)
   ctx.numbered = ctx.numbered or vim.iter(paras):any(function(para) return para.node.tag == "text:h" and list_of(ctx, para.node) end)
+  -- (which items one after another are one list: those of one list, also when LibreOffice wrote it
+  -- as lists one after another going on with the numbering, "continue-numbering" or "continue-list")
+  local prev_top, group, groups = nil, nil, 0
+  for _, para in ipairs(paras) do
+    local l = para.block.list
+    -- (an item numbered again from a value, not the list's first: another list from there)
+    local item = l and para.node and para.node.parent
+    local restarts = l and l.level == 1 and item and item.tag == "text:list-item" and xml.attr(item, "text:start-value") ~= nil
+      and element_children(l.id)[1] ~= item
+    if restarts then
+      groups = groups + 1
+      group = groups
+    end
+    if l and l.id then
+      if l.id ~= prev_top then
+        local goes_on = xml.attr(l.id, "text:continue-numbering") == "true" or xml.attr(l.id, "text:continue-list") ~= nil
+        if not (group and goes_on) then
+          groups = groups + 1
+          group = groups
+        end
+        prev_top = l.id
+      end
+      l.group = group
+    else
+      group, prev_top = nil, nil -- (a paragraph between: what follows is another)
+    end
+  end
   return ctx, paras
 end
 
@@ -842,6 +871,10 @@ local function join_or_split(ctx, p, want)
   local item, top = p.parent, list.id
   local items = element_children(top)
   local first = items[1] == item and element_children(item)[1] == p
+  if want.continues and not first and xml.attr(item, "text:start-value") then -- (numbered on: no more starting again)
+    xml.set_attr(item, "text:start-value", nil)
+    return
+  end
   local siblings = element_children(top.parent)
   local at = vim.iter(ipairs(siblings)):find(function(_, c) return c == top end)
   local before = at and siblings[at - 1]
@@ -893,14 +926,36 @@ local function set_list(ctx, p, want)
     local siblings = element_children(p.parent)
     local index = vim.iter(ipairs(siblings)):find(function(_, c) return c == p end)
     local prev = siblings[index - 1]
-    local container = want.continues and prev and prev.tag == "text:list" and list_kind(ctx, xml.attr(prev, "text:style-name"), 1) == want.kind and prev
+    -- (the list above it, if it goes on with it: of its kind, or any for a sub-item, which goes in its last item)
+    local container = want.continues and prev and prev.tag == "text:list"
+      and (want.level > 1 or list_kind(ctx, xml.attr(prev, "text:style-name"), 1) == want.kind) and prev
     container = container or xml.append(p.parent, xml.elem("text:list", { { "text:style-name", list_style(ctx, want.kind) } }), xml.index(p))
     local top = container
-    for _ = 2, want.level do -- down to its level, in the last item
+    local function style_of(list) -- (a list's style: its own, else the list's it is in)
+      local node = list
+      while node and LISTS[node.tag] do
+        local name = node.tag == "text:list" and xml.attr(node, "text:style-name")
+        if name then
+          return name
+        end
+        node = node.parent
+      end
+    end
+    for level = 2, want.level do -- down to its level, in the last item
       local items = element_children(container)
       local item = items[#items] and items[#items].tag == "text:list-item" and items[#items] or xml.append(container, xml.elem("text:list-item"))
       local inside = element_children(item)
-      container = inside[#inside] and inside[#inside].tag == "text:list" and inside[#inside] or xml.append(item, xml.elem("text:list"))
+      local nested = inside[#inside] and inside[#inside].tag == "text:list" and inside[#inside]
+      if nested and level == want.level and list_kind(ctx, style_of(nested), level) ~= want.kind then
+        nested = nil -- (a sub-list of the other kind: this one is another, after it)
+      end
+      if not nested then
+        nested = xml.append(item, xml.elem("text:list"))
+        if list_kind(ctx, style_of(container), level) ~= want.kind then -- (of its own kind: bullets under a number...)
+          xml.set_attr(nested, "text:style-name", list_style(ctx, want.kind))
+        end
+      end
+      container = nested
     end
     xml.remove(p)
     xml.append(xml.append(container, xml.elem("text:list-item")), p)

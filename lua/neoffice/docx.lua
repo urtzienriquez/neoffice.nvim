@@ -924,19 +924,22 @@ function M.load(path)
     local direct = para.block.heading and xml.child(xml.child(para.node, "w:pPr") or {}, "w:numPr")
     return direct and xml.attr(xml.child(direct, "w:numId") or {}, "w:val") ~= "0"
   end)
-  -- (which items are one list, as Word counts them: those of one definition, its instances counting
-  -- on from each other, until one that numbers again from 1 is first used)
-  local seen, group_of, groups = {}, {}, 0
+  -- (which items one after another are one list: a sub-item always its item's; an item of the first
+  -- level another list where the definition changes, or where an instance numbering again from 1 is
+  -- first used, as Word counts them)
+  local seen, group, group_abstract, groups = {}, nil, nil, 0
   for _, para in ipairs(paras) do
     local l = para.block.list
     if l and l.abstract then
       local first = not seen[l.id]
       seen[l.id] = true
-      if not group_of[l.abstract] or first and l.restarts then
+      if not group or l.level == 1 and (l.abstract ~= group_abstract or first and l.restarts) then
         groups = groups + 1
-        group_of[l.abstract] = groups
+        group, group_abstract = groups, l.abstract
       end
-      l.group = group_of[l.abstract]
+      l.group = group
+    elseif not (l and l.kind) then
+      group = nil -- (a paragraph between: what follows is another)
     end
   end
   return ctx, paras
@@ -1174,6 +1177,19 @@ local function set_list(ctx, p, ppr, want)
     -- its list: the one of the item just before it (no blank line between), else its own (a new
     -- instance numbering again, if that is the one before it), else a new one
     local before = previous_list(ctx, p, want.kind)
+    if want.continues then -- (the instance of the nearest item above at its level or higher: not a sub-item's,
+      -- nor one of the other kind under it)
+      for k = xml.index(p) - 1, 1, -1 do
+        local sibling = p.parent.children[k]
+        local list = sibling.tag == "w:p" and list_of(ctx, xml.child(sibling, "w:pPr"))
+        if sibling.tag and not list then
+          break
+        elseif list and list.level <= want.level then
+          before = list.kind == want.kind and list.id or nil
+          break
+        end
+      end
+    end
     local base
     if want.continues and before then
       base = before

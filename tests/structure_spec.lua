@@ -226,3 +226,35 @@ describe("docx lists that share their numbering's definition (as Word and pandoc
     end
   end)
 end)
+
+describe("lists open as they were written, without empty lines between their items", function()
+  local SHAPES = {
+    { "1. one", "  1.1. one one", "    1.1.1. deeper", "    1.1.1. deeper again", "  1.1. one two", "1. two" },
+    { "1. First", "  1.1. a", "  1.1. b", "1. Then", "  1.a. c", "  1.a. d", "  1.a. e", "1. Finally" },
+    { "1. numbered", "  - a bullet under it", "  - another", "1. numbered again" },
+    { "- bullets", "- more", "", "1. then numbers", "1. more" },
+    { "1. one list", "", "1. another list", "1. its second" },
+    { "1. an item\\", "with a line break", "1. next" },
+  }
+  -- (as LibreOffice saves it again: its own way of writing lists)
+  local function resaved(path, ext)
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+    vim.system({ "soffice", "-env:UserInstallation=file://" .. dir .. "/profile", "--headless", "--convert-to", ext, "--outdir", dir, path }):wait()
+    return dir .. "/" .. vim.fn.fnamemodify(path, ":t")
+  end
+  for _, ext in ipairs({ "docx", "odt" }) do
+    for k, lines in ipairs(SHAPES) do
+      it(("shape %d (%s), and after LibreOffice saves it again"):format(k, ext), function()
+        local path = new(ext, lines)
+        assert.same(lines, H.lines())
+        if H.has_libreoffice then
+          local again = resaved(path, ext)
+          assert.truthy(vim.uv.fs_stat(again), again)
+          H.open(again)
+          assert.same(lines, H.lines())
+        end
+      end)
+    end
+  end
+end)

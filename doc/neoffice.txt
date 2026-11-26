@@ -91,8 +91,11 @@ numbered as its own pattern says, so the sub-items under one item can be
 `1.1.` and those under the next `1.a.`: 1.1, 1.2, 2, 2.a, 2.b, 3 (in Word, an
 instance of the list overriding that level; in LibreOffice, the sub-list's own
 list style). One that can't be written so ("(1)", "Step 1:") shows as `1.` and
-is kept as it is unless you change it. Items one after another are one list;
-a blank line (or a paragraph) between them starts another, numbered from 1.
+is kept as it is unless you change it. Items one after another are one list
+(a sub-item always its item's, bullets under a number too); a blank line (or a
+paragraph) between them starts another, numbered from 1. A list the document
+numbers again partway (as LibreOffice writes one sometimes) opens with a blank
+line there: delete it to number on.
 
                                                               *neoffice-align*
 Its alignment comes after its kind:
