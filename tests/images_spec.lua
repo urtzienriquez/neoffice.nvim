@@ -238,3 +238,59 @@ describe("showing images", function()
     assert.truthy(calls[2] and calls[2].del)
   end)
 end)
+
+describe("image previews", function()
+  local images = require("neoffice.images")
+  local function preview(data, ext)
+    local result, finished = nil, false
+    images.preview(data, ext, function(png)
+      result, finished = png, true
+    end)
+    vim.wait(60000, function() return finished end, 20)
+    return result
+  end
+  local function bytes(path)
+    local f = assert(io.open(path, "rb"))
+    local data = f:read("*a")
+    f:close()
+    return data
+  end
+
+  it("shows a small PNG as it is, at once", function()
+    local data = bytes(H.FIXTURES .. "dot.png")
+    local got
+    images.preview(data, "png", function(png) got = png end)
+    assert.equals(data, got) -- (no waiting: called before preview returns)
+  end)
+
+  if vim.fn.executable("magick") == 1 then
+    it("makes JPEG previews PNG, no larger than they are shown", function()
+      local png = preview(bytes(H.FIXTURES .. "square.jpg"), "jpg")
+      assert.equals("png", images.info(png))
+    end)
+  end
+
+  if vim.fn.executable("pdftoppm") == 1 or vim.fn.executable("magick") == 1 then
+    it("makes a PDF's first page a PNG preview", function()
+      local pdf = "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+        .. "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Contents 4 0 R>>endobj\n"
+        .. "4 0 obj<</Length 35>>stream\n0 0 1 rg 20 20 160 60 re f\nendstream endobj\n"
+        .. "trailer<</Root 1 0 R>>\n%%EOF\n"
+      local png = preview(pdf, "pdf")
+      local kind, w, h = images.info(png or "")
+      assert.equals("png", kind)
+      assert.truthy(w > h) -- (its shape: wider than high)
+    end)
+  end
+
+  if vim.fn.executable("rsvg-convert") == 1 or vim.fn.executable("magick") == 1 then
+    it("makes an SVG a PNG preview", function()
+      local svg = '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100" fill="blue"/></svg>'
+      assert.equals("png", images.info(preview(svg, "svg") or ""))
+    end)
+  end
+
+  it("says when it can't make one (nil)", function()
+    assert.is_nil(preview("not an image at all", "xyz"))
+  end)
+end)

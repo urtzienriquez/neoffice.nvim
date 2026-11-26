@@ -362,6 +362,14 @@ function M.cells(line, dashes)
   return cells
 end
 
+-- Whether a line could read back otherwise than it was written: only text with what could start
+-- a mark that isn't always escaped ("==", "~~", "++", "\\", "{", "!") can. (Most lines can't: they
+-- aren't read again.)
+local function could_misread(line)
+  return line:find("==", 1, true) or line:find("~~", 1, true) or line:find("++", 1, true)
+    or line:find("[\\{!]") or line:find("[%^_]{")
+end
+
 -- Returns the line and, for every span, the { start, end } byte columns of its text.
 function M.render(spans, block, strict)
   local parts, cols, len, cur = {}, {}, 0, {}
@@ -457,7 +465,7 @@ function M.render(spans, block, strict)
   -- what is written must read back as the same text: if not (marks next to text that looks like
   -- marks), it is written again escaping every character that could start a mark
   -- (only text with characters that could be read as marks can read back otherwise)
-  if not strict and line:find("[=~+{_^\\!]") and not M.same(line, spans) then
+  if not strict and could_misread(line) and not M.same(line, spans) then
     return M.render(spans, block, true)
   end
   return line, cols
@@ -618,7 +626,8 @@ function M.parse(line)
   local chars, cur, link_close, braces = {}, {}, nil, {} -- braces: the open ^{ and _{
   local h_from -- (where the open highlight started, in chars)
   local function emit(at)
-    local ch = line:match("^.[\128-\191]*", at)
+    local byte = line:byte(at) -- (the character's bytes, from its first: UTF-8)
+    local ch = line:sub(at, at + (byte < 0xC0 and 0 or byte < 0xE0 and 1 or byte < 0xF0 and 2 or 3))
     chars[#chars + 1] = { -- (the flags of M.FLAGS)
       col = at - 1, ch = ch, link = cur.link, b = cur.b == true, i = cur.i == true, u = cur.u == true,
       s = cur.s == true, h = cur.h or false, sup = cur.sup == true, sub = cur.sub == true,

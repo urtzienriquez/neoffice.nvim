@@ -16,6 +16,9 @@ local function decode(s)
 end
 
 function M.escape(s, in_attr)
+  if not s:find('[%c&<>"]') then -- (most text: nothing to escape)
+    return s
+  end
   s = s:gsub("[%z\1-\8\11\12\14-\31]", "") -- (control characters XML can't have at all)
   s = s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
   if in_attr then -- (kept as they are: written plainly, a parser would read them as spaces)
@@ -65,26 +68,43 @@ function M.parse(s)
   return doc
 end
 
-function M.serialize(n)
+local function write(n, out)
   if n.text then
-    return M.escape(n.text)
+    out[#out + 1] = M.escape(n.text)
+    return
   elseif n.raw then
-    return n.raw
+    out[#out + 1] = n.raw
+    return
   end
-  local inner = {}
+  local tag = n.tag
+  if tag then
+    out[#out + 1] = "<" .. tag
+    for _, kv in ipairs(n.attrs) do
+      out[#out + 1] = " " .. kv[1] .. '="' .. M.escape(kv[2], true) .. '"'
+    end
+    if #n.children == 0 then
+      out[#out + 1] = "/>"
+      return
+    end
+    out[#out + 1] = ">"
+  end
+  local before = #out
   for _, child in ipairs(n.children) do
-    inner[#inner + 1] = M.serialize(child)
+    write(child, out)
   end
-  inner = table.concat(inner)
-  if not n.tag then -- the document node
-    return inner
+  if tag then
+    if #out == before then -- (children that write nothing: an empty element)
+      out[before] = "/>"
+    else
+      out[#out + 1] = "</" .. tag .. ">"
+    end
   end
-  local attrs = {}
-  for _, kv in ipairs(n.attrs) do
-    attrs[#attrs + 1] = string.format(' %s="%s"', kv[1], M.escape(kv[2], true))
-  end
-  local open = "<" .. n.tag .. table.concat(attrs)
-  return inner == "" and open .. "/>" or open .. ">" .. inner .. "</" .. n.tag .. ">"
+end
+
+function M.serialize(n)
+  local out = {}
+  write(n, out)
+  return table.concat(out)
 end
 
 -- ── Building ────────────────────────────────────────────────────────────────

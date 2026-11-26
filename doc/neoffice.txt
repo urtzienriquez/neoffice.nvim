@@ -19,8 +19,8 @@ settings, ...) is kept, and only what you change is written (see
 
 Requires Nvim 0.10+ and the `zip` and `unzip` commands. Optional: pandoc
 (|neoffice-equations|), LibreOffice (`soffice`, for .doc files: converted to
-.docx when opened and back when written) and ImageMagick (to show JPEG and GIF
-images).
+.docx when opened, once a session, and back when written), and to show images
+other than PNG (|neoffice-images|): ImageMagick, `pdftoppm`, `rsvg-convert`.
 
 ==============================================================================
 THE TEXT                                                       *neoffice-text*
@@ -324,8 +324,12 @@ show the same way. A box in a table's cell, or with a table in it, shows as
 delete it. A paragraph that only starts like a box's line is written `\:::`.
 
 With Nvim 0.12+ (|vim.ui.img|) and a terminal that shows images (Kitty,
-Ghostty, WezTerm, ...), images are also shown under their line. JPEG and GIF
-images need ImageMagick (`magick`) to be shown.
+Ghostty, WezTerm, ...), images are also shown under their line. Their previews
+are made in the background, so a document opens without waiting for them: each
+shows when it is ready (large photos are read at the size they are shown).
+PNG needs nothing; JPEG, GIF, BMP, TIFF and WebP need ImageMagick (`magick`);
+PDF (its first page) `pdftoppm` (poppler) or ImageMagick; SVG `rsvg-convert`
+or ImageMagick; EMF, WMF, SVM and other drawings LibreOffice (`soffice`).
 
 ==============================================================================
 EQUATIONS                                                 *neoffice-equations*

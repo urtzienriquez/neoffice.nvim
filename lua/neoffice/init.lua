@@ -473,6 +473,7 @@ local function setup_buffer(buf)
 end
 
 -- Convert a file with LibreOffice (to = "docx", "doc:MS Word 97", ...) into `dir`; returns the new path.
+local converted = {} -- (a .doc file, as it was -> its .docx, this session)
 local function convert(path, to, dir)
   local profile = "-env:UserInstallation=file://" .. vim.fn.stdpath("cache") .. "/neoffice-libreoffice"
   local r = vim.system({ "soffice", profile, "--headless", "--convert-to", to, "--outdir", dir, path }):wait()
@@ -595,8 +596,18 @@ local function open(buf, path)
   local ext = path:match("%.(%w+)$"):lower()
   local new = not vim.uv.fs_stat(path) -- a new document: created on the first :w
   local base
-  if ext == "doc" then
-    base = new and template("docx") or convert(path, "docx", vim.fn.tempname())
+  if ext == "doc" then -- (converted by LibreOffice: once a session, while the file stays as it was)
+    local s = not new and vim.uv.fs_stat(path)
+    local key = s and ("%s:%d:%d.%d"):format(path, s.size, s.mtime.sec, s.mtime.nsec)
+    if new then
+      base = template("docx")
+    else
+      if not (converted[key] and vim.uv.fs_stat(converted[key])) then
+        converted[key] = convert(path, "docx", vim.fn.tempname())
+      end
+      base = vim.fn.tempname() .. ".docx"
+      assert(vim.uv.fs_copyfile(converted[key], base))
+    end
   elseif new then
     base = template(ext)
   else

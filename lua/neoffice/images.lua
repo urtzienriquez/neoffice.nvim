@@ -1,5 +1,7 @@
 -- Images: their type and size, and showing them below their ![alt](path) line with vim.ui.img
 -- (Neovim 0.12+, in terminals that support the Kitty graphics protocol: Kitty, Ghostty, WezTerm...).
+-- Previews are made in the background (read from the document, made small, other formats turned
+-- into PNG: PDF, SVG, EMF...), so opening a document never waits for them.
 local api = vim.api
 local M = {}
 
@@ -34,6 +36,7 @@ end
 -- ── Showing them ────────────────────────────────────────────────────────────
 
 local cache = {} -- path (and modification time, for files on disk) -> PNG bytes, or false
+local pending = {} -- the same keys, while being read or converted (in the background)
 local shown = {} -- buf -> { key -> image id }
 local supported -- (asked once)
 
@@ -49,8 +52,117 @@ local function available()
   return supported and require("neoffice").config.images
 end
 
--- PNG bytes of an image of the document (as written in the buffer); other formats go through
--- ImageMagick if it is installed.
+-- How images are turned into PNG to be shown, by their extension (or kind): a command for a file
+-- `src` and the PNG `out` to write; nil if the program isn't there. A preview needs no more than
+-- MAX pixels (large photos are also read at a smaller size: much faster).
+local MAX = 1000
+local tools = {}
+local function has(program)
+  if tools[program] == nil then
+    tools[program] = vim.fn.executable(program) == 1
+  end
+  return tools[program]
+end
+local function magick(src, out)
+  return has("magick") and { "magick", "-define", "jpeg:size=" .. 2 * MAX .. "x" .. 2 * MAX, src .. "[0]", "-thumbnail", MAX .. "x" .. MAX .. ">", "png:" .. out } or nil
+end
+local CONVERT = {
+  png = magick, jpeg = magick, jpg = magick, gif = magick, bmp = magick, tif = magick, tiff = magick, webp = magick,
+  pdf = function(src, out)
+    return has("pdftoppm") and { "pdftoppm", "-png", "-singlefile", "-f", "1", "-l", "1", "-scale-to", tostring(MAX), src, (out:gsub("%.png$", "")) }
+      or magick(src, out)
+  end,
+  svg = function(src, out)
+    return has("rsvg-convert") and { "rsvg-convert", "-w", tostring(MAX), "-o", out, src } or magick(src, out)
+  end,
+}
+-- (drawings: metafiles and others, through LibreOffice: all those waiting in one call)
+local OFFICE = { emf = true, wmf = true, emz = true, wmz = true, svm = true, eps = true, cgm = true, pct = true, pict = true, met = true }
+
+local function done(key, data)
+  pending[key] = nil
+  cache[key] = data and M.info(data) == "png" and data or false
+  for buf in pairs(shown) do
+    if api.nvim_buf_is_valid(buf) then
+      M.refresh(buf)
+    end
+  end
+end
+
+local function read(file)
+  local f = io.open(file, "rb")
+  local data = f and f:read("*a")
+  if f then
+    f:close()
+  end
+  return data
+end
+
+-- LibreOffice's conversions: queued, one call at a time (it doesn't run twice at once).
+local office = { queue = {}, running = false }
+local function run_office()
+  if office.running or #office.queue == 0 then
+    return
+  end
+  local batch = office.queue
+  office.queue, office.running = {}, true
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir, "p")
+  local cmd = { "soffice", "-env:UserInstallation=file://" .. vim.fn.stdpath("cache") .. "/neoffice-libreoffice", "--headless", "--convert-to", "png", "--outdir", dir }
+  for _, item in ipairs(batch) do
+    cmd[#cmd + 1] = item.src
+  end
+  vim.system(cmd, { timeout = 60000 }, function()
+    vim.schedule(function()
+      for _, item in ipairs(batch) do
+        local out = vim.fs.joinpath(dir, vim.fn.fnamemodify(item.src, ":t:r") .. ".png")
+        if has("magick") and vim.uv.fs_stat(out) then -- (drawn on a page: without the page around it)
+          vim.system({ "magick", out, "-trim", "+repage", "-thumbnail", MAX .. "x" .. MAX .. ">", "png:" .. out }, { timeout = 30000 }, function()
+            vim.schedule(function() item.finish(read(out)) end)
+          end)
+        else
+          item.finish(read(out))
+        end
+      end
+      office.running = false
+      run_office()
+    end)
+  end)
+end
+
+-- Turn an image's bytes (of a file with extension `ext`) into a preview: PNG bytes, or nil if it
+-- can't be; `finish` gets them (in the background, but for a small PNG: at once).
+function M.preview(data, ext, finish)
+  local kind = M.info(data)
+  if kind == "png" and #data < 1500000 then -- (as it is: nothing to wait for)
+    return finish(data)
+  end
+  ext = kind or ext
+  local src = vim.fn.tempname() .. "." .. ext
+  local out = vim.fn.tempname() .. ".png"
+  local f = io.open(src, "wb")
+  if not f then
+    return finish(nil)
+  end
+  f:write(data)
+  f:close()
+  if OFFICE[ext] and has("soffice") then
+    office.queue[#office.queue + 1] = { finish = finish, src = src }
+    return run_office()
+  end
+  local cmd = CONVERT[ext] and CONVERT[ext](src, out)
+  if not cmd then
+    return finish(kind == "png" and data or nil)
+  end
+  vim.system(cmd, { timeout = 30000 }, function(r)
+    vim.schedule(function()
+      finish(r.code == 0 and read(out) or nil)
+    end)
+  end)
+end
+
+-- PNG bytes of an image of the document (as written in the buffer), if it is ready: if not, it is
+-- read and converted in the background, and shown when it is (nil meanwhile).
 local function png(buf, path)
   local doc = require("neoffice").docs[buf]
   local inside = doc.ctx.entries[path]
@@ -58,23 +170,27 @@ local function png(buf, path)
   file = file:match("^/") and file or vim.fs.joinpath(vim.fs.dirname(doc.path), file)
   local stat = not inside and vim.uv.fs_stat(file)
   local key = inside and doc.path .. "//" .. path or file .. "@" .. (stat and stat.mtime.sec or "")
-  if cache[key] == nil then
-    local data
+  if cache[key] == nil and not pending[key] then
+    pending[key] = true
+    local ext = (path:match("%.(%w+)$") or ""):lower()
     if inside then
-      data = require("neoffice.zip").read(doc.base, path)
+      vim.system({ "unzip", "-p", doc.base, path }, {}, function(r)
+        vim.schedule(function()
+          if r.code == 0 and r.stdout and #r.stdout > 0 then
+            M.preview(r.stdout, ext, function(data) done(key, data) end)
+          else
+            done(key, nil)
+          end
+        end)
+      end)
     else
-      local f = io.open(file, "rb")
-      data = f and f:read("*a")
-      if f then
-        f:close()
+      local data = stat and read(file)
+      if data then
+        M.preview(data, ext, function(png_data) done(key, png_data) end)
+      else
+        done(key, nil)
       end
     end
-    local kind = data and M.info(data)
-    if kind and kind ~= "png" and vim.fn.executable("magick") == 1 then
-      local r = vim.system({ "magick", "-", "png:-" }, { stdin = data }):wait()
-      data, kind = r.code == 0 and r.stdout or nil, r.code == 0 and "png" or nil
-    end
-    cache[key] = kind == "png" and data or false
   end
   return cache[key] or nil
 end
@@ -165,12 +281,12 @@ local function draw(buf)
   end)
 end
 
-local pending = {}
+local refreshing = {}
 function M.refresh(buf)
-  if not pending[buf] then
-    pending[buf] = true
+  if not refreshing[buf] then
+    refreshing[buf] = true
     vim.defer_fn(function()
-      pending[buf] = nil
+      refreshing[buf] = nil
       draw(buf)
     end, 50)
   end
