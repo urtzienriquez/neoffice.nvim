@@ -111,18 +111,24 @@ document has) and their attributes, and folds the header out of the way
 The format of plain paragraphs (not headings, titles, quotes, list items,
 captions, table cells or boxes) is what they have of their own, against
 their style above. It is set for many at once, as in LaTeX: a line with only
-attributes in braces sets the format of the paragraphs after it, until the
-next such line: >
+attributes in braces changes the format of the paragraphs after it, until
+the next such line, and says only what changes: what it doesn't say goes on
+from the line before. `name = none` takes one back to the style, and `none`
+alone all of them: >
 
   {align = justify, first = 0.5cm}
   Small mammals budget their energy...
 
-  Populations from warm and cold places...
+  {before = 6pt}
+  Justified still, indented still, and more space above.
 
-  {indent-left = 0.76cm, first = -0.76cm}
+  {first = none, before = none}
+  Justified still; as the style for the rest.
+
+  {none, indent-left = 0.76cm, first = -0.76cm}
   Alexander, R. M. (1999). Energy for animal life...
 
-  {}
+  {none}
   From here on, as their style says.
 <
   `align`                         `left`, `center`, `right`, `justify`
@@ -133,8 +139,10 @@ next such line: >
                                   multiple, or a length (exactly that)
   `font`, `size`                  the font of its text and its size (`11pt`)
 
-A format says only what differs from the style: `none` (or leaving it out)
-is the style's (`align = none`: the style's alignment). A paragraph that
+A format is what differs from the style: `none` is the style's (`align =
+none`: the style's alignment). Opened, each line says only what changes
+from the one before it (or starts from the style, with `none`, when that is
+much shorter). A paragraph that
 differs from the paragraphs around it says how, at its start: `{before =
 12pt} One with more space above.` (only braces with `name = value` in them
 are attributes: `{this} text` is text). The marks are short for alignment:

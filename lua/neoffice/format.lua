@@ -130,7 +130,7 @@ function M.edits(buf, first, last)
     local format = line:find("^[<%-{]") and not (header and row <= header.last) and not (lines[row + 1] or ""):match("^|")
       and markup.para_line(line)
     if format and format.text and not format.bad then
-      edit(out, row - 1, 0, line, "{" .. require("neoffice.paras").render(vim.tbl_extend("force", {}, format.attrs, { align = format.align })) .. "}")
+      edit(out, row - 1, 0, line, markup.render_para_line(format))
     end
   end
   for row = first + 1, math.min(last + 1, #lines) do -- boxes' lines (no marks on them: the whole line)

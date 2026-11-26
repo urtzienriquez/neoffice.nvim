@@ -151,21 +151,27 @@ end
 -- A line with only a mark and its attributes ("<=> {first = 0.5cm}"), which sets the format of
 -- the paragraphs after it (see paras.lua): { align (nil: left), attrs }, and why if they aren't
 -- right (bad); nil if the line isn't one.
--- Also a line with only the attributes, "{align = justify, first = 0.5cm}" (and "{}": its style's).
+-- Also a line with only the attributes, "{align = justify, first = 0.5cm}". It says what changes
+-- from the format before it (what it doesn't say goes on; "name = none": the style's again), and
+-- "none" alone goes back to the style for all ("{none}", "{none, size = 10pt}"; "{}" too).
+-- { reset, align (or "none"), attrs (with "none"s), bad, text }; nil if the line isn't one.
 -- (A table's options are a line in braces too, but just above the table: the caller tells.)
 function M.para_line(line)
   local function read(align, inside)
-    local attrs, bad = require("neoffice.paras").parse(inside)
+    local reset = inside:match("^%s*$") ~= nil
+    local rest = inside:gsub("^%s*none%s*$", function() reset = true return "" end)
+    rest = rest:gsub("^%s*none%s*[,;]%s*", function() reset = true return "" end)
+    local attrs, bad = require("neoffice.paras").parse(rest)
     if attrs and attrs.align then
       if align and align ~= attrs.align then
         bad = "its alignment is said twice (its mark, and align =)"
       end
       align, attrs.align = attrs.align, nil
     end
-    return { align = align ~= "none" and align or nil, attrs = attrs or {}, bad = bad, text = inside }
+    return { reset = reset or nil, align = align, attrs = attrs or {}, bad = bad, text = inside }
   end
   local inside = line:match("^{([^{}]*)}%s*$")
-  if inside and (inside:match("^%s*$") or inside:find("=", 1, true)) then
+  if inside and (inside:match("^%s*$") or inside:find("=", 1, true) or inside:match("^%s*none%s*$") or inside:match("^%s*none%s*[,;]")) then
     return read(nil, inside)
   end
   for align, mark in pairs(ALIGN) do
@@ -181,6 +187,48 @@ function M.para_line(line)
       end
     end
   end
+end
+
+-- A format's line as written: "{none, align = justify, first = 0.5cm}" (see M.para_line).
+function M.render_para_line(f)
+  local attrs = require("neoffice.paras").render(vim.tbl_extend("force", {}, f.attrs or {}, { align = f.align }))
+  return "{" .. (f.reset and "none" .. (attrs ~= "" and ", " or "") or "") .. attrs .. "}"
+end
+-- A format (the whole of it: { align, attrs }) after this format's line, on `before`'s.
+function M.apply_para_line(before, f)
+  local out = { align = before.align, attrs = {} }
+  if f.reset then
+    out.align = nil
+  else
+    for k, v in pairs(before.attrs or {}) do
+      out.attrs[k] = v
+    end
+  end
+  if f.align then
+    out.align = f.align ~= "none" and f.align or nil
+  end
+  for k, v in pairs(f.attrs or {}) do
+    out.attrs[k] = v ~= "none" and v or nil
+  end
+  return out
+end
+-- The line that takes `before` to `after` (both whole formats): what changes, or from the style
+-- when that says it in much less.
+function M.para_line_for(before, after)
+  local pf = require("neoffice.paras")
+  local change = { attrs = {} }
+  if not pf.same({ align = before.align }, { align = after.align }) then
+    change.align = after.align or "none"
+  end
+  for _, key in ipairs(pf.KEYS) do
+    local was, now = (before.attrs or {})[key], (after.attrs or {})[key]
+    if key ~= "align" and pf.measure(key, was) ~= pf.measure(key, now) then
+      change.attrs[key] = now or "none"
+    end
+  end
+  local delta = M.render_para_line(change)
+  local fresh = M.render_para_line({ reset = true, align = after.align, attrs = after.attrs })
+  return #fresh < #delta * 0.75 and fresh or delta
 end
 
 -- The document's header, at its top: its paragraph styles, and what each gives (see init.lua):

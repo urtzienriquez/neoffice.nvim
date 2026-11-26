@@ -27,6 +27,18 @@ describe("paragraph formats", function()
     assert.is_true(paras.same({ attrs = { first = "5mm" } }, { attrs = { first = "0.5cm" } })) -- (as measured)
   end)
 
+  it("say what changes: what a line doesn't say goes on, none goes back to the style", function()
+    local list = neo.paragraphs({ "{align = justify, size = 11pt}", "One.", "", "{first = 0.5cm}", "Two.", "",
+      "{size = none}", "Three.", "", "{none, before = 6pt}", "Four." })
+    assert.same({ align = "justify", attrs = { size = "11pt" } }, { align = list[1].format.align, attrs = list[1].format.attrs })
+    assert.same({ align = "justify", attrs = { size = "11pt", first = "0.5cm" } }, { align = list[2].format.align, attrs = list[2].format.attrs })
+    assert.same({ align = "justify", attrs = { first = "0.5cm" } }, { align = list[3].format.align, attrs = list[3].format.attrs })
+    assert.same({ attrs = { before = "6pt" } }, { align = list[4].format.align, attrs = list[4].format.attrs })
+    local markup = require("neoffice.markup")
+    assert.equals("{first = 0.5cm}", markup.para_line_for(list[1].format, list[2].format))
+    assert.equals("{none}", markup.para_line_for(list[2].format, { attrs = {} }))
+  end)
+
   it("go on from a format's line until the next one", function()
     local list = neo.paragraphs({ "One.", "", "<=> {first = 0.5cm}", "Two.", "", "Three.", "", "<|>", "Four." })
     local function format(k) return list[k].format end
@@ -54,7 +66,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
       local at = vim.fn.index(lines, "{align = justify, indent-left = 1cm, first = 0.5cm}") + 1
       assert.truthy(at > 0, table.concat(lines, "\n"))
       assert.equals("Commented text and more.", lines[at + 1]) -- (no mark of its own)
-      assert.is_true(vim.tbl_contains(lines, "{}"))
+      assert.is_true(vim.tbl_contains(lines, "{none}")) -- (back to the style: written so)
       local xml = main()
       if ext == "docx" then
         assert.truthy(xml:find('<w:ind w:left="567" w:firstLine="283"/>', 1, true), xml)

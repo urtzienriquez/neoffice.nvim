@@ -126,9 +126,11 @@ function M.paragraphs(lines, alone)
       cut, fenced, table_start = true, true, nil -- neither text nor a format)
       goto continue
     end
-    if para_line then -- the format of the paragraphs after it (see paras.lua)
+    if para_line then -- the format of the paragraphs after it: what it changes (see paras.lua)
       empty_paragraphs(empty_after())
-      format, cut, fenced = para_line, true, true
+      local whole = markup.apply_para_line(format, para_line)
+      whole.bad, whole.text = para_line.bad, para_line.text
+      format, cut, fenced = whole, true, true
       table_start = nil
       goto continue
     end
@@ -1048,6 +1050,7 @@ local function open(buf, path)
   -- A table is a pipe table: a line per row, "|" between cells and "<br>" between the paragraphs
   -- of a cell, and a line of dashes after its first row.
   local lines, marks, started, rows, columns, empty_rows = {}, {}, {}, {}, 0, {}
+  local shown_format = { attrs = {} } -- (the format before each format's line: see M.para_line_for)
   -- the styles its paragraphs have, at its top (only in a document with text): its default one
   -- first, then as they come
   doc.header = nil
@@ -1099,9 +1102,10 @@ local function open(buf, path)
         end
       end
     else
-      if format_before[k] then -- (the format of the paragraphs from here on: see paras.lua)
+      if format_before[k] then -- (the format of the paragraphs from here on: what changes, see paras.lua)
         local f = format_before[k]
-        lines[#lines + 1] = "{" .. pformat.render(vim.tbl_extend("force", {}, f.attrs, { align = f.align })) .. "}"
+        lines[#lines + 1] = markup.para_line_for(shown_format, f)
+        shown_format = f
       end
       local box = para.box -- (a box's paragraphs: between its lines, "::: {...}" and ":::")
       if box and (not paras[k - 1] or paras[k - 1].box ~= box) then

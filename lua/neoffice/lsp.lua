@@ -199,7 +199,7 @@ local function attribute_diagnostics(buf)
     elseif format and format.bad or own and own.para_bad then
       add(r, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Error, format and format.bad or own.para_bad)
     elseif format and format.text then
-      local tidy = "{" .. require("neoffice.paras").render(vim.tbl_extend("force", {}, format.attrs, { align = format.align })) .. "}"
+      local tidy = markup.render_para_line(format)
       if tidy ~= line then
         add(r, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Hint, "write it as " .. tidy, tidy)
       end
@@ -547,11 +547,17 @@ local function into_style(buf, params, out)
   for k, v in pairs(f.attrs) do
     moved[k] = v ~= "none" and v or nil
   end
-  moved.align = f.align
+  moved.align = f.align ~= "none" and f.align or nil
   if not next(moved) then
     return
   end
   local blocks, styles = neo().block_styles(buf)
+  local before = { attrs = {} } -- (the format before it: what the paragraphs under it would go back to)
+  for _, b in ipairs(blocks) do
+    if b.first < r and b.format then
+      before = b.format
+    end
+  end
   local run, style -- (its paragraphs' format, and their style)
   for k, b in ipairs(blocks) do
     if b.first > r and b.format and not run then
@@ -620,19 +626,27 @@ local function into_style(buf, params, out)
   local hline = lines[entry.row]
   local brace = hline:find("{", 1, true)
   replace(entry.row, brace - 1, #hline, "{" .. pf.render_style(new) .. "}")
-  local left = {}
+  -- (what it says of what moved: the style's now, "none" if the format before it would go on)
+  local inherited = function(key)
+    return not f.reset and (key == "align" and before.align or before.attrs[key]) ~= nil
+  end
+  local left = { reset = f.reset, attrs = {} }
   for k, v in pairs(f.attrs) do
-    left[k] = v == "none" and v or nil
+    if not moved[k] then
+      left.attrs[k] = v
+    elseif inherited(k) then
+      left.attrs[k] = "none"
+    end
   end
-  local rest = pf.render(left)
-  local earlier = false
-  for row = header.last + 1, r - 1 do
-    earlier = earlier or (lines[row]:find("^[<%-{]") and markup.para_line(lines[row]) ~= nil)
+  if not moved.align then
+    left.align = f.align
+  elseif inherited("align") then
+    left.align = "none"
   end
-  if rest == "" and not earlier then
+  if not left.reset and not left.align and not next(left.attrs) then
     edits[#edits + 1] = { range = { start = { line = r - 1, character = 0 }, ["end"] = { line = r, character = 0 } }, newText = "" }
   else
-    replace(r, 0, #line, "{" .. rest .. "}")
+    replace(r, 0, #line, markup.render_para_line(left))
   end
   out[#out + 1] = {
     title = ("Move this format into the style %s (nothing looks different)"):format(name), kind = "refactor.rewrite",
