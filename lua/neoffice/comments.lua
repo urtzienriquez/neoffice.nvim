@@ -56,6 +56,17 @@ end
 
 -- ── Panel ───────────────────────────────────────────────────────────────────
 
+-- Its keys (keymaps.comments: two keys a family, as zotero.nvim's and fugitive's), in the order
+-- shown at its end: { action, what it does }.
+M.KEYS = {
+  { "go", "go to it" }, { "reply", "reply" }, { "edit", "edit" }, { "resolve", "resolve" }, { "delete", "delete" },
+  { "next", "next" }, { "prev", "previous" }, { "text", "text in lines" }, { "close", "close" }, { "help", "help" },
+}
+function M.keys()
+  local km = neo().config.keymaps
+  return type(km) == "table" and type(km.comments) == "table" and km.comments or {}
+end
+
 local function render()
   if not (panel.buf and api.nvim_buf_is_valid(panel.buf) and neo().docs[panel.doc]) then
     return
@@ -84,11 +95,14 @@ local function render()
   if #lines == 0 then
     lines = { "No comments yet." }
   end
+  -- its keys, at its end (as zotero.nvim's windows show theirs)
   local help = {}
-  for _, action in ipairs({ "reply", "resolve", "delete", "jump", "next", "prev", "close" }) do
-    local key = neo().config.panel_keys[action]
-    help[#help + 1] = key and key .. " " .. action or nil
+  for _, k in ipairs(M.KEYS) do
+    local key = M.keys()[k[1]]
+    key = type(key) == "table" and key[1] or key
+    help[#help + 1] = key and key .. " " .. k[2] or nil
   end
+  table.insert(lines, "")
   table.insert(lines, table.concat(help, " · "))
   vim.bo[panel.buf].modifiable = true
   api.nvim_buf_set_lines(panel.buf, 0, -1, false, lines)
@@ -97,7 +111,7 @@ local function render()
   for row in pairs(headers) do
     api.nvim_buf_set_extmark(panel.buf, neo().ns.comment, row - 1, 0, { end_col = #lines[row], hl_group = "NeofficeCommentAuthor" })
   end
-  api.nvim_buf_set_extmark(panel.buf, neo().ns.comment, #lines - 1, 0, { end_col = #lines[#lines], hl_group = "Comment" })
+  api.nvim_buf_set_extmark(panel.buf, neo().ns.comment, #lines - 1, 0, { end_col = #lines[#lines], hl_group = "NeofficeCommentVirt" })
   panel.rows = rows
 end
 
@@ -146,6 +160,53 @@ function M.reply()
       changed(m)
     end
   end)
+end
+
+-- Edit the text of the comment (or reply) under the cursor, in a small window: :w writes it into
+-- the document (saved with it), q closes it as it was.
+local editing = 0
+function M.edit()
+  neo().finish_all()
+  local m, reply = at_cursor()
+  if not m then
+    return vim.notify("[neoffice] No comment here", vim.log.levels.WARN)
+  end
+  local x = reply and m.c.replies[reply] or m.c
+  local from = api.nvim_get_current_win()
+  local buf = api.nvim_create_buf(false, true)
+  editing = editing + 1
+  api.nvim_buf_set_name(buf, ("neoffice://comment/%d"):format(editing))
+  vim.bo[buf].buftype, vim.bo[buf].bufhidden = "acwrite", "wipe"
+  local lines = vim.split(x.text, "\n")
+  api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modified = false
+  local width = math.min(math.max(50, unpack(vim.tbl_map(vim.fn.strdisplaywidth, lines))) + 2, vim.o.columns - 4)
+  local win = api.nvim_open_win(buf, true, {
+    relative = "editor", width = width, height = math.min(math.max(#lines, 3), vim.o.lines - 6),
+    row = math.floor((vim.o.lines - #lines) / 2) - 2, col = math.floor((vim.o.columns - width) / 2),
+    border = "rounded", title = (" %s · %s "):format(x.author, x.date:sub(1, 10)), title_pos = "center",
+    footer = " :w save · q close ", footer_pos = "center",
+  })
+  vim.wo[win].wrap = true
+  local function done()
+    if api.nvim_win_is_valid(win) then
+      api.nvim_win_close(win, true)
+    end
+    if api.nvim_win_is_valid(from) then
+      api.nvim_set_current_win(from)
+    end
+  end
+  api.nvim_create_autocmd("BufWriteCmd", { buffer = buf, callback = function()
+    local text = table.concat(api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+    if vim.trim(text) == "" then
+      return vim.notify("[neoffice] A comment needs text (dd in the panel deletes it)", vim.log.levels.ERROR)
+    end
+    x.text = text
+    vim.bo[buf].modified = false
+    changed(m)
+    done()
+  end })
+  vim.keymap.set("n", "q", done, { buffer = buf, nowait = true, desc = "neoffice: close, as it was" })
 end
 
 function M.resolve()
@@ -289,14 +350,23 @@ function M.toggle_panel()
   if not (panel.buf and api.nvim_buf_is_valid(panel.buf)) then
     panel.buf = api.nvim_create_buf(false, true)
     vim.bo[panel.buf].filetype = "neoffice-comments"
-    -- keys of the panel only (it is neoffice's own buffer); set panel_keys.<action> = false to drop one
+  end
+  do -- keys of the panel only (it is neoffice's own buffer): keymaps.comments (false drops one); set
+    -- each time it opens, as they are configured now
+    for _, m in ipairs(api.nvim_buf_get_keymap(panel.buf, "n")) do
+      pcall(vim.keymap.del, "n", m.lhs, { buffer = panel.buf })
+    end
     local actions = {
-      reply = M.reply, resolve = M.resolve, delete = M.delete, jump = M.jump, close = close,
+      go = M.jump, reply = M.reply, edit = M.edit, resolve = M.resolve, delete = M.delete, close = close,
       next = function() to_comment(1) end, prev = function() to_comment(-1) end,
+      text = function() M.text() end, help = function() neo().help("neoffice-comments-panel") end,
     }
-    for action, key in pairs(neo().config.panel_keys) do
-      if key and actions[action] then
-        vim.keymap.set("n", key, actions[action], { buffer = panel.buf, nowait = true, desc = action })
+    for _, k in ipairs(M.KEYS) do
+      local keys = M.keys()[k[1]]
+      for _, key in ipairs(type(keys) == "table" and keys or { keys }) do
+        if key and actions[k[1]] then
+          vim.keymap.set("n", key, actions[k[1]], { buffer = panel.buf, nowait = true, silent = true, desc = "neoffice: " .. k[2] })
+        end
       end
     end
   end

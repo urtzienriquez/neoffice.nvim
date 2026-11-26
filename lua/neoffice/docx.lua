@@ -122,6 +122,7 @@ local function read_comments(ctx)
       text = table.concat(lines, "\n"),
       replies = {},
     }
+    c.was_text = c.text -- (its text as read: written again only if edited)
     by_id[c.id] = c
     ctx.comment_of[el] = c
     ctx.next_comment = math.max(ctx.next_comment, (tonumber(c.id) or 0) + 1)
@@ -2952,6 +2953,32 @@ local function comment_el(x)
   return el
 end
 
+-- An edited comment's text, in its element: its first paragraph's properties and its reference
+-- mark (w:annotationRef) kept, its last paragraph's id (threads are linked by it) too.
+local function set_comment_text(x)
+  local paras = vim.tbl_filter(function(c) return c.tag == "w:p" end, x.node.children)
+  local first = paras[1] or xml.elem("w:p")
+  local ppr = xml.child(first, "w:pPr")
+  local ref = vim.iter(xml.collect(first, { ["w:r"] = true })):find(function(r) return xml.child(r, "w:annotationRef") ~= nil end)
+  local rpr = vim.iter(xml.collect(first, { ["w:r"] = true })):map(function(r) return not xml.child(r, "w:annotationRef") and xml.child(r, "w:rPr") or nil end):next()
+  for _, p in ipairs(paras) do
+    xml.remove(p)
+  end
+  local lines = vim.split(x.text, "\n")
+  for k, line in ipairs(lines) do
+    local p = xml.elem("w:p", k == #lines and x.para and { { "w14:paraId", x.para } } or {})
+    if ppr then
+      xml.append(p, xml.copy(ppr))
+    end
+    if k == 1 and ref then
+      xml.append(p, xml.copy(ref))
+    end
+    xml.append(p, xml.elem("w:r", {}, { rpr and xml.copy(rpr), xml.elem("w:t", { { "xml:space", "preserve" } }, { { text = line } }) }))
+    xml.append(x.node, p)
+  end
+  x.was_text = x.text
+end
+
 -- A deleted comment (or reply) leaves every part that mentions it.
 local function forget(ctx, x)
   xml.remove(x.node)
@@ -2994,6 +3021,12 @@ local function save_comments(ctx, live)
   end
 
   for _, c in ipairs(live) do
+    for _, x in ipairs({ c, unpack(c.replies) }) do -- (edited: its text written again)
+      if x.node and x.was_text ~= nil and x.text ~= x.was_text then
+        set_comment_text(x)
+        ctx.dirty[COMMENTS] = true
+      end
+    end
     local new_replies = vim.tbl_filter(function(x) return not x.node end, c.replies)
     if not c.node or #new_replies > 0 or (not c.resolved) ~= (not c.was_resolved) then
       local comments = xml.find(part(ctx, COMMENTS, '<w:comments xmlns:w="' .. NS.w .. '"/>'), "w:comments")

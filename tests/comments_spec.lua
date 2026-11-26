@@ -292,3 +292,71 @@ describe("a comment's text at the end of its line", function()
     assert.truthy(texts()[1])
   end)
 end)
+
+for _, name in ipairs({ "rich.docx", "office.docx", "rich.odt" }) do
+  describe(name .. " editing a comment's text", function()
+    -- the comment (or the reply) under the cursor edited in its window, written with :w
+    local function edit(text)
+      comments.edit()
+      assert.equals("acwrite", vim.bo.buftype)
+      api.nvim_buf_set_lines(0, 0, -1, false, vim.split(text, "\n"))
+      vim.cmd("write")
+    end
+
+    it("changes it (and a reply), and nothing else", function()
+      local path = H.copy(name)
+      H.open(path)
+      H.cursor(3, "Commented")
+      H.input = "A reply"
+      comments.reply()
+      H.reopen()
+      local had = vim.tbl_map(function(r) return r.text end, H.comments()[1].replies)
+      H.cursor(3, "Commented")
+      edit("An edited comment\nwith a second line")
+      assert.is_true(vim.bo.modified) -- (the document: to save)
+      vim.cmd("Neoffice comments")
+      local lines, row = api.nvim_buf_get_lines(0, 0, -1, false), nil
+      for k, l in ipairs(lines) do
+        if l:find("↳", 1, true) then
+          row = k
+        end
+      end
+      api.nvim_win_set_cursor(0, { row, 0 })
+      edit("An edited reply")
+      vim.cmd("Neoffice comments")
+      H.reopen()
+      local c = H.comments()[1]
+      assert.equals("An edited comment\nwith a second line", c.text)
+      had[#had] = "An edited reply" -- (the last one: edited; the others as they were)
+      assert.same(had, vim.tbl_map(function(r) return r.text end, c.replies))
+      assert.equals(1, #H.comments())
+      if H.has_libreoffice then
+        local ok, out = H.libreoffice_reads(path, "Commented text")
+        assert.is_true(ok, out)
+      end
+    end)
+
+    it("q closes it as it was; an empty one isn't written", function()
+      local path = H.copy(name)
+      H.open(path)
+      local before = H.bytes(path)
+      H.cursor(3, "Commented")
+      comments.edit()
+      api.nvim_buf_set_lines(0, 0, -1, false, { "Never mind" })
+      vim.cmd("normal q")
+      assert.is_false(vim.bo.modified)
+      comments.edit()
+      api.nvim_buf_set_lines(0, 0, -1, false, { "" })
+      local notify = vim.notify
+      local said
+      vim.notify = function(m) said = m end
+      vim.cmd("write")
+      vim.notify = notify
+      assert.truthy(said and said:find("needs text", 1, true))
+      vim.cmd("normal q")
+      H.save()
+      assert.equals(before, H.bytes(path))
+      assert.equals("A comment", H.comments()[1].text)
+    end)
+  end)
+end

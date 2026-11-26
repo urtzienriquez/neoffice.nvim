@@ -40,8 +40,14 @@ M.config = {
   captions = { table = "Table", figure = { "Figure", "Fig." }, separator = ". " },
   -- how tables look, unless the line above one says otherwise ("{width = full}"; :help neoffice-table-format)
   tables = { rules = "booktabs", width = "auto", height = "compact", position = "center" },
-  panel_keys = { -- in the comments panel (false disables one)
-    reply = "r", resolve = "<CR>", delete = "d", jump = "o", close = "q", next = "]]", prev = "[[",
+  -- neoffice's keys (false drops one, or all: keymaps = false; :help neoffice-keymaps): in documents,
+  -- only g? (the rest are yours to set); in the comments panel, two keys a family, as fugitive's
+  keymaps = {
+    help = "g?", -- in documents: this help
+    comments = {
+      go = "<CR>", reply = "aa", edit = "ee", resolve = "rr", delete = "dd", text = "tt",
+      next = "]]", prev = "[[", close = { "gq", "q" }, help = "g?",
+    },
   },
 }
 
@@ -57,7 +63,29 @@ local NS_DECOR = api.nvim_create_namespace("neoffice_decorations")
 M.docs = {}
 
 function M.setup(opts)
-  M.config = vim.tbl_deep_extend("force", M.config, opts or {})
+  opts = vim.deepcopy(opts or {})
+  if opts.panel_keys then -- (the comments panel's keys, as they were set before keymaps)
+    local km = type(opts.keymaps) == "table" and opts.keymaps or {}
+    km.comments = km.comments or {}
+    for old, key in pairs(opts.panel_keys) do
+      local new = old == "jump" and "go" or old
+      if km.comments[new] == nil then
+        km.comments[new] = key
+      end
+    end
+    opts.keymaps, opts.panel_keys = km, nil
+  end
+  local keymaps = opts.keymaps
+  M.config = vim.tbl_deep_extend("force", M.config, opts)
+  if keymaps == false then
+    M.config.keymaps = false
+  end
+end
+
+-- :help at a tag, across the whole width (at the bottom, or the top: as 'splitbelow' says), as
+-- zotero.nvim and fugitive open theirs.
+function M.help(tag)
+  vim.cmd((vim.o.splitbelow and "botright" or "topleft") .. " help " .. (tag or "neoffice"))
 end
 
 -- Create an extmark of `kind` holding `data`. Marks start with left gravity so a range can never
@@ -916,7 +944,7 @@ local function signature(block, list)
           return tostring(seg.props) .. table.concat(vim.tbl_map(function(f) return tostring(seg[f]) end, markup.FLAGS)) .. seg.text
         end, v), "/")
       elseif type(v) == "table" then -- (identity, plus what can change inside comments, changes, images)
-        local replies = table.concat(vim.tbl_map(tostring, v.replies or {}), ",")
+        local replies = table.concat(vim.tbl_map(function(r) return tostring(r) .. "|" .. (r.text or "") end, v.replies or {}), ",")
         v = table.concat({ tostring(v), replies, tostring(v.resolved), v.text or "", v.path or "", v.alt or "", v.path and floats.key(v) or "", v.tex or "", tostring(v.display) }, "/")
       end
       out[#out + 1] = key .. "=" .. tostring(v)
@@ -978,6 +1006,10 @@ local function setup_buffer(buf)
   -- say (a completion plugin that uses Tab hands it on to this, as blink.cmp does); >> and << move a
   -- list item by a level: two spaces, never a tab
   vim.keymap.set("i", "<Tab>", "<C-v><Tab>", { buffer = buf, desc = "neoffice: a tab" })
+  local help = type(M.config.keymaps) == "table" and M.config.keymaps.help
+  if help then -- (its help: the only key neoffice sets in a document)
+    vim.keymap.set("n", help, function() M.help("neoffice") end, { buffer = buf, nowait = true, silent = true, desc = "neoffice: help" })
+  end
   vim.bo[buf].expandtab, vim.bo[buf].shiftwidth = true, 2
   require("neoffice.lsp").start(buf)
   local function window()

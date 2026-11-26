@@ -600,15 +600,24 @@ from the start with `comment_text = true`, |neoffice-options|).
 replies. It opens on the comment closest to the cursor, and follows the cursor
 as you move in the document; the text of the comment it is on is highlighted
 in the document (NeofficeCommentCurrent), and moving in the panel scrolls the
-document to it when it is out of view. In it (see |neoffice-options| to
-change these keys):
+document to it when it is out of view. Its keys are two keys a family, as
+fugitive's (each can be changed, or dropped: |neoffice-keymaps|), and are
+listed at its end:
 
-  r       reply to the comment under the cursor
-  <CR>    resolve it, or reopen it
-  d       delete it (or the reply under the cursor)
-  o       go to it in the document
-  ]] [[   go to the next / previous comment
-  q       close the panel
+  <CR>     go to the comment under the cursor in the document
+  aa       add a reply to it
+  ee       edit its text (or the reply's under the cursor), in a window:
+           :w writes it into the document, q closes it as it was
+  rr       resolve it, or reopen it
+  dd       delete it (or the reply under the cursor)
+  ]] [[    go to the next / previous comment
+  tt       each comment's text at the end of its line in the document, or
+           not (as :Neoffice comments text)
+  gq  q    close the panel
+  g?       this help
+
+:Neoffice edit edits the text of the comment under the cursor in the document
+too.
 
 Comments you don't touch keep their exact XML, also in Word's own comment
 parts.
@@ -781,8 +790,24 @@ Everything is a subcommand of :Neoffice. Alone, it lets you pick one.
 ==============================================================================
 KEYMAPS                                                     *neoffice-keymaps*
 
-neoffice sets no keymaps. Documents get the `neoffice` filetype: define yours
-there. For example, all under <leader>w: >lua
+neoffice sets one key in documents: g? opens this help (across the whole
+width, at the bottom or the top as 'splitbelow' says). The comments panel has
+its own (|neoffice-comments-panel|), and g? there opens its part of this help.
+Each can be changed, or dropped with false (all of them: `keymaps = false`): >lua
+
+  require("neoffice").setup({
+    keymaps = {
+      help = "g?",
+      comments = {
+        go = "<CR>", reply = "aa", edit = "ee", resolve = "rr", delete = "dd",
+        text = "tt", next = "]]", prev = "[[", close = { "gq", "q" }, help = "g?",
+      },
+    },
+  })
+<
+(`panel_keys`, as the panel's keys were set before, still works.) The rest
+are yours to set. Documents get the `neoffice` filetype: define yours there.
+For example, all under <leader>w: >lua
 
   vim.api.nvim_create_autocmd("FileType", {
     pattern = "neoffice",
@@ -795,6 +820,7 @@ there. For example, all under <leader>w: >lua
       map("c", "comments", "Comments panel")
       map("a", "comment", "Add comment", { "n", "x" })
       map("r", "reply", "Reply to comment")
+      map("e", "edit", "Edit comment")
       map("x", "resolve", "Resolve / reopen comment")
       map("d", "delete", "Delete comment")
       map("t", "track", "Track changes on/off")
@@ -835,9 +861,12 @@ setup() is optional. Every field is optional too; these are the defaults: >lua
     tables = {             -- how tables look (|neoffice-table-format|)
       rules = "booktabs", width = "auto", height = "compact", position = "center",
     },
-    panel_keys = {         -- in the comments panel (false drops one)
-      reply = "r", resolve = "<CR>", delete = "d", jump = "o", close = "q",
-      next = "]]", prev = "[[",
+    keymaps = {            -- neoffice's keys (|neoffice-keymaps|; false drops one,
+      help = "g?",         -- keymaps = false all): in documents, its help;
+      comments = {         -- in the comments panel
+        go = "<CR>", reply = "aa", edit = "ee", resolve = "rr", delete = "dd",
+        text = "tt", next = "]]", prev = "[[", close = { "gq", "q" }, help = "g?",
+      },
     },
   })
 <

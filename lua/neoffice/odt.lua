@@ -85,7 +85,8 @@ local function annotation(el)
     text = table.concat(lines, "\n"),
     resolved = xml.attr(el, "loext:resolved") == "true",
     replies = {},
-    node = el, -- (written back as it is, unless you resolve or reopen it)
+    node = el, -- (written back as it is, unless you resolve or reopen it, or edit its text)
+    was_text = table.concat(lines, "\n"),
   }
 end
 
@@ -1123,10 +1124,21 @@ local function put_text(el, s, after_space)
 end
 
 local function annotation_el(c, parent_name)
-  if c.node then -- as it was (only "resolved" can have changed)
+  if c.node then -- as it was (but for "resolved", and its text if edited)
     if (not c.resolved) ~= (not c.was_resolved) then
       xml.set_attr(c.node, "loext:resolved", c.resolved and "true" or "false")
       c.was_resolved = c.resolved
+    end
+    if c.was_text ~= nil and c.text ~= c.was_text then
+      local old = vim.tbl_filter(function(el) return PARA[el.tag] end, c.node.children)
+      local style = old[1] and xml.attr(old[1], "text:style-name")
+      for _, el in ipairs(old) do
+        xml.remove(el)
+      end
+      for _, line in ipairs(vim.split(c.text, "\n")) do
+        xml.append(c.node, xml.elem("text:p", style and { { "text:style-name", style } } or {}, { { text = line } }))
+      end
+      c.was_text = c.text
     end
     return c.node
   end

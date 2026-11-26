@@ -47,13 +47,16 @@ else in the file stays exactly as it was.
 
 One command, `:Neoffice` (alone, it lets you pick):
 
-- `:Neoffice comments` — the comments panel (`comments text` shows them at the end of their lines); `comment`, `reply`, `resolve`, `delete`
+- `:Neoffice comments` — the comments panel (`comments text` shows them at the end of their lines); `comment`, `reply`, `edit`, `resolve`, `delete`
 - `:Neoffice track [on|off]` — record your edits as tracked changes
 - `:Neoffice accept|reject [all [author]]` — the change at the cursor, the selection, or all
 - `:Neoffice next|prev` — jump between changes; `:Neoffice changes [author]` lists them
 - `:Neoffice numbers [on|off]` — number the headings
 
-No keymaps are set. See `:help neoffice`.
+One key is set in documents: `g?` opens the help. The comments panel has its own, two keys a family as in
+fugitive (`aa` reply, `ee` edit, `rr` resolve, `dd` delete, `<CR>` go to it, `gq` close, `g?` its help).
+Every key can be changed or dropped (`keymaps` in `setup()`); the rest are yours to set: see `:help
+neoffice-keymaps`.
 
 Writing in LaTeX or Rnoweb? [manuscript.nvim](https://github.com/urtzienriquez/manuscript.nvim)
 exports your manuscript to Word, and brings your collaborators' revisions back into your sources.

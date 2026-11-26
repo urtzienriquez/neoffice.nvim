@@ -1,4 +1,5 @@
--- Only autocommands and the :Neoffice command are defined here; no keymaps (see the README for some).
+-- Only autocommands and the :Neoffice command are defined here; the keys are buffer-local (g? in
+-- documents, the comments panel's: see neoffice.config.keymaps).
 
 if vim.g.loaded_neoffice then
   return
@@ -123,6 +124,7 @@ local SUBCOMMANDS = {
   end,
   comment = function(_, o) comments().add(o.range > 0) end, -- comment the selection / cursor
   reply = function() comments().reply() end, -- (to the comment under the cursor)
+  edit = function() comments().edit() end, -- (the text of the comment under the cursor)
   resolve = function() comments().resolve() end,
   delete = function() comments().delete() end,
   changes = function(arg) changes().list(arg ~= "" and arg or nil) end, -- tracked changes (of an author)
@@ -167,5 +169,5 @@ end, {
     end
     return vim.tbl_filter(function(item) return vim.startswith(item, lead) end, list)
   end,
-  desc = "neoffice: comments [text [on|off]], comment, reply, resolve, delete, changes [author], accept [all [author]], reject [all [author]], next, prev, track [on|off], numbers [on|off]",
+  desc = "neoffice: comments [text [on|off]], comment, reply, edit, resolve, delete, changes [author], accept [all [author]], reject [all [author]], next, prev, track [on|off], numbers [on|off]",
 })
