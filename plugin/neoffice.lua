@@ -10,7 +10,8 @@ local group = api.nvim_create_augroup("neoffice", {})
 local pattern = { "*.docx", "*.odt", "*.doc" }
 
 -- Documents (filetype "neoffice") are highlighted with the markdown parser, also when tree-sitter
--- is started for them without naming a language.
+-- is started for them without naming a language (see neoffice.languages: as "neoffice", markdown's
+-- own queries but for bold, italics and strikethrough, which neoffice shows as it reads them).
 vim.treesitter.language.register("markdown", "neoffice")
 
 -- Opening and saving documents go through :edit and :write.
@@ -69,6 +70,9 @@ local function highlights()
     NeofficeTableOptions = { link = "NeofficeMark" },
     NeofficeBox = { link = "@punctuation.special" }, -- (a box's :::, as a table's |)
     NeofficeCaption = { link = "@label" },
+    NeofficeBold = { link = "@markup.strong" }, -- (bold, italics, strikethrough: as neoffice reads them)
+    NeofficeItalic = { link = "@markup.italic" },
+    NeofficeStrike = { link = "@markup.strikethrough" },
     NeofficeStyleName = { link = "@label" }, -- (a style's name, in the styles at the top)
     NeofficeEscape = { link = "NeofficeMark" }, -- (a backslash that makes the next character plain text)
     NeofficeChangeInfo = { link = "Comment" },

@@ -734,7 +734,49 @@ end
 
 -- ── Open ────────────────────────────────────────────────────────────────────
 
+-- Tree-sitter's languages for documents: markdown's parsers under names of their own ("neoffice",
+-- "neoffice_inline"), with markdown's queries but for bold, italics and strikethrough: markdown reads
+-- a single "~" or "_" as marks ("~30 m ... ~100 m" struck through), neoffice doesn't, and shows them
+-- as it reads them (M.decorate). Markdown's own highlighting, in other files, is as it was.
+local languages
+function M.languages()
+  if languages ~= nil then
+    return languages
+  end
+  languages = false
+  local ts = vim.treesitter
+  local md = api.nvim_get_runtime_file("parser/markdown.so", false)[1]
+  local inline = api.nvim_get_runtime_file("parser/markdown_inline.so", false)[1]
+  local function read(lang, name)
+    local out = {}
+    for _, file in ipairs(ts.query.get_files(lang, name)) do
+      local f = io.open(file)
+      if f then
+        out[#out + 1] = f:read("*a")
+        f:close()
+      end
+    end
+    return table.concat(out, "\n")
+  end
+  local ok = md and inline and pcall(function()
+    ts.language.add("neoffice", { path = md, symbol_name = "markdown" })
+    ts.language.add("neoffice_inline", { path = inline, symbol_name = "markdown_inline" })
+    ts.query.set("neoffice", "highlights", read("markdown", "highlights"))
+    ts.query.set("neoffice", "injections", (read("markdown", "injections"):gsub('"markdown_inline"', '"neoffice_inline"')))
+    local marks = read("markdown_inline", "highlights")
+    for _, capture in ipairs({ "%(emphasis%)%s*@markup%.italic", "%(strong_emphasis%)%s*@markup%.strong", "%(strikethrough%)%s*@markup%.strikethrough" }) do
+      marks = marks:gsub(capture, "")
+    end
+    ts.query.set("neoffice_inline", "highlights", marks)
+    ts.query.set("neoffice_inline", "injections", read("markdown_inline", "injections"))
+    ts.language.register("neoffice", "neoffice")
+  end)
+  languages = ok and true or false
+  return languages
+end
+
 local function setup_buffer(buf)
+  M.languages()
   vim.bo[buf].filetype = "neoffice"
   pcall(vim.treesitter.start, buf) -- markdown (see plugin/neoffice.lua): highlights the marks
   vim.bo[buf].syntax = "neoffice" -- adds <u> (see syntax/neoffice.vim)
@@ -1545,12 +1587,16 @@ function M.decorate_marks(buf, para, lines)
     local r2, c2 = position(chars[to].col + (chars[to].len or #chars[to].ch), true)
     api.nvim_buf_set_extmark(buf, NS_DECOR, r1, c1, { end_row = r2, end_col = c2, hl_group = group, priority = 150 })
   end
-  for _, key in ipairs({ "h" }) do -- (underlines: by the syntax, syntax/neoffice.vim)
+  local GROUP = { b = "NeofficeBold", i = "NeofficeItalic", s = "NeofficeStrike" } -- (underlines: by the syntax, syntax/neoffice.vim)
+  for _, key in ipairs({ "h", "b", "i", "s" }) do
     local from
     for k = 1, #chars + 1 do
       local c, prev = chars[k], chars[k - 1]
       if from and not (c and c[key] == prev[key]) then
-        mark(from, k - 1, highlight_group(prev[key]))
+        local group = key == "h" and highlight_group(prev[key]) or (languages and GROUP[key]) -- (else markdown's)
+        if group then
+          mark(from, k - 1, group)
+        end
         from = nil
       end
       if c and c[key] and not from then

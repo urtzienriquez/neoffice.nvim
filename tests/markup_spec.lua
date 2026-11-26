@@ -244,3 +244,33 @@ describe("what is written reads back as it was", function()
     end
   end)
 end)
+
+describe("bold, italics and strikethrough on screen", function()
+  it("are shown as neoffice reads them: single ~ signs are text, not strikethrough", function()
+    if not require("neoffice").languages() then
+      return pending("no markdown parser")
+    end
+    local H = dofile("tests/helpers.lua")
+    H.open(H.copy("rich.docx"))
+    H.set(1, "About ~30 m and ~100 m, a ~~struck~~ word, **bold** and *italic*.")
+    H.reopen()
+    vim.treesitter.start()
+    local row = H.row(1) - 1
+    local line = vim.api.nvim_buf_get_lines(0, row, row + 1, false)[1]
+    local function groups(word)
+      local pos = vim.inspect_pos(0, row, (line:find(word, 1, true)))
+      local out = {}
+      for _, c in ipairs(pos.treesitter) do out[#out + 1] = c.capture end
+      for _, e in ipairs(pos.extmarks) do out[#out + 1] = e.opts.hl_group end
+      return table.concat(out, " ")
+    end
+    vim.wait(200, function() return false end)
+    for _, word in ipairs({ "30 m", "100 m" }) do
+      assert.is_nil(groups(word):find("strike"), groups(word))
+    end
+    assert.truthy(groups("struck"):find("NeofficeStrike", 1, true), groups("struck"))
+    assert.truthy(groups("bold"):find("NeofficeBold", 1, true), groups("bold"))
+    assert.truthy(groups("italic"):find("NeofficeItalic", 1, true), groups("italic"))
+    assert.equals("neoffice", vim.treesitter.highlighter.active[vim.api.nvim_get_current_buf()].tree:lang())
+  end)
+end)
