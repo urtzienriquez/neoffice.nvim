@@ -535,11 +535,18 @@ local function setup_buffer(buf)
   vim.bo[buf].filetype = "neoffice"
   pcall(vim.treesitter.start, buf) -- markdown (see plugin/neoffice.lua): highlights the marks
   vim.bo[buf].syntax = "neoffice" -- adds <u> (see syntax/neoffice.vim)
+  -- Tab types a tab (a document's tab, shown as →), not spaces, whatever 'expandtab' and 'smarttab'
+  -- say (a completion plugin that uses Tab hands it on to this, as blink.cmp does); >> and << move a
+  -- list item by a level: two spaces, never a tab
+  vim.keymap.set("i", "<Tab>", "<C-v><Tab>", { buffer = buf, desc = "neoffice: a tab" })
+  vim.bo[buf].expandtab, vim.bo[buf].shiftwidth = true, 2
   require("neoffice.lsp").start(buf)
   local function window()
-    vim.wo.wrap, vim.wo.linebreak, vim.wo.breakindent = true, true, true
+    -- (all as :setlocal: for this buffer in this window, not the next buffer opened in it; wrapped
+    -- lines from the first column, not under a tab that starts a paragraph)
+    vim.opt_local.wrap, vim.opt_local.linebreak, vim.opt_local.breakindent = true, true, false
     if M.config.conceal then
-      vim.wo.conceallevel = 2
+      vim.opt_local.conceallevel = 2
     end
     if M.config.show_tabs then -- (in this window, for this buffer only: as :setlocal; in the marks' gray)
       vim.opt_local.list = true

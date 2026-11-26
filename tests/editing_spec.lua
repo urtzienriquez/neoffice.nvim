@@ -126,13 +126,33 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
 
     it("shows tabs as a faint →, in the document's window only", function()
+      assert.is_false(vim.wo.breakindent) -- (a paragraph's wrapped lines: from the first column, even after a tab)
       assert.is_true(vim.wo.list)
       assert.equals("tab:→ ", vim.wo.listchars)
       local listchars = vim.go.listchars
+      local global = { vim.go.wrap, vim.go.linebreak, vim.go.breakindent }
       vim.cmd("enew") -- (another buffer in the same window: as it was)
       assert.is_false(vim.wo.list)
       assert.equals(listchars, vim.wo.listchars)
+      assert.same(global, { vim.wo.wrap, vim.wo.linebreak, vim.wo.breakindent }) -- (neoffice's are local)
       vim.cmd("bwipeout")
+    end)
+
+    it("types a tab with Tab (even with expandtab set), and nests list items with >> in spaces", function()
+      local doc_buf = vim.api.nvim_get_current_buf()
+      vim.go.expandtab, vim.go.softtabstop = true, 2 -- (as in a config that types spaces for tabs; smarttab is on)
+      local r = H.row(12)
+      vim.api.nvim_win_set_cursor(0, { r, 0 })
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("I<Tab><Esc>A<Tab>x<Esc>", true, false, true), "xt", false)
+      assert.equals("\t", H.lines()[r]:sub(1, 1)) -- (at the start of a line)
+      assert.equals("\tx", H.lines()[r]:sub(-2)) -- (and after text)
+      vim.go.expandtab, vim.go.softtabstop = false, 0
+      vim.api.nvim_buf_set_lines(doc_buf, r - 1, r, false, { "- An item", "- Another" })
+      vim.api.nvim_win_set_cursor(0, { r + 1, 0 })
+      for level = 2, 5 do
+        vim.cmd("normal! >>")
+        assert.equals(("  "):rep(level - 1) .. "- Another", H.lines()[r + 1])
+      end
     end)
 
     it("keeps any text: unicode, symbols, tabs, runs of spaces", function()
