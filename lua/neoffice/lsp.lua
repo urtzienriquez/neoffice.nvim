@@ -146,6 +146,18 @@ local function attribute_diagnostics(buf)
     }
   end
   for r, line in ipairs(lines) do
+    -- a format's line ("<=> {first = 0.5cm}"), or a paragraph's own attributes after its mark
+    local format = line:find("^[<%-]") and markup.para_line(line)
+    local own = not format and line:find("^[<%-]") and markup.block(line)
+    if format and format.bad or own and own.para_bad then
+      add(r, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Error, format and format.bad or own.para_bad)
+    elseif format and format.text then
+      local attrs = require("neoffice.paras").render(format.attrs)
+      local tidy = vim.trim(markup.ALIGN[format.align or "left"]) .. (attrs ~= "" and " {" .. attrs .. "}" or "")
+      if tidy ~= line then
+        add(r, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Hint, "write it as " .. tidy, tidy)
+      end
+    end
     local fence, fence_attrs = markup.box_line(line) -- a box's line: its attributes (as an image's)
     if fence and fence_attrs then
       local attrs, bad = require("neoffice.floats").parse_box(fence_attrs)
@@ -212,6 +224,39 @@ local function completion(buf, pos)
     local start = #before - #color
     for name, hex in pairs(markup.COLORS) do
       add(name, start, KIND.Color, "#" .. hex, name .. "}")
+    end
+    return items
+  end
+  -- a paragraph format's attributes ("<=> {..."): those not given yet, or a value
+  local pbraces = before:match("^[<%-][=|<%-]>?%s*{([^}]*)$")
+  if pbraces then
+    local pf = require("neoffice.paras")
+    local used = {}
+    for _, a in ipairs((markup.attributes(pbraces))) do
+      used[a.name or ""] = true
+    end
+    local item = pbraces:match("([^,;]*)$")
+    local name, value = item:match("^%s*([%a_%-]+)%s*=%s*(%S*)$")
+    local VALUES = {
+      ["indent-left"] = { "0.5cm", "1cm", "1.27cm", "none" }, ["indent-right"] = { "0.5cm", "1cm", "none" },
+      first = { "0.5cm", "1.27cm", "-0.5cm", "none" }, before = { "0pt", "6pt", "12pt", "none" },
+      after = { "0pt", "6pt", "12pt", "none" }, line = { "single", "1.15", "1.5", "double", "none" },
+    }
+    if name and VALUES[name] then
+      for _, v in ipairs(VALUES[name]) do
+        add(v, #before - #value, KIND.EnumMember, pf.DESCRIBE[name])
+      end
+    elseif not name then
+      local typed = item:match("^%s*(.-)$")
+      for _, key in ipairs(pf.KEYS) do
+        if not used[key] then
+          for _, v in ipairs(VALUES[key]) do
+            if v ~= "none" then
+              add(key .. " = " .. v, #before - #typed, KIND.Property, pf.DESCRIBE[key])
+            end
+          end
+        end
+      end
     end
     return items
   end

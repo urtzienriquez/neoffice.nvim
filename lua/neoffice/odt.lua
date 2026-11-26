@@ -21,7 +21,7 @@ local FLAGS = { "b", "i", "u", "s", "h", "sup", "sub" } -- (see markup.FLAGS)
 local ALIGN = { center = "center", ["end"] = "right", right = "right", justify = "justify" } -- fo:text-align
 local QUOTES = { Quotations = true, Block_20_Text = true, Quote = true, Intense_20_Quote = true }
 local CAPTIONS = { Caption = true, Table = true, Figure = true, Illustration = true, Drawing = true }
-local caption_style -- (below)
+local caption_style, para_attrs, style_attrs -- (below)
 
 -- The formatting { b, i, u, sup, sub } of a text style, following its parent styles, starting
 -- from `inherited` (that of the enclosing text).
@@ -142,6 +142,88 @@ local function is_title(ctx, p)
   return based_on(ctx, p, { Title = true })
 end
 
+-- The format's attributes (see paras.lua) of paragraph properties.
+-- (a paragraph style's, following the styles it is based on, and the default style)
+local function raw_attrs(props)
+  local paras, out = require("neoffice.paras"), {}
+  if not props then
+    return out
+  end
+  local function cm(attr)
+    local value = xml.attr(props, attr)
+    local sign, rest = (value or ""):match("^(%-?)(.*)$")
+    local n = markup.cm(rest)
+    return n and (sign == "-" and -n or n)
+  end
+  local left, right, first = cm("fo:margin-left"), cm("fo:margin-right"), cm("fo:text-indent")
+  out["indent-left"] = left and left ~= 0 and paras.cm(left) or nil
+  out["indent-right"] = right and right ~= 0 and paras.cm(right) or nil
+  out.first = first and first ~= 0 and paras.cm(first) or nil
+  local before, after = cm("fo:margin-top"), cm("fo:margin-bottom")
+  out.before = before and paras.pt(before / 2.54 * 72) or nil
+  out.after = after and paras.pt(after / 2.54 * 72) or nil
+  local line = xml.attr(props, "fo:line-height") or xml.attr(props, "style:line-height-at-least")
+  local percent = line and tonumber(line:match("^([%d.]+)%%$") or "")
+  if percent then
+    out.line = paras.multiple(percent / 100)
+  elseif line and markup.cm(line) then
+    out.line = paras.pt(markup.cm(line) / 2.54 * 72)
+  end
+  return out
+end
+style_attrs = function(ctx, name)
+  if not ctx.para_style_el then
+    ctx.para_style_el, ctx.style_attrs = {}, {}
+    for _, root in ipairs({ ctx.styles_doc, ctx.root }) do
+      for _, style in ipairs(xml.collect(root, { ["style:style"] = true, ["style:default-style"] = true }, { ["office:body"] = true })) do
+        if xml.attr(style, "style:family") == "paragraph" then
+          local name = xml.attr(style, "style:name")
+          if style.tag == "style:default-style" then
+            ctx.para_style_el[false] = style
+          elseif name then
+            ctx.para_style_el[name] = style
+          end
+        end
+      end
+    end
+  end
+  local key = name or false
+  if not ctx.style_attrs[key] then
+    local chain, cur = {}, name
+    for _ = 1, 10 do
+      if not cur or not ctx.para_style_el[cur] then
+        break
+      end
+      chain[#chain + 1] = ctx.para_style_el[cur]
+      cur = xml.attr(ctx.para_style_el[cur], "style:parent-style-name")
+    end
+    local default = ctx.para_style_el[false]
+    local out = raw_attrs(default and xml.child(default, "style:paragraph-properties"))
+    for k = #chain, 1, -1 do
+      for attr, value in pairs(raw_attrs(xml.child(chain[k], "style:paragraph-properties"))) do
+        out[attr] = value
+      end
+    end
+    ctx.style_attrs[key] = out
+  end
+  return ctx.style_attrs[key]
+end
+
+-- A paragraph's own format's attributes (see paras.lua): those of its automatic style that the
+-- style it is based on doesn't give it already.
+para_attrs = function(ctx, p)
+  local paras = require("neoffice.paras")
+  local style = ctx.auto_paras[xml.attr(p, "text:style-name") or ""]
+  local out = raw_attrs(style and xml.child(style, "style:paragraph-properties"))
+  local base = style_attrs(ctx, style and xml.attr(style, "style:parent-style-name") or xml.attr(p, "text:style-name"))
+  for _, key in ipairs(paras.KEYS) do
+    if out[key] and paras.measure(key, out[key]) == paras.measure(key, base[key] or (key == "line" and "single" or "0cm")) then
+      out[key] = nil
+    end
+  end
+  return out
+end
+
 -- A paragraph's own alignment and whether it starts on a new page (from its automatic style).
 local function layout(ctx, p)
   local style = ctx.auto_paras[xml.attr(p, "text:style-name") or ""]
@@ -163,6 +245,9 @@ local function block_of(ctx, p)
   end
   block.align = layout(ctx, p)
   block.caption_style = based_on(ctx, p, CAPTIONS) or nil -- (see captions in init.lua)
+  if not (block.heading or block.title or block.quote or block.list) then -- (a plain one: its own format, see paras.lua)
+    block.para = para_attrs(ctx, p)
+  end
   return block
 end
 
@@ -223,6 +308,25 @@ local function read_para(ctx, p)
           xml.append(group, xml.copy(node.children[j]))
           k = j
           if depth == 0 then
+            break
+          end
+        end
+        add({ object = group, visible = true, field = { text = plain(group) } })
+        after_space = false
+      elseif tag == "text:reference-mark-start" and (xml.attr(el, "text:name") or ""):match("^ZOTERO_") and (function()
+        for j = k + 1, #node.children do -- (its end, beside it: a citation is one thing, as in Word)
+          local c = node.children[j]
+          if c.tag == "text:reference-mark-end" and xml.attr(c, "text:name") == xml.attr(el, "text:name") then
+            return true
+          end
+        end
+      end)() then
+        local group = { children = {} }
+        for j = k, #node.children do
+          local c = node.children[j]
+          xml.append(group, xml.copy(c))
+          k = j
+          if c.tag == "text:reference-mark-end" and xml.attr(c, "text:name") == xml.attr(el, "text:name") then
             break
           end
         end
@@ -739,6 +843,68 @@ local function image_node(ctx, img)
   return frame
 end
 
+-- A paragraph's own format's attributes set as `want` says (only those whose value changed),
+-- through an automatic style.
+local ODF_ATTR = {
+  ["indent-left"] = "fo:margin-left", ["indent-right"] = "fo:margin-right", first = "fo:text-indent",
+  before = "fo:margin-top", after = "fo:margin-bottom", line = "fo:line-height",
+}
+local function set_para(ctx, p, want)
+  local paras = require("neoffice.paras")
+  local have = para_attrs(ctx, p)
+  local auto = ctx.auto_paras[xml.attr(p, "text:style-name") or ""]
+  local base = style_attrs(ctx, auto and xml.attr(auto, "style:parent-style-name") or xml.attr(p, "text:style-name"))
+  want = vim.deepcopy(want) -- (a value its style gives already: none of its own)
+  for _, key in ipairs(paras.KEYS) do
+    if want[key] and want[key] ~= "none" and paras.measure(key, want[key]) == paras.measure(key, base[key] or (key == "line" and "single" or "0cm")) then
+      want[key] = nil
+    end
+  end
+  local changes = {}
+  for _, key in ipairs(paras.KEYS) do
+    if paras.measure(key, have[key]) ~= paras.measure(key, want[key]) then
+      local value = want[key] ~= "none" and want[key] or nil
+      if key == "line" and value then
+        local multiple = ({ single = 1, double = 2 })[value] or tonumber(value)
+        value = multiple and ("%g%%"):format(multiple * 100) or value
+      end
+      changes[#changes + 1] = { ODF_ATTR[key], value or false }
+    end
+  end
+  if #changes == 0 then
+    return
+  end
+  local name = xml.attr(p, "text:style-name")
+  local parts = { "para-format", name or "" }
+  for _, c in ipairs(changes) do
+    parts[#parts + 1] = c[1] .. "=" .. tostring(c[2])
+  end
+  local key = table.concat(parts, "|")
+  if not ctx.made[key] then
+    local auto = ctx.auto_paras[name or ""]
+    local style = auto and xml.copy(auto) or xml.elem("style:style", { { "style:family", "paragraph" } })
+    if not auto and name then
+      xml.set_attr(style, "style:parent-style-name", name)
+    end
+    local new, n = nil, 1
+    repeat
+      new, n = "NeoP" .. n, n + 1
+    until ctx.parent_style[new] == nil
+    xml.set_attr(style, "style:name", new)
+    local props = xml.child(style, "style:paragraph-properties") or xml.append(style, xml.elem("style:paragraph-properties"), 1)
+    for _, c in ipairs(changes) do
+      xml.set_attr(props, c[1], c[2] or nil)
+      if c[1] == "fo:line-height" then
+        xml.set_attr(props, "style:line-height-at-least", nil)
+      end
+    end
+    xml.append(automatic(ctx), style)
+    ctx.made[key], ctx.auto_paras[new] = new, style
+    ctx.parent_style[new] = xml.attr(style, "style:parent-style-name") or false
+  end
+  xml.set_attr(p, "text:style-name", ctx.made[key])
+end
+
 -- Give a paragraph this alignment and page break (when they changed), through an automatic style.
 local ALIGN_VALUE = { center = "center", right = "end", justify = "justify" }
 local function set_layout(ctx, p, align, page)
@@ -1188,7 +1354,7 @@ function M.fit_box(_, frame)
 end
 
 function M.attach_box(_, frame, p)
-  if frame.parent == p then
+  if frame.parent == p and xml.index(frame) then -- (in it still: not when its paragraph was written again)
     return
   end
   if frame.parent then
@@ -1526,6 +1692,9 @@ function M.fill(ctx, p, block, pieces)
   end
   local page = vim.iter(pieces):any(function(piece) return piece.page_break end) -- (.odt: before it)
   set_layout(ctx, p, block.align, page)
+  if block.para then -- (its own format's attributes: a plain paragraph's, see paras.lua)
+    set_para(ctx, p, block.para)
+  end
   set_list(ctx, p, block.list)
   p.children = {}
 

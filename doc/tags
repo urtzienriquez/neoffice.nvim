@@ -22,6 +22,7 @@ neoffice-keymaps	neoffice.txt	/*neoffice-keymaps*
 neoffice-lsp	neoffice.txt	/*neoffice-lsp*
 neoffice-marks	neoffice.txt	/*neoffice-marks*
 neoffice-options	neoffice.txt	/*neoffice-options*
+neoffice-para-format	neoffice.txt	/*neoffice-para-format*
 neoffice-read	neoffice.txt	/*neoffice-read*
 neoffice-safety	neoffice.txt	/*neoffice-safety*
 neoffice-table-format	neoffice.txt	/*neoffice-table-format*

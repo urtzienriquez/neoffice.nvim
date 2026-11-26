@@ -113,6 +113,13 @@ function M.edits(buf, first, last)
       r = r + 1
     end
   end
+  for row = first + 1, math.min(last + 1, #lines) do -- formats' lines (no marks on them: the whole line)
+    local format = lines[row]:find("^[<%-]") and markup.para_line(lines[row])
+    if format and format.text and not format.bad then
+      local attrs = require("neoffice.paras").render(format.attrs)
+      edit(out, row - 1, 0, lines[row], vim.trim(markup.ALIGN[format.align or "left"]) .. (attrs ~= "" and " {" .. attrs .. "}" or ""))
+    end
+  end
   for row = first + 1, math.min(last + 1, #lines) do -- boxes' lines (no marks on them: the whole line)
     local fence, attrs = markup.box_line(lines[row])
     local parsed = fence and attrs and require("neoffice.floats").parse(attrs)

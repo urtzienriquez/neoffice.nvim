@@ -72,16 +72,51 @@ whatever its name in your language; a heading of a level the document has no
 style for gets a "heading N" style.
 
                                                               *neoffice-align*
-Its alignment, if not left, comes after its kind:
+Its alignment comes after its kind:
 
   `<|> `                  centered
   `->> `                  right-aligned
   `<=> `                  justified
+  `<<- `                  left (none of its own: its style's)
 
   `# <|> A centered heading`, `> <=> A justified quote`, `- ->> An item`
 
 Alignment shows only when it is set on the paragraph itself: a style that
 centers its paragraphs (some Title styles) shows no mark.
+
+                                                       *neoffice-para-format*
+The format of plain paragraphs (not headings, titles, quotes, list items,
+captions, table cells or boxes) is set for many at once, as in LaTeX: a line
+with only a mark, and attributes in braces, sets the format of the paragraphs
+after it, until the next such line: >
+
+  <=> {first = 0.5cm}
+  Small mammals budget their energy...
+
+  Populations from warm and cold places...
+
+  <<- {indent-left = 0.76cm, first = -0.76cm}
+  Alexander, R. M. (1999). Energy for animal life...
+<
+  `indent-left`, `indent-right`   indentation (cm, mm, in, pt)
+  `first`                         the first line's indent (negative: hanging)
+  `before`, `after`               the space before and after (pt...)
+  `line`                          line spacing: `single`, `1.5`, `double`, a
+                                  multiple, or a length (exactly that)
+
+`none` is no value of the paragraph's own (its style's). A paragraph that
+differs from the paragraphs around it says how, with its mark and only the
+attributes that differ: `<|> A centered one.`, `<=> {before = 12pt} One
+with more space above.` (attributes after a mark apply to that paragraph
+only).
+
+They are the paragraph's own formatting (what Word and LibreOffice show for
+it rather than its style's; a value its style gives already is none of its
+own). Opened, paragraphs one after another with the same format go under one
+line of it; written, each gets its format, also those you add. Only what
+changed is written: a value the same but written another way (`10mm` for
+`1cm`) changes nothing. The language server completes the attributes, and
+says when one isn't right; the write fails then, as for tables.
 
 Breaks ~
                                                              *neoffice-breaks*
@@ -97,7 +132,13 @@ A `\` makes the next character plain text when it could be read as a mark:
 Before any other character it is just a backslash (`C:\Users` stays as it
 is), and a mark that is never closed is just text (`if a == b`). Text that
 would read as something else is written escaped, so what you see is always
-what the document has.
+what the document has. The backslash shows faint (|hl-NonText|):
+
+  `1\. Quantify...`     a paragraph that starts with "1." typed as text, not
+                      a numbered list (without `\` it would become one)
+  `\<tab>`              a paragraph of only a tab or spaces (without `\` it
+                      would look like a blank line, which separates
+                      paragraphs); text typed after it needs none
 
 Objects ~
 What neoffice doesn't edit shows by name, as a field does (|neoffice-footnotes|):
@@ -196,8 +237,14 @@ as `￼`.
                                                              *neoffice-fields*
 Fields (citations from Zotero or Mendeley, cross-references, dates, page
 numbers, ...) show their text between `⟦ ⟧`. Their text can't be edited, as
-Word or Zotero would overwrite it: an edited field is kept as it was, and you
-are told so when writing. Delete the whole `⟦...⟧` to delete it.
+Word or Zotero would overwrite it: writing a document with an edited field
+fails, says what the field is, and changes nothing (`u` undoes the edit). Delete the whole `⟦...⟧` to delete it.
+
+Zotero's citations in .odt files (reference marks) and in .docx files (fields)
+are fields. A line typed again (`cc`) or a paragraph moved (`dd`, `p`) keeps
+its citations: a `⟦...⟧` with a deleted citation's text is that citation. One
+typed by hand, or a second copy, isn't a field: writing fails and says so
+(`\⟦` is the character itself). Add citations with Zotero.
 
                                                          *neoffice-attributes*
 Attributes in braces, a table's options and an image's width, are written

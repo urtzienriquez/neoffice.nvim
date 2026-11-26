@@ -98,7 +98,8 @@ M.escape = escape
 -- What starts a line of each kind of paragraph. block = { heading = level } |
 -- { title = true } | { quote = true } | { list = { kind = "bullet" | "number", level = 1.., n = its
 -- number } } | {} (a plain one); with align = "center" | "right" | "justify" (or nil: left).
-local ALIGN = { center = "<|> ", right = "->> ", justify = "<=> " }
+local ALIGN = { center = "<|> ", right = "->> ", justify = "<=> ", left = "<<- " }
+M.ALIGN = ALIGN
 
 -- The words that start captions ("Table: ", "Figure: "): { table = "Table", figure = "Figure" }
 -- (the option `captions`: each a word, or a list of them, the first written and the others also
@@ -136,7 +137,32 @@ function M.prefix(block)
   elseif list then
     kind = ("  "):rep(list.level - 1) .. (list.kind == "bullet" and "- " or (list.n or 1) .. ". ")
   end
+  -- its own format's attributes, in braces after its mark (see paras.lua)
+  local attrs = block.para and require("neoffice.paras").render(block.para) or ""
+  if attrs ~= "" then
+    return kind .. (ALIGN[block.align] or ALIGN.left) .. "{" .. attrs .. "} "
+  end
   return kind .. (ALIGN[block.align] or "")
+end
+
+-- A line with only a mark and its attributes ("<=> {first = 0.5cm}"), which sets the format of
+-- the paragraphs after it (see paras.lua): { align (nil: left), attrs }, and why if they aren't
+-- right (bad); nil if the line isn't one.
+function M.para_line(line)
+  for align, mark in pairs(ALIGN) do
+    local marker = vim.trim(mark)
+    if line:sub(1, #marker) == marker then
+      local rest = line:sub(#marker + 1)
+      if rest:match("^%s*$") then
+        return { align = align ~= "left" and align or nil, attrs = {} }
+      end
+      local inside = rest:match("^%s*{([^{}]*)}%s*$")
+      if inside then
+        local attrs, bad = require("neoffice.paras").parse(inside)
+        return { align = align ~= "left" and align or nil, attrs = attrs or {}, bad = bad, text = inside }
+      end
+    end
+  end
 end
 
 -- The block a line starts with; where its text begins; where its kind's and its alignment's
@@ -167,11 +193,25 @@ function M.block(line)
     block, start, kind_at = { list = { kind = "number", level = math.floor(#number / 2) + 1 } }, after_dot, dot
   end
   local align_at
-  for _, align in ipairs({ "center", "justify", "right" }) do
+  for _, align in ipairs({ "center", "justify", "right", "left" }) do
     local marker = ALIGN[align]
     if line:sub(start, start + #marker - 1) == marker then
       block.align, align_at, start = align, start, start + #marker
       break
+    end
+  end
+  -- (after its mark, its own format's attributes: "<=> {first = 0}")
+  local inside, after
+  if align_at and not kind_at then -- (plain paragraphs only)
+    inside, after = line:match("^{([^{}]*)} ()", start)
+  end
+  if inside then
+    local attrs, bad = require("neoffice.paras").parse(inside)
+    if attrs then
+      block.para, start = attrs, after
+    else
+      block.para_bad = bad
+      start = after
     end
   end
   return block, start, kind_at, align_at
@@ -471,6 +511,8 @@ function M.render(spans, block, strict)
         at = kind_at
       elseif not at and (start > 1 or not block.align) and parsed.align then
         at = align_at
+      elseif not at and start == 1 and block.align and not block.para and (parsed.para or parsed.para_bad) then
+        at = align_at + #ALIGN[parsed.align] -- (text in braces after its mark: "\{")
       end
       if not at then
         break
@@ -712,7 +754,7 @@ function M.parse(line)
       pos = emit(pos)
       chars[#chars].ch = "\n"
     elseif c == "\\" and (ESCAPED[line:match("^.[\128-\191]*", pos + 1) or ""]
-      or line:sub(pos + 1, pos + 1) == " " and (pos == text_start or line:sub(pos - 1, pos - 1) == "\n")
+      or line:sub(pos + 1, pos + 1):match("[ \t]") and (pos == text_start or line:sub(pos - 1, pos - 1) == "\n")
       or pos == text_start and M.block(line:sub(pos + 1)).caption) then -- (\Table: is text)
       pos = emit(pos + 1)
       chars[#chars].esc = true -- (escaped: a "¶" is just a ¶)

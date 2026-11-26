@@ -73,6 +73,26 @@ for _, ext in ipairs({ "docx", "odt" }) do
       assert.truthy(H.paras()[5]:match("^!%[%]%(.-%){width = 1.4cm, float = left}A floating image  here%.$"), H.paras()[5])
     end)
 
+    it("takes a paragraph's marks on the line after its floating images (no paragraph more)", function()
+      H.open(H.copy("rich." .. ext))
+      local count = #H.paras()
+      local r = H.row(5)
+      api.nvim_buf_set_lines(0, r - 1, r, false, { "![A dot](" .. DOT .. "){width = 1cm, float = right}", "<=> Justified text, beside it." })
+      assert.equals(count, #H.paras()) -- (one paragraph: the image is its)
+      H.reopen()
+      r = H.row(5)
+      assert.truthy(H.lines()[r]:match("^!%[A dot%]%(.-%){width = 1cm, float = right}$"), H.lines()[r])
+      assert.equals("<=> Justified text, beside it.", H.lines()[r + 1])
+      assert.equals(count, #H.paras())
+      H.replace(5, "Justified", "Still justified")
+      H.reopen()
+      assert.equals("<=> Still justified text, beside it.", H.lines()[H.row(5) + 1])
+      local main = zip.read(H.doc().path, H.MAIN[ext])
+      if ext == "docx" then
+        assert.truthy(main:find('<w:jc w:val="both"/>', 1, true))
+      end
+    end)
+
     it("makes a box with paragraphs in it, edits it, and takes it away", function()
       H.open(H.copy("rich." .. ext))
       local r = H.row(12)

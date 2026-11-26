@@ -13,6 +13,9 @@ else in the file stays exactly as it was.
   colours: `==highlight=={green}`), `x^{2}`, `W_{food}`, `[links](https://…)`.
 - Captions: `Table: …` and `Figure: …`, real captions numbered by the document (Word's and
   LibreOffice's own numbering, so cross-references work).
+- Paragraph formats set for many paragraphs at once, as in LaTeX: a line `<=> {first = 0.5cm}` sets
+  the alignment, indentation, spacing of the paragraphs after it, until the next; one that differs
+  says how (`<|> A centred one.`).
 - Paragraphs: `# ` headings (numbered on demand), `% ` title, `> ` quote, `- ` and `1. ` lists,
   and alignment `<|> centered`, `->> right`, `<=> justified`.
 - Line breaks (`\` at the end of a line) and page breaks (`\newpage`).

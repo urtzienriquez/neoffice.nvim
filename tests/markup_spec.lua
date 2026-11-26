@@ -95,6 +95,16 @@ describe("markup", function()
     assert.equals("#1", markup.render({ span("#1") })) -- (not a heading: no need)
   end)
 
+  it("keeps a paragraph of only a tab from looking blank, and reads it back as a tab", function()
+    local line = markup.render({ span("\t") })
+    assert.equals("\\\t", line)
+    local _, chars = markup.parse(line)
+    assert.equals(1, #chars)
+    assert.equals("\t", chars[1].ch)
+    local _, typed = markup.parse(line .. "text") -- (typed after it: still no backslash)
+    assert.equals("\ttext", table.concat(vim.tbl_map(function(c) return c.ch end, typed)))
+  end)
+
   it("keeps a paragraph of only spaces from looking blank", function()
     local line, cols = markup.render({ span("   ") })
     assert.equals("\\   ", line)
@@ -178,9 +188,51 @@ describe("paragraph layout", function()
 
   it("gives each paragraph the rows whose marks belong to it", function()
     local p = neo.paragraphs({ "a", "b", "", "c", "", "" })
+    for _, para in ipairs(p) do -- (their format: see "paragraph formats")
+      para.format = nil
+    end
     assert.same({ first = 1, last = 2, owns = 3, text = "a b" }, p[1]) -- (and the blank line after it)
     assert.same({ first = 4, last = 4, owns = 4, text = "c" }, p[2])
     assert.same({ first = 5, last = 5, owns = 5, text = "" }, p[3]) -- blank lines at the end: empty paragraphs
     assert.same({ first = 6, last = 6, owns = 6, text = "" }, p[4])
+  end)
+end)
+
+describe("what is written reads back as it was", function()
+  local markup = require("neoffice.markup")
+  local TEXTS = {
+    "\t", " ", "  ", "\t x", " x", "1. x", "12. x", "- x", "  - x", "# x", "% x", "> x", "<=> x", "<|> x", "->> x",
+    "<<- x", "<=>", "{x} y", "{first = 1cm} y", "Table: x", "Figure: x", ":::", "::: {float = right}", "|a|", "| a | b |",
+    "{a}", "\\", "\\\\", "==x==", "++x++", "~~x~~", "*x*", "x\ny", "x\n- y", "x\n# y", "a ==b=={green} c", "![a](b)",
+    "x\\", "[x](y)", "$x$", "^[n]", "⟦f⟧", "C++ and C++", "n = 20", "a_{b}", "x^{2}",
+  }
+  local BLOCKS = {
+    {}, { align = "justify" }, { align = "center" }, { align = "left" }, { align = "justify", para = { first = "1cm" } },
+    { heading = 2 }, { title = true }, { quote = true }, { list = { kind = "bullet", level = 1 } }, { caption = "table" },
+  }
+  it("for any text in any kind of paragraph", function()
+    for _, block in ipairs(BLOCKS) do
+      for _, text in ipairs(TEXTS) do
+        local spans = {}
+        for k, part in ipairs(vim.split(text, "\n", { plain = true })) do
+          if k > 1 then
+            spans[#spans + 1] = { line_break = true }
+          end
+          if part ~= "" then
+            spans[#spans + 1] = { text = part }
+          end
+        end
+        local line = markup.render(vim.deepcopy(spans), vim.deepcopy(block))
+        local back, chars = markup.parse(line)
+        local got = table.concat(vim.tbl_map(function(c) return c.ch end, chars))
+        local what = vim.inspect(block) .. " " .. vim.inspect(text) .. " -> " .. vim.inspect(line)
+        assert.equals(text, got, what)
+        for _, key in ipairs({ "heading", "title", "quote", "caption", "align" }) do
+          assert.equals(block[key], back[key], what .. " (" .. key .. ")")
+        end
+        assert.same(block.para, back.para, what .. " (para)")
+        assert.equals(block.list and block.list.kind, back.list and back.list.kind, what .. " (list)")
+      end
+    end
   end)
 end)

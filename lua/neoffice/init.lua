@@ -14,6 +14,13 @@ local xml = require("neoffice.xml")
 local zip = require("neoffice.zip")
 local markup = require("neoffice.markup")
 local floats = require("neoffice.floats")
+local pformat = require("neoffice.paras") -- (paragraphs' formats)
+
+-- Whether a paragraph is a plain one (not a heading, title, quote, list item or caption): those
+-- have a format of their own, set by the lines of formats (see paras.lua).
+local function plain(block)
+  return not (block.heading or block.title or block.quote or block.list or block.caption)
+end
 local api = vim.api
 local M = {}
 
@@ -79,9 +86,13 @@ function M.paragraphs(lines, alone)
   alone = alone or {}
   local out, blanks, table_start, formats, options = {}, {}, nil, {}, {}
   local box, box_of_row, cut = nil, {}, false -- (cut: a box's line came just before: no paragraph goes on across it)
+  local format, fenced = { attrs = {} }, false -- (the paragraphs' format: see paras.lua; fenced: a format's line came last)
+  local function empty_after() -- (how many blank lines after a paragraph, or a format's line, separate)
+    return (out[#out] or fenced) and 2 or 1
+  end
   local function empty_paragraphs(from)
     for k = from, #blanks do
-      out[#out + 1] = { first = blanks[k], last = blanks[k], text = "" }
+      out[#out + 1] = { first = blanks[k], last = blanks[k], text = "", format = format }
     end
     blanks = {}
   end
@@ -91,20 +102,27 @@ function M.paragraphs(lines, alone)
     if fence then -- a box opens or closes (inside one, ":::" closes it; with braces, another opens)
       local was = box
       if box then
-        empty_paragraphs(prev and 2 or 1)
+        empty_paragraphs(empty_after())
         box = nil
       end
       if not was or fence_attrs then
-        empty_paragraphs(prev and 2 or 1)
+        empty_paragraphs(empty_after())
         box = { start = row, attrs = fence_attrs or "" }
       end
       table_start, cut = nil, true
       goto continue
     end
     box_of_row[row] = box
+    local para_line = not box and line:find("^[<%-]") and markup.para_line(line)
+    if para_line then -- the format of the paragraphs after it (see paras.lua)
+      empty_paragraphs(empty_after())
+      format, cut, fenced = para_line, true, true
+      table_start = nil
+      goto continue
+    end
     local option_line = markup.table_options(line)
     if option_line and (lines[row + 1] or ""):match("^|") then -- (the options of the table below it)
-      empty_paragraphs(prev and 2 or 1)
+      empty_paragraphs(empty_after())
       options[row + 1], table_start = option_line, nil
       goto continue
     end
@@ -116,7 +134,7 @@ function M.paragraphs(lines, alone)
     if line:match("^%s*$") then
       blanks[#blanks + 1] = row
     elseif cells ~= false and table_start then -- a table row (or the line of dashes under its first row)
-      empty_paragraphs(prev and 2 or 1)
+      empty_paragraphs(empty_after())
       formats[table_start] = not cells and markup.table_format(line) or formats[table_start]
       for c, cell in ipairs(cells or {}) do
         for _, para in ipairs(cell) do
@@ -134,12 +152,23 @@ function M.paragraphs(lines, alone)
         prev.joins[row - prev.first] = 0
       end
       prev.last, prev.text = row, prev.text .. (hard and "\n" or floating and "" or " ") .. line
+    elseif prev and prev.first == row - 1 and not prev.cell and not prev.alone and not alone[row] and #blanks == 0 and not cut
+      and markup.floats_only(lines[row - 1]) and not next((markup.block(lines[row - 1]))) and next((markup.block(line))) then
+      -- a paragraph's floating images on their own line, and its marks ("<=> ") with its text after
+      local _, start = markup.block(line)
+      local prefix = line:sub(1, start - 1)
+      prev.lead = { prefix = #prefix, floats = #prev.text }
+      prev.joins = { [1] = 0 }
+      prev.last, prev.text = row, prefix .. prev.text .. line:sub(start)
     else
-      empty_paragraphs(prev and 2 or 1) -- (the first blank line after a paragraph separates)
+      empty_paragraphs(empty_after()) -- (the first blank line after a paragraph separates)
       out[#out + 1] = { first = row, last = row, text = line, alone = alone[row] }
     end
+    if out[#out] and out[#out].first == row then
+      out[#out].format = format
+    end
     if not line:match("^%s*$") then
-      cut = false
+      cut, fenced = false, false
     end
     ::continue::
   end
@@ -185,6 +214,24 @@ function M.join(para, i)
   return para.joins and para.joins[i] or 1
 end
 
+-- Where a byte of a paragraph's text is in its lines, as if they were one after the other (joined
+-- as M.join says). The same, but for a paragraph whose floating images are on a line of their own
+-- and its marks ("<=> ") on the line after them (para.lead = { prefix, floats: their lengths}):
+-- its text is marks, images, the rest; its lines, images, then marks and the rest.
+function M.buffer_offset(para, offset, ends)
+  local lead = para.lead
+  if not lead then
+    return offset
+  elseif ends and offset == lead.prefix + lead.floats then -- (the end of its images: their line's)
+    return lead.floats
+  elseif offset < lead.prefix then
+    return lead.floats + offset
+  elseif offset < lead.prefix + lead.floats then
+    return offset - lead.prefix
+  end
+  return offset
+end
+
 -- Cut a paragraph into pieces: text with uniform formatting, objects, images, and comment/change
 -- markers. Reads the buffer and its marks only.
 local function pieces(buf, para)
@@ -194,9 +241,17 @@ local function pieces(buf, para)
   if para.cell and not block.align and para.cell.align ~= "left" then -- (its column's, unless it has its own)
     block.align = para.cell.align
   end
+  if plain(block) and not para.cell and not para.box then -- its format: its run's, and what it says (see paras.lua)
+    local format = pformat.apply(para.format or { attrs = {} }, block.align, block.para)
+    block.align, block.para = format.align, format.attrs
+  else
+    block.align = block.align ~= "left" and block.align or nil
+    block.para = nil -- (not a plain paragraph's: its format isn't neoffice's to change)
+  end
   -- where each character is in the buffer (the paragraph's lines were joined with spaces)
   local lines = api.nvim_buf_get_lines(buf, para.first - 1, para.last, true)
   local function position(offset) -- (of a byte of the paragraph's text, ending something: row, column)
+    offset = M.buffer_offset(para, offset, true)
     local row, start = 1, -(para.col or 0)
     while row < #lines and offset > start + #lines[row] do
       start, row = start + #lines[row] + M.join(para, row), row + 1
@@ -208,6 +263,7 @@ local function pieces(buf, para)
     if ch.len then -- (an image, equation... may go on in the next line)
       ch.end_row, ch.end_col = position(ch.col + ch.len)
     end
+    ch.col = M.buffer_offset(para, ch.col)
     -- (a character right after a line joined with nothing is on the next line)
     while row < #lines and (ch.col > start + #lines[row] or ch.col == start + #lines[row] and M.join(para, row) == 0) do
       start, row = start + #lines[row] + M.join(para, row), row + 1
@@ -299,6 +355,26 @@ local function pieces(buf, para)
     return x[1] ~= y[1] and x[1] < y[1] or x[1] == y[1] and (x[2] ~= y[2] and x[2] < y[2] or x[2] == y[2] and x[3] < y[3])
   end)
 
+  -- fields (citations...) whose text was typed again (a line retyped: cc, dd and p): the paragraph's
+  -- field that shows that text and is at no field's place any more, rather than text that looks like it
+  -- (lost: its mark is empty, its text deleted; this paragraph's first, then any, as when a paragraph
+  -- was moved with dd and p; its mark then goes to its new place)
+  local function lost_field(ch)
+    local everywhere = api.nvim_buf_get_extmarks(buf, M.ns.object, 0, -1, { details = true })
+    for _, list in ipairs({ objects, everywhere }) do
+      for _, m in ipairs(list) do
+        local object = doc.object[m[1]]
+        local empty = m[4].end_row == m[2] and m[4].end_col == m[3]
+        if empty and object and object.visible and object.field and object.field.text == ch.field.text then
+          api.nvim_buf_set_extmark(buf, M.ns.object, ch.row, ch.col, {
+            id = m[1], end_row = ch.end_row, end_col = ch.end_col, right_gravity = false, end_right_gravity = false,
+          })
+          return object
+        end
+      end
+    end
+  end
+
   local out, e, parts = {}, 1, {} -- (parts: how many pieces of each deletion so far)
   local props = runs[1] and doc.run[runs[1][1]] -- text before the first run takes its properties
   for k = 1, #chars + 1 do
@@ -363,11 +439,14 @@ local function pieces(buf, para)
       out[#out + 1] = same and { object = object.node, note = object.footnote } -- (note: in case it must be written again)
         or { footnote = vim.tbl_extend("force", ch.footnote, where, { original = object }) }
     elseif ch.field then -- a field (citation, date...): kept as it is; its text can't be edited
-      if object and object.field then
-        out[#out + 1] = { object = object.node, kept = object.field.text ~= ch.field.text and ch.field.text or nil }
-      else -- (typed: just text)
-        out[#out + 1] = { text = "⟦" .. ch.field.text .. "⟧", props = props or nil }
+      if not (object and object.field) then
+        object = lost_field(ch) or object
       end
+      assert(object and object.field, ("⟦%s⟧ isn't one of the document's fields: a field (a citation, a date...) can't be typed or copied here "
+        .. "(u brings back one deleted; write \\⟦ for the character itself)"):format(ch.field.text))
+      assert(object.field.text == ch.field.text, ("a field's text can't be edited (Zotero or Word would write it again): ⟦%s⟧ is ⟦%s⟧ "
+        .. "in the document (u undoes the edit; delete the whole ⟦...⟧ to delete it)"):format(ch.field.text, object.field.text))
+      out[#out + 1] = { object = object.node }
     elseif ch.page_break then
       out[#out + 1] = { page_break = true }
     elseif ch.ch == "\n" then
@@ -427,6 +506,7 @@ end
 local function signature(block, list)
   local l = block.list
   local out = { table.concat({ tostring(block.heading), tostring(block.title), tostring(block.quote), tostring(block.align), tostring(block.caption),
+    block.para and pformat.key({ attrs = block.para }) or "",
     tostring(block.cell), l and table.concat({ l.kind, l.level, tostring(l.n), tostring(l.id) }, ",") or "" }, "|") }
   for _, piece in ipairs(list) do
     local keys = vim.tbl_keys(piece)
@@ -686,6 +766,46 @@ local function open(buf, path)
       end
     end
   end
+  -- Paragraphs' formats (see paras.lua): plain paragraphs one after another with the same one go
+  -- under one line of it (before the first of them); one that differs says how, on its own.
+  local format_before = {}
+  do
+    local function content(spans)
+      return vim.iter(spans):any(function(s)
+        return s.text and s.text ~= "" or s.image or s.math or s.footnote or s.field or s.deletion or (s.object and s.visible)
+      end)
+    end
+    local candidates = {}
+    for k, para in ipairs(paras) do
+      local b = para.block
+      if not cells[k] and not para.box and plain(b) then
+        if content(para.spans) then
+          candidates[#candidates + 1] = k
+        else -- (an empty one: its run's)
+          b.align, b.para = nil, nil
+        end
+      else
+        b.para = nil -- (not a plain paragraph's: not neoffice's to change)
+      end
+    end
+    local run = { attrs = {} }
+    for i, k in ipairs(candidates) do
+      local b = paras[k].block
+      local own = { align = b.align, attrs = b.para or {} }
+      local function shared(j) -- (the j-th next one has it too)
+        local other = candidates[i + j] and paras[candidates[i + j]].block
+        return other and pformat.same(own, { align = other.align, attrs = other.para or {} })
+      end
+      if pformat.same(own, run) then
+        b.align, b.para = nil, nil
+      elseif shared(1) or shared(2) then -- (it and the next, or the one after an exception, have it)
+        format_before[k], run = own, own -- (a run of it starts)
+        b.align, b.para = nil, nil
+      else
+        b.align, b.para = pformat.diff(run, own)
+      end
+    end
+  end
   for k, para in ipairs(paras) do
     para.block.cell = cells[k] and true or nil
     if cells[k] then -- (spaces at the edges of a cell's text: not shown, as the table can't show them)
@@ -795,6 +915,11 @@ local function open(buf, path)
         end
       end
     else
+      if format_before[k] then -- (the format of the paragraphs from here on: see paras.lua)
+        local f = format_before[k]
+        local attrs = pformat.render(f.attrs)
+        lines[#lines + 1] = vim.trim(markup.ALIGN[f.align or "left"]) .. (attrs ~= "" and " {" .. attrs .. "}" or "")
+      end
       local box = para.box -- (a box's paragraphs: between its lines, "::: {...}" and ":::")
       if box and (not paras[k - 1] or paras[k - 1].box ~= box) then
         local attrs = floats.render(box.attrs)
@@ -811,9 +936,17 @@ local function open(buf, path)
       end
       local split = floating > 0 and cols[k][floating] and cols[k][floating][2]
       local rest = split and text:sub(split + 1)
+      local prefix = markup.prefix(para.block) -- (its marks: on the text's line, "<=> ...")
+      local lead
       if rest and not rest:match("^%s*$") and not rest:match("^%s*\n") and not next((markup.block(rest))) and not rest:match("^|")
         and not markup.box_line(rest) and not markup.table_options(rest) then
-        parts[1], joins[1], text = text:sub(1, split), 0, rest
+        local again, start = markup.block(prefix .. rest) -- (the marks read back as they are)
+        if prefix == "" then
+          parts[1], joins[1], text = text:sub(1, split), 0, rest
+        elseif start == #prefix + 1 and markup.prefix(again) == prefix then
+          parts[1], joins[1], text = text:sub(#prefix + 1, split), 0, prefix .. rest
+          lead = { prefix = #prefix, floats = split - #prefix }
+        end
       end
       for _, line in ipairs(vim.split(text, "\n", { plain = true })) do
         parts[#parts + 1] = line
@@ -823,6 +956,7 @@ local function open(buf, path)
         lines[#lines + 1], starts[#starts + 1], offset = line, offset, offset + #line + (joins[i] or 1)
       end
       at = function(col, ends) -- the position of a byte column of the paragraph's text
+        col = M.buffer_offset({ lead = lead }, col, ends)
         local row = #starts
         -- (what ends where a line joined with nothing ends: on that line)
         while starts[row] > col or ends and row > 1 and starts[row] == col and joins[row - 1] == 0 do
@@ -972,21 +1106,28 @@ function M.decorate(buf)
       end
     end
   end
-  for r, line in ipairs(lines) do -- a table's options (above it)
+  for r, line in ipairs(lines) do -- a table's options (above it); a format's line (its mark, its attributes)
     if line:sub(1, 1) == "{" and markup.table_options(line) and (lines[r + 1] or ""):match("^|") then
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = #line, hl_group = "NeofficeTableOptions", priority = 150 })
+    elseif line:find("^[<%-]") and markup.para_line(line) then
+      local brace = line:find("{", 1, true)
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = brace and brace - 1 or #line, hl_group = "NeofficeAlign", priority = 250 })
+      if brace then
+        api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, brace - 1, { end_col = #line, hl_group = "NeofficeTableOptions", priority = 250 })
+      end
     end
   end
   for _, para in ipairs(M.blocks(buf)) do
-    if para.text:find("==", 1, true) then
+    if para.text:find("==", 1, true) or para.text:find("\\", 1, true) then
       M.decorate_marks(buf, para, lines)
     end
     local block, text_start = markup.block(lines[para.first])
     -- the alignment mark (above Markdown's highlighting, which takes ">..." for a quote)
     local own, own_start, _, align_at = markup.block(para.text)
-    if own.align then
+    if own.align then -- (on the line after its floating images, if they are on one of their own)
+      local row = para.first - 1 + (para.lead and 1 or 0)
       local col = (para.col or 0) + align_at - 1
-      api.nvim_buf_set_extmark(buf, NS_DECOR, para.first - 1, col, {
+      api.nvim_buf_set_extmark(buf, NS_DECOR, row, col, {
         end_col = (para.col or 0) + own_start - 2, hl_group = "NeofficeAlign", priority = 250,
       })
     end
@@ -1032,10 +1173,11 @@ local function highlight_group(color)
 end
 function M.decorate_marks(buf, para, lines)
   local _, chars = markup.parse(para.text)
-  local function position(offset) -- (the paragraph's lines were joined by one character)
+  local function position(offset, ends) -- (the paragraph's lines were joined by one character)
     if para.cell then
       return para.first - 1, para.col + offset
     end
+    offset = M.buffer_offset(para, offset, ends)
     local row = para.first
     while row < para.last and offset > #lines[row] do
       offset, row = offset - #lines[row] - M.join(para, row - para.first + 1), row + 1
@@ -1044,8 +1186,14 @@ function M.decorate_marks(buf, para, lines)
   end
   local function mark(from, to, group) -- (chars from..to)
     local r1, c1 = position(chars[from].col)
-    local r2, c2 = position(chars[to].col + (chars[to].len or #chars[to].ch))
+    local r2, c2 = position(chars[to].col + (chars[to].len or #chars[to].ch), true)
     api.nvim_buf_set_extmark(buf, NS_DECOR, r1, c1, { end_row = r2, end_col = c2, hl_group = group, priority = 150 })
+  end
+  for _, c in ipairs(chars) do -- the backslash before an escaped character: faint (it is only there to be read)
+    if c.esc and c.col > 0 then
+      local r, col = position(c.col - 1)
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r, col, { end_col = col + 1, hl_group = "NeofficeEscape", priority = 150 })
+    end
   end
   for _, key in ipairs({ "h" }) do -- (underlines: by the syntax, syntax/neoffice.vim)
     local from
@@ -1505,6 +1653,8 @@ function M.save(buf, target)
         end
       end
       plans[k] = { old = old_of[k], block = kind, pieces = list, sig = signature(kind, list), cell = block.cell, box = block.box }
+      assert(not (block.format and block.format.bad), block.format and block.format.bad) -- (its format's line: right)
+      assert(not kind.para_bad, kind.para_bad) -- (its own attributes, after its mark: right)
       if block.box and not block.box.parsed then -- its box's attributes (an error if they aren't right)
         local attrs, bad = floats.parse_box(block.box.attrs)
         assert(attrs, bad)
@@ -1527,7 +1677,7 @@ function M.save(buf, target)
 
     -- 2. Rewrite only the paragraphs that changed. (If anything fails before the file is written,
     -- the document's XML is put back as it was: see checkpoint.)
-    local ctx, paras, prev, plain, kept, placements, seps, box_keys, written_as = doc.ctx, {}, nil, nil, {}, {}, {}, {}, {}
+    local ctx, paras, prev, plain, placements, seps, box_keys, written_as = doc.ctx, {}, nil, nil, {}, {}, {}, {}
     local notes = vim.list_extend(vim.tbl_values(doc.change), vim.tbl_values(doc.comment))
     for _, c in pairs(doc.comment) do
       vim.list_extend(notes, c.replies)
@@ -1588,7 +1738,7 @@ function M.save(buf, target)
         end
       elseif not node and prev_box then -- a new paragraph after a box: before the paragraph it is in
         node = doc.fmt.new_para(plain or doc.paras[1], ctx)
-        if prev_box.parent then
+        if prev_box.parent and xml.index(prev_box) then
           xml.append(prev_box.parent.parent, node, xml.index(prev_box.parent))
         elseif outer then
           local after = outside(outer)
@@ -1633,9 +1783,6 @@ function M.save(buf, target)
         ctx.dirty[doc.fmt.MAIN] = true
         for _, piece in ipairs(plan.pieces) do -- images written now: they are the document's from now on
           local new = piece.image or piece.math or piece.footnote
-          if piece.kept then
-            kept[#kept + 1] = piece.kept
-          end
           if new then -- (its mark, once the file is written)
             local data = { node = new.node, visible = true }
             if piece.image then -- (its path, alt text and attributes, as it now is)
@@ -1689,7 +1836,7 @@ function M.save(buf, target)
       end
     end
     for run in pairs(doc.boxes) do
-      if not box_keys[run] and run.parent then
+      if not box_keys[run] and run.parent and xml.index(run) then
         xml.remove(run)
         ctx.dirty[doc.fmt.MAIN] = true
       end
@@ -1743,14 +1890,9 @@ function M.save(buf, target)
         doc.synced, doc.stamp = true, stamp(target)
       end
     end
-    if #kept > 0 then
-      vim.schedule(function()
-        vim.notify("[neoffice] Fields can't be edited (Word or Zotero would overwrite it); kept as they were: "
-          .. table.concat(kept, ", "), vim.log.levels.WARN)
-      end)
-    end
   end)
   if not ok then
+    err = tostring(err):gsub("^[^\n]-%.lua:%d+: ", "") -- (where in neoffice it was found: not for you)
     return vim.notify("[neoffice] Save failed, the file was not changed: " .. err, vim.log.levels.ERROR)
   end
   if target == doc.path then

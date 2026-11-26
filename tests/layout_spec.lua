@@ -158,10 +158,21 @@ for _, name in ipairs({ "layout.docx", "layout.odt" }) do
       end
     end)
 
-    it("keeps fields as they are, even when their text is edited", function()
+    it("refuses to write a field whose text was edited: the save says so and changes nothing", function()
       local field = ext == "docx" and "ZOTERO_ITEM" or "fieldmark"
+      local before = H.bytes(path)
       H.replace(10, "(Smith, 2020)", "(Smith, 2021)")
       H.replace(10, "for that", "for this")
+      local errors = {}
+      local notify = vim.notify
+      vim.notify = function(msg, level) errors[#errors + 1] = { msg, level } end
+      H.save()
+      vim.notify = notify
+      assert.equals(before, H.bytes(path))
+      assert.equals(1, #errors)
+      assert.equals(vim.log.levels.ERROR, errors[1][2])
+      assert.truthy(errors[1][1]:find("⟦(Smith, 2021)⟧ is ⟦(Smith, 2020)⟧", 1, true), errors[1][1])
+      H.replace(10, "(Smith, 2021)", "(Smith, 2020)") -- (put back: the other edit is written)
       H.reopen()
       assert.equals("See ⟦(Smith, 2020)⟧ for this.", H.paras()[10])
       assert.truthy(zip.read(path, H.MAIN[ext]):find(field, 1, true))
@@ -189,8 +200,9 @@ for _, name in ipairs({ "layout.docx", "layout.odt" }) do
       H.replace(2, "->> ", "<=> ")
       H.replace(4, "> ", "")
       assert.equals(0, #H.changes(require("neoffice").config.author))
-      H.reopen()
-      assert.same({ "<=> Right text.", "A quote." }, { H.paras()[2], H.paras()[4] })
+      H.reopen() -- (now two justified paragraphs one after the other: under one line of their format)
+      assert.same({ "Right text.", "A quote." }, { H.paras()[2], H.paras()[4] })
+      assert.equals("<=>", H.lines()[H.row(2) - 1])
     end)
 
     if H.has_libreoffice then

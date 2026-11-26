@@ -127,7 +127,7 @@ function M.append(parent, child, index)
 end
 
 function M.index(n)
-  for i, c in ipairs(n.parent.children) do
+  for i, c in ipairs(n.parent and n.parent.children or {}) do
     if c == n then
       return i
     end
@@ -135,7 +135,10 @@ function M.index(n)
 end
 
 function M.remove(n)
-  table.remove(n.parent.children, M.index(n))
+  local at = n.parent and M.index(n)
+  if at then -- (one no longer among its parent's children: nothing else is taken out)
+    table.remove(n.parent.children, at)
+  end
   n.parent = nil
 end
 

@@ -190,8 +190,87 @@ local function block_of(ctx, ppr)
   end
   block.align = JC[jc and xml.attr(jc, "w:val") or ""]
   block.caption_style = id and ctx.caption_styles[id] or nil -- (see captions in init.lua)
+  if not (block.heading or block.title or block.quote or block.list) then -- (a plain one: its own format, see paras.lua)
+    block.para = M.para_attrs(ppr, ctx)
+  end
   return block
 end
+
+-- A paragraph's own format's attributes (see paras.lua), from its properties: those its style
+-- doesn't give it already (a value the same as its style's is none of its own).
+local function style_attrs(ctx, id) -- (its style's, following the styles it is based on, and the defaults)
+  ctx.style_attrs = ctx.style_attrs or {}
+  local key = id or false
+  if not ctx.style_attrs[key] then
+    local styles = part(ctx, STYLES) or {}
+    local chain, cur = {}, id
+    if not cur then -- (the default paragraph style)
+      local default = vim.iter(xml.collect(styles, { ["w:style"] = true })):find(function(s)
+        return xml.attr(s, "w:type") == "paragraph" and xml.attr(s, "w:default") == "1"
+      end)
+      cur = default and xml.attr(default, "w:styleId")
+    end
+    for _ = 1, 10 do
+      if not cur then
+        break
+      end
+      chain[#chain + 1] = cur
+      cur = ctx.based_on[cur]
+    end
+    local defaults = xml.find(styles, "w:pPrDefault")
+    local out = M.para_attrs(defaults and xml.child(defaults, "w:pPr"))
+    for k = #chain, 1, -1 do
+      local style = has(styles, "w:style", "w:styleId", chain[k])
+      for name, value in pairs(M.para_attrs(style and xml.child(style, "w:pPr"))) do
+        out[name] = value
+      end
+    end
+    ctx.style_attrs[key] = out
+  end
+  return ctx.style_attrs[key]
+end
+function M.para_attrs(ppr, ctx)
+  local out = M.raw_para_attrs(ppr)
+  if ctx then
+    local paras = require("neoffice.paras")
+    local id = ppr and xml.child(ppr, "w:pStyle") and xml.attr(xml.child(ppr, "w:pStyle"), "w:val")
+    local style = style_attrs(ctx, id)
+    for _, key in ipairs(paras.KEYS) do
+      local base = style[key] or (key == "line" and "single" or "0cm")
+      if out[key] and paras.measure(key, out[key]) == paras.measure(key, base) then
+        out[key] = nil
+      end
+    end
+  end
+  return out
+end
+function M.raw_para_attrs(ppr)
+  local paras, out = require("neoffice.paras"), {}
+  local ind = ppr and xml.child(ppr, "w:ind")
+  local function twips(el, ...)
+    for _, name in ipairs({ ... }) do
+      local v = el and tonumber(xml.attr(el, "w:" .. name) or "")
+      if v then
+        return v
+      end
+    end
+  end
+  local left, right = twips(ind, "left", "start"), twips(ind, "right", "end")
+  local first, hanging = twips(ind, "firstLine"), twips(ind, "hanging")
+  out["indent-left"] = left and left ~= 0 and paras.cm(left * 2.54 / 1440) or nil
+  out["indent-right"] = right and right ~= 0 and paras.cm(right * 2.54 / 1440) or nil
+  out.first = hanging and hanging ~= 0 and paras.cm(-hanging * 2.54 / 1440) or first and first ~= 0 and paras.cm(first * 2.54 / 1440) or nil
+  local spacing = ppr and xml.child(ppr, "w:spacing")
+  local before, after, line = twips(spacing, "before"), twips(spacing, "after"), twips(spacing, "line")
+  out.before = before and paras.pt(before / 20) or nil
+  out.after = after and paras.pt(after / 20) or nil
+  if line then
+    local rule = xml.attr(spacing, "w:lineRule") or "auto"
+    out.line = rule == "auto" and paras.multiple(line / 240) or paras.pt(line / 20)
+  end
+  return out
+end
+
 
 -- The sequence a numbering field counts ("SEQ Table \* ARABIC": Table), if it is one that just
 -- counts (not one that repeats, resets or hides the number).
@@ -986,6 +1065,82 @@ function M.keep_with_next(_, p)
   end
 end
 
+-- A paragraph's own format's attributes set as `want` says (only those whose value changed).
+local function set_para(ctx, ppr, want)
+  local paras = require("neoffice.paras")
+  local have = M.para_attrs(ppr, ctx)
+  want = vim.deepcopy(want) -- (a value its style gives already: none of its own)
+  local id = xml.child(ppr, "w:pStyle") and xml.attr(xml.child(ppr, "w:pStyle"), "w:val")
+  local style = style_attrs(ctx, id)
+  for _, key in ipairs(paras.KEYS) do
+    local base = style[key] or (key == "line" and "single" or "0cm")
+    if want[key] and want[key] ~= "none" and paras.measure(key, want[key]) == paras.measure(key, base) then
+      want[key] = nil
+    end
+  end
+  local function changed(key) return paras.measure(key, have[key]) ~= paras.measure(key, want[key]) end
+  local function twips(key) -- (a length, in twips)
+    local cm = want[key] and want[key] ~= "none" and require("neoffice.markup").cm((want[key]:gsub("^%-", "")))
+    return cm and math.floor(cm / 2.54 * 1440 + 0.5) * (want[key]:sub(1, 1) == "-" and -1 or 1)
+  end
+  local function element(tag)
+    local el = xml.child(ppr, tag)
+    if not el then
+      el = xml.elem(tag)
+      local at = #ppr.children + 1
+      for k, c in ipairs(ppr.children) do
+        if (PPR_ORDER[c.tag] or 0) > PPR_ORDER[tag] then
+          at = k
+          break
+        end
+      end
+      xml.append(ppr, el, at)
+    end
+    return el
+  end
+  local function tidy(el) -- (an element left with no attributes goes)
+    if el and #el.attrs == 0 then
+      xml.remove(el)
+    end
+  end
+  if changed("indent-left") or changed("indent-right") or changed("first") then
+    local ind = element("w:ind")
+    if changed("indent-left") then
+      xml.set_attr(ind, "w:start", nil)
+      local v = twips("indent-left")
+      xml.set_attr(ind, "w:left", v and tostring(v) or nil)
+    end
+    if changed("indent-right") then
+      xml.set_attr(ind, "w:end", nil)
+      local v = twips("indent-right")
+      xml.set_attr(ind, "w:right", v and tostring(v) or nil)
+    end
+    if changed("first") then
+      local v = twips("first")
+      xml.set_attr(ind, "w:firstLine", v and v >= 0 and tostring(v) or nil)
+      xml.set_attr(ind, "w:hanging", v and v < 0 and tostring(-v) or nil)
+    end
+    tidy(ind)
+  end
+  if changed("before") or changed("after") or changed("line") then
+    local spacing = element("w:spacing")
+    for _, key in ipairs({ "before", "after" }) do
+      if changed(key) then
+        local v = twips(key)
+        xml.set_attr(spacing, "w:" .. key, v and tostring(v) or nil)
+      end
+    end
+    if changed("line") then
+      local value = want.line
+      local multiple = value and ({ single = 1, double = 2 })[value] or tonumber(value or "")
+      local exact = not multiple and twips("line")
+      xml.set_attr(spacing, "w:line", multiple and tostring(math.floor(multiple * 240 + 0.5)) or exact and tostring(exact) or nil)
+      xml.set_attr(spacing, "w:lineRule", multiple and "auto" or exact and "exact" or nil)
+    end
+    tidy(spacing)
+  end
+end
+
 local function set_align(ppr, align) -- (only when it changed: "start", "left", "both"... stay as they are)
   local jc = xml.child(ppr, "w:jc")
   if JC[jc and xml.attr(jc, "w:val") or ""] == align then
@@ -1227,7 +1382,7 @@ end
 
 -- A box's run, at the start of paragraph `p` (after its properties), unless it is in it already.
 function M.attach_box(_, run, p)
-  if run.parent == p then
+  if run.parent == p and xml.index(run) then -- (in it still: not when its paragraph was written again)
     return
   end
   if run.parent then
@@ -1893,6 +2048,10 @@ function M.fill(ctx, p, block, pieces)
   if block.align or (ppr and xml.child(ppr, "w:jc")) then
     ppr = ppr or xml.elem("w:pPr")
     set_align(ppr, block.align)
+  end
+  if block.para then -- (its own format's attributes: a plain paragraph's, see paras.lua)
+    ppr = ppr or xml.elem("w:pPr")
+    set_para(ctx, ppr, block.para)
   end
   if ppr then
     xml.append(p, ppr)

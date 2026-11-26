@@ -45,6 +45,7 @@ local function highlights()
     NeofficeAlign = { link = "@punctuation.special" },
     NeofficeTableOptions = { link = "@attribute" },
     NeofficeCaption = { link = "@label" },
+    NeofficeEscape = { link = "NonText" }, -- (a backslash that makes the next character plain text)
     NeofficeChangeInfo = { link = "Comment" },
     NeofficeFormat = { underdashed = true, sp = "#61afef" },
     NeofficeComment = { underdotted = true, sp = "#e5c07b" },

@@ -43,6 +43,7 @@ local function versions(buf, block)
   local row, start = 1, -(block.col or 0)
   for _, ch in ipairs(chars) do
     local join = require("neoffice").join
+    ch.col = require("neoffice").buffer_offset(block, ch.col)
     while row < #lines and (ch.col > start + #lines[row] or ch.col == start + #lines[row] and join(block, row) == 0) do
       start, row = start + #lines[row] + join(block, row), row + 1
     end
