@@ -409,6 +409,7 @@ local function completion(buf, pos)
       first = { "0.5cm", "1.27cm", "-0.5cm", "none" }, before = { "0pt", "6pt", "12pt", "none" },
       after = { "0pt", "6pt", "12pt", "none" }, line = { "single", "1.15", "1.5", "double", "none" },
       size = { "9pt", "10pt", "11pt", "12pt", "14pt", "16pt" },
+      color = { "black", "red", "blue", "darkblue", "darkgreen", "darkred", "darkgray", "#1f4e79", "none" },
       align = { "left", "center", "right", "justify", "none" },
     }
     local keys = hbraces and pf.STYLE_KEYS or pbraces and pf.KEYS or markup.SPAN_KEYS

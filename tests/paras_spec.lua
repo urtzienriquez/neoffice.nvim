@@ -9,7 +9,7 @@ local api = vim.api
 describe("paragraph formats", function()
   it("read attributes, and say which aren't", function()
     assert.same({ ["indent-left"] = "1cm", first = "-0.5cm", line = "1.5" }, paras.parse("indent-left = 1cm, first = -0.5cm, line = 1.5"))
-    assert.is_nil(paras.parse("colour = red"))
+    assert.is_nil(paras.parse("shadow = red"))
     assert.is_nil(paras.parse("before = lots"))
     assert.equals("indent-left = 1cm, before = 6pt", paras.render({ before = "6pt", ["indent-left"] = "1cm" }))
   end)
@@ -94,7 +94,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
       H.open(path)
       local before = H.bytes(path)
       local r = H.row(3)
-      api.nvim_buf_set_lines(0, r - 1, r - 1, false, { "<=> {colour = red}" })
+      api.nvim_buf_set_lines(0, r - 1, r - 1, false, { "<=> {shadow = red}" })
       local errors = {}
       local notify = vim.notify
       vim.notify = function(msg) errors[#errors + 1] = msg end

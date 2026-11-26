@@ -398,6 +398,9 @@ local function table_fonts(buf, para)
           for _, k in ipairs(markup.SPAN_KEYS) do
             local v = known[props][k] or false
             local measure = v and (pformat.measure(k, v) or v) or false
+            if k == "color" and measure == "000000" then -- (black: as none of its own, automatic)
+              v, measure = false, false
+            end
             if not weight[k][measure] then
               order[k][#order[k] + 1], weight[k][measure] = measure, { n = 0, v = v }
             end
@@ -436,11 +439,11 @@ local function pieces(buf, para, new)
   if para.cell and not block.align and para.cell.align ~= "left" then -- (its column's, unless it has its own)
     block.align = para.cell.align
   end
-  local cell_own -- (a cell's: its text's font and size of its own, against its table's; nothing else)
+  local cell_own -- (a cell's: its text's font, size and colour of its own, against its table's; nothing else)
   if para.cell then
     assert(not block.para_bad, block.para_bad)
     for k in pairs(block.para or {}) do
-      assert(k == "font" or k == "size", ("in a table cell, only the font and size of its text can be given: %s"):format(k))
+      assert(vim.tbl_contains(markup.SPAN_KEYS, k), ("in a table cell, only the font, size and colour of its text can be given: %s"):format(k))
     end
     cell_own = block.para
   end
@@ -618,7 +621,7 @@ local function pieces(buf, para, new)
     else
       local weight, order, at, props_now = {}, {}, walker(runs), runs[1] and doc.run[runs[1][1]] or inherited
       for _, ch in ipairs(chars) do
-        if ch.ch ~= "" and ch.ch ~= "\n" and not ch[key] then
+        if ch.ch ~= "" and ch.ch ~= "\n" and not ch[key] and not (key == "color" and ch.link) then
           local run = at(ch)
           props_now = run and doc.run[run[1]] or props_now
           local v = props_now and own(props_now)[key] or false
@@ -760,16 +763,20 @@ local function pieces(buf, para, new)
       -- the same formatting as the text before it: one piece (its text is collected, joined below)
       local last = out[#out]
       assert(not ch.span_bad, ch.span_bad) -- (a span of text's attributes: right)
-      local font, size = ch.font or fonts.font, ch.size or fonts.size
+      -- (a link's text: its colour as it is, the link's, unless a span says one)
+      local font, size, color = ch.font or fonts.font, ch.size or fonts.size, ch.color
+      if color == nil and not ch.link then -- (false: none of its own, its style's: written so)
+        color = fonts.color
+      end
       local same = last and type(last.text) == "table" and last.props == (props or nil) and last.link == ch.link
-        and last.insert == insert and last.font == font and last.size == size
+        and last.insert == insert and last.font == font and last.size == size and last.color == color
       for _, flag in ipairs(markup.FLAGS) do
         same = same and last[flag] == (ch[flag] or false)
       end
       if same then
         last.text[#last.text + 1] = ch.ch
       else
-        local piece = { text = { ch.ch }, props = props or nil, link = ch.link, insert = insert, font = font, size = size }
+        local piece = { text = { ch.ch }, props = props or nil, link = ch.link, insert = insert, font = font, size = size, color = color }
         for _, flag in ipairs(markup.FLAGS) do
           piece[flag] = ch[flag] or false -- (false: as the formats say it)
         end
@@ -782,7 +789,7 @@ local function pieces(buf, para, new)
         while nxt and nxt.ch ~= "" and nxt.ch ~= "\n" and nxt.ch ~= "￼" and not nxt.span_bad
           and not (events[e] and events[e][1] == k + 1)
           and nxt.link == ch.link and nxt.b == ch.b and nxt.i == ch.i and nxt.u == ch.u and nxt.s == ch.s
-          and nxt.h == ch.h and nxt.sup == ch.sup and nxt.sub == ch.sub and nxt.font == ch.font and nxt.size == ch.size do
+          and nxt.h == ch.h and nxt.sup == ch.sup and nxt.sub == ch.sub and nxt.font == ch.font and nxt.size == ch.size and nxt.color == ch.color do
           local r2 = run_at(nxt)
           if r2 and doc.run[r2[1]] ~= props then
             break
@@ -821,8 +828,9 @@ local function fonts_of(block, spans, shown)
   local base = block.font_base or {}
   for _, key in ipairs(markup.SPAN_KEYS) do
     local inherit = block.font_inherit or base -- (what text that says nothing shows)
-    local function value(s)
-      return s.text and not s.deletion and not (s.image or s.math or s.footnote or s.field) and (s["run_" .. key] or inherit[key] or base[key]) or nil
+    local function value(s) -- (a link's colour is the link's: as its underline, not its text's)
+      return s.text and not s.deletion and not (s.image or s.math or s.footnote or s.field) and not (key == "color" and s.link)
+        and (s["run_" .. key] or inherit[key] or base[key]) or nil
     end
     local function same(a, b) -- (as measured: a font whatever its case)
       return pformat.measure(key, a) == pformat.measure(key, b)
@@ -1279,7 +1287,7 @@ local function open(buf, path)
     for i, k in ipairs(candidates) do
       local b = paras[k].block
       if b.no_text then -- (only images...: the font and size of the run it is in)
-        b.para = vim.tbl_extend("force", b.para or {}, { font = run.attrs.font, size = run.attrs.size })
+        b.para = vim.tbl_extend("force", b.para or {}, { font = run.attrs.font, size = run.attrs.size, color = run.attrs.color })
       end
       local own = { align = b.align, attrs = b.para or {} }
       local function shared(j) -- (the j-th next one has it too)
@@ -1302,9 +1310,12 @@ local function open(buf, path)
       for _, para in ipairs(list) do
         for _, s in ipairs(para.spans) do
           if s.text and s.text ~= "" and not s.deletion and not (s.image or s.math or s.footnote or s.field) then
-            for _, key in ipairs(markup.SPAN_KEYS) do
+            for _, key in ipairs(s.link and { "font", "size" } or markup.SPAN_KEYS) do
               local v = s["run_" .. key] or false
               local m = v and (pformat.measure(key, v) or v) or false
+              if key == "color" and m == "000000" then -- (black: as none of its own, automatic)
+                v, m = false, false
+              end
               out[key] = out[key] or { order = {}, n = {}, v = {} }
               if not out[key].n[m] then
                 table.insert(out[key].order, m)
@@ -2024,7 +2035,7 @@ local function spans_of(chars, inside, flags)
   return vim.tbl_map(function(c)
     local span = { text = c.ch ~= "\n" and c.ch or nil, link = c.link, line_break = c.ch == "\n" or nil,
       image = c.image, math = c.math, footnote = c.footnote, field = c.field, page_break = c.page_break,
-      font = c.font, size = c.size }
+      font = c.font, size = c.size, color = c.color }
     for _, flag in ipairs(markup.FLAGS) do
       span[flag] = c[flag]
       if flags and inside(c) and flags[flag] ~= nil then

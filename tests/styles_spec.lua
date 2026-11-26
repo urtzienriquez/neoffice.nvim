@@ -83,11 +83,11 @@ for _, ext in ipairs({ "docx", "odt" }) do
       H.save()
       assert.equals(before, H.bytes(path))
       assert.truthy(table.concat(errors, "\n"):find("not a paragraph style of this document: Nonsense", 1, true))
-      api.nvim_buf_set_lines(0, 2, 3, false, { "  " .. BODY[ext] .. ": {colour = red}" })
+      api.nvim_buf_set_lines(0, 2, 3, false, { "  " .. BODY[ext] .. ": {shadow = red}" })
       H.save()
       vim.notify = notify
       assert.equals(before, H.bytes(path))
-      assert.truthy(table.concat(errors, "\n"):find("not a style's attribute: colour", 1, true))
+      assert.truthy(table.concat(errors, "\n"):find("not a style's attribute: shadow", 1, true))
     end)
 
     it("completes a style's name and its attributes", function()
@@ -242,3 +242,23 @@ describe("comments at the top", function()
     assert.is_nil(vim.iter(H.paras()):find(function(p) return p:find("size = 30pt", 1, true) end))
   end)
 end)
+
+for _, ext in ipairs({ "docx", "odt" }) do
+  describe(ext .. " a style's colour", function()
+    before_each(function() neo.config.styles = true end)
+    after_each(function() neo.config.styles = false end)
+
+    it("changes the style, and the styles based on it keep theirs", function()
+      local path = H.copy("rich." .. ext)
+      H.open(path)
+      local st = line_of(BODY[ext])
+      assert.is_nil(st.attrs.color) -- (black, automatic: unsaid)
+      local text = H.lines()[st.row]
+      api.nvim_buf_set_lines(0, st.row - 1, st.row, false, { (text:gsub("}$", ", color = darkred}")) })
+      H.reopen()
+      assert.equals("darkred", line_of(BODY[ext]).attrs.color)
+      assert.is_nil(line_of("First Paragraph").attrs.color) -- (based on it: as it showed)
+      assert.truthy(zip.read(path, STYLES[ext]):find(ext == "docx" and 'w:val="800000"' or 'fo:color="#800000"', 1, true))
+    end)
+  end)
+end

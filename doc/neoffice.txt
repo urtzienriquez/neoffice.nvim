@@ -127,7 +127,7 @@ inactive, as if it weren't there. The lines at the top are highlighted as YAML
 (as an R Markdown file's), where tree-sitter has a YAML parser.
 
 Each line is what the style gives (following the styles it is based on, and
-the document's defaults): `font`, `size`, `align`, `bold`, `italic`, and the
+the document's defaults): `font`, `size`, `color`, `align`, `bold`, `italic`, and the
 format's attributes below. Editing a line changes the style itself, so every
 paragraph of it follows (in the whole document: its headers and footnotes
 too), as in Word and LibreOffice; a style based on it keeps what its own line
@@ -219,6 +219,7 @@ alone all of them: >
   `line`                          line spacing: `single`, `1.5`, `double`, a
                                   multiple, or a length (exactly that)
   `font`, `size`                  the font of its text and its size (`11pt`)
+  `color`                         the colour of its text (`red`, `#1f4e79`)
 
 A format is what differs from the style: `none` is the style's (`align =
 none`: the style's alignment). Opened, each line says only what changes
@@ -254,6 +255,18 @@ language server completes fonts: those of the document first, then those
 installed (from fontconfig); any word of a name finds it (`roman`, `new rom`:
 Times New Roman). Right after `font = ` your completion menu may need asking
 for (<C-Space> in blink.cmp), or a letter typed.
+
+Colour goes the same way, `color` (or `colour`): a few words in a span
+(`[Important]{color = red}`), the paragraphs under a format's line
+(`{color = darkblue}`, `none` for their style's), a table cell's text
+(`| {color = red} ... |`), a style at the top (`Normal: {..., color = darkred}`).
+A colour is a name (red, blue, darkblue, darkgreen, darkred, darkgray,
+lightgray, black, white, yellow, green, cyan, magenta, and their dark ones)
+or `#rrggbb`; shown by its name when it has one. Black is the colour text
+has when it says none ("automatic"): it shows nothing, nor does a grey that
+looks black (#222222, as text pasted from web pages has), nor a link's blue
+(the link's, as its underline). A colour you delete goes back to what the
+text would have without it.
 Changing a format's font or size changes the text of the paragraphs under
 it; writing only what changes, as for everything else. A new paragraph takes
 the font of the format it is under.

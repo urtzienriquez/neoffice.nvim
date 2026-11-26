@@ -336,7 +336,7 @@ local function theme_font(ctx, which) -- (the theme's latin font: "minor" for th
   end
   return ctx.theme_fonts[which]
 end
-local function rpr_font(ctx, rpr) -- (what run properties say: { font, size }, nil for what they don't)
+local function rpr_font(ctx, rpr) -- (what run properties say: { font, size, color }, nil for what they don't)
   local out = {}
   local fonts = rpr and xml.child(rpr, "w:rFonts")
   if fonts then
@@ -349,6 +349,9 @@ local function rpr_font(ctx, rpr) -- (what run properties say: { font, size }, n
   local sz = rpr and xml.child(rpr, "w:sz")
   local half = sz and tonumber(xml.attr(sz, "w:val") or "")
   out.size = half and require("neoffice.paras").pt(half / 2)
+  local color = rpr and xml.child(rpr, "w:color") -- ("auto", automatic: black, said; a theme's colour: its value)
+  local val = color and xml.attr(color, "w:val") or nil
+  out.color = val and (val == "auto" and "black" or markup.text_color(val)) or nil
   return out
 end
 local function style_font(ctx, id, paragraph) -- (a style's, following its chain; a paragraph's, from the defaults)
@@ -390,7 +393,7 @@ local function own_font(ctx, rpr)
   local rstyle = rpr and xml.child(rpr, "w:rStyle")
   if rstyle then
     local s = style_font(ctx, xml.attr(rstyle, "w:val"))
-    own.font, own.size = own.font or s.font, own.size or s.size
+    own.font, own.size, own.color = own.font or s.font, own.size or s.size, own.color or s.color
   end
   return own
 end
@@ -411,14 +414,14 @@ function M.font_default(ctx) -- (the document's: its default paragraph style's, 
   end)
   if not flagged and has(styles, "w:style", "w:styleId", "Normal") then
     local base = style_font(ctx, "Normal", true)
-    return { font = base.font, size = base.size or "10pt" }
+    return { font = base.font, size = base.size or "10pt", color = base.color or "black" }
   end
   return M.font_base(ctx, nil)
 end
 function M.font_base(ctx, ppr)
   local style = ppr and xml.child(ppr, "w:pStyle")
   local base = style_font(ctx, style and xml.attr(style, "w:val"), true) -- (cached, by style)
-  return { font = base.font, size = base.size or "10pt" } -- (Word's size when nothing says one)
+  return { font = base.font, size = base.size or "10pt", color = base.color or "black" } -- (Word's size when nothing says one; its colour: automatic, black)
 end
 
 local function block_of(ctx, ppr)
@@ -553,7 +556,7 @@ local function field_end(children, k)
 end
 
 local function read_para(ctx, p)
-  local spans, block = {}, {}
+  local spans, block = {}, block_of(ctx, nil) -- (one without properties: the default style's, as Word reads it)
   local function add(span)
     spans[#spans + 1] = span
   end
@@ -614,7 +617,7 @@ local function read_para(ctx, p)
     local rpr = xml.child(r, "w:rPr")
     local f = flags(rpr)
     local own = own_font(ctx, rpr)
-    f.run_font, f.run_size = own.font, own.size
+    f.run_font, f.run_size, f.run_color = own.font, own.size, own.color
     local change = rpr and xml.child(rpr, "w:rPrChange")
     change = change and format_change(r, rpr, change)
     if change then
@@ -1022,6 +1025,11 @@ local function set_size(rpr, size)
   end
 end
 
+-- A run's colour set (a name or "#rrggbb"; false: none of its own, its style's).
+local function set_color(rpr, color)
+  set_flag(rpr, "w:color", color and markup.color_hex(color):upper())
+end
+
 local function text_run(piece, ctx, base)
   local original = piece.props -- the <w:r> this text came from, if any
   local rpr = original and xml.child(original, "w:rPr")
@@ -1035,10 +1043,11 @@ local function text_run(piece, ctx, base)
   if have.sup ~= piece.sup or have.sub ~= piece.sub then
     set_flag(rpr, "w:vertAlign", piece.sup and "superscript" or piece.sub and "subscript")
   end
-  if ctx and (piece.font ~= nil or piece.size ~= nil) then -- its font and size: only if what it shows changes
+  if ctx and (piece.font ~= nil or piece.size ~= nil or piece.color ~= nil) then -- its font, size, colour: only if what it shows changes
     local paras = require("neoffice.paras")
     local own = own_font(ctx, rpr)
-    for key, set in pairs({ font = set_font, size = set_size }) do
+    base = vim.tbl_extend("keep", base or {}, { color = "black" })
+    for key, set in pairs({ font = set_font, size = set_size, color = set_color }) do
       local want = piece[key]
       if want ~= nil and paras.measure(key, want or base[key]) ~= paras.measure(key, own[key] or base[key]) then
         set(rpr, want)
@@ -1605,6 +1614,7 @@ function M.style_view(ctx, id)
   end
   local font = style_font(ctx, id, true)
   out.font, out.size = font.font, font.size or "10pt"
+  out.color = font.color and markup.color_hex(font.color) ~= "000000" and font.color or nil -- (black, automatic: unsaid)
   local defaults = xml.find(styles_el(ctx), "w:docDefaults")
   local function find(path, tag) -- (in the first style of the chain that says, else the defaults)
     for _, st in ipairs(chain_of(ctx, id)) do
@@ -1681,6 +1691,8 @@ function M.set_style(ctx, id, changes)
         set_font(rpr, value)
       elseif key == "size" then
         set_size(rpr, value)
+      elseif key == "color" then -- (none: automatic, said, over what a style it is based on gives)
+        set_flag(rpr, "w:color", value and markup.color_hex(value):upper() or "auto")
       elseif key == "bold" or key == "italic" then
         set_flag(rpr, key == "bold" and "w:b" or "w:i", value and true or "0")
       end

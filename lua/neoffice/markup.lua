@@ -48,6 +48,21 @@ function M.color(s)
   s = (s or ""):lower()
   return (M.COLORS[s] or s:match("^#%x%x%x%x%x%x$")) and s or nil
 end
+-- A text's colour as shown: its name if it has one ("red"), else "#rrggbb"; nil if it isn't one.
+-- From a name, "#rrggbb", or six hex digits (as Word writes them); "auto" (Word's) is none.
+function M.text_color(v)
+  v = vim.trim(v or ""):lower()
+  if M.COLORS[v] then
+    return v
+  end
+  local hex = v:match("^#?(%x%x%x%x%x%x)$")
+  return hex and M.color_of_rgb(hex) or nil
+end
+-- Its six hex digits ("ff0000").
+function M.color_hex(v)
+  local c = M.text_color(v)
+  return c and (M.COLORS[c] or c:sub(2)) or nil
+end
 -- The highlight colour of a hex value: its name if it has one.
 function M.color_of_rgb(hex)
   hex = (hex or ""):lower():gsub("^#", "")
@@ -579,17 +594,24 @@ function M.attributes(text, names)
   return list, table.concat(tidy, ", ")
 end
 
--- The attributes of a span of text ("[words]{font = Arial, size = 9pt}"): { font, size }, or nil
--- and why. (Its size as shown: in pt.)
-M.SPAN_KEYS = { "font", "size" }
+-- The attributes of a span of text ("[words]{font = Arial, size = 9pt, color = red}"): { font,
+-- size, color }, or nil and why. (Its size as shown: in pt; its colour: by name, or "#rrggbb".)
+M.SPAN_KEYS = { "font", "size", "color" }
 function M.span_attrs(text)
   local out, any = {}, false
   for _, a in ipairs((M.attributes(text))) do
-    if a.name ~= "font" and a.name ~= "size" then
-      return nil, ("not an attribute of text: %s (they are font, size)"):format(a.name or a.value)
+    local name = a.name == "colour" and "color" or a.name
+    if name ~= "font" and name ~= "size" and name ~= "color" then
+      return nil, ("not an attribute of text: %s (they are font, size, color)"):format(a.name or a.value)
     end
+    a.name = name
     local value = vim.trim(a.value)
-    if a.name == "size" then
+    if a.name == "color" then
+      value = M.text_color(value)
+      if not value then
+        return nil, "not a colour: " .. a.value .. " (red, darkblue... or #rrggbb)"
+      end
+    elseif a.name == "size" then
       local cm = M.cm(value)
       if not cm or cm <= 0 then
         return nil, "not a size: " .. a.value .. " (11pt, 12pt...)"
@@ -602,7 +624,7 @@ function M.span_attrs(text)
     out[a.name], any = value, true
   end
   if not any then
-    return nil, "a font or a size is missing (font = Arial, size = 9pt)"
+    return nil, "a font, a size or a colour is missing (font = Arial, size = 9pt, color = red)"
   end
   return out
 end
@@ -621,7 +643,7 @@ function M.render_span_attrs(s)
 end
 -- (what tells spans of text apart: their font and size)
 local function span_key(s)
-  return (s.font or s.size) and ((s.font or "") .. "|" .. (s.size or "")) or nil
+  return (s.font or s.size or s.color) and ((s.font or "") .. "|" .. (s.size or "") .. "|" .. (s.color or "")) or nil
 end
 
 -- The cells of a table row line: for each, { col = where its text starts (0-based), text }, with
@@ -891,7 +913,7 @@ function M.same(line, spans)
     k = k + 1
     local c = chars[k]
     if not c or kind_of(c) or c.ch ~= ch or (c.link or "") ~= (fmt.link or "") or (c.font or "") ~= (fmt.font or "")
-      or (c.size or "") ~= (fmt.size or "") then
+      or (c.size or "") ~= (fmt.size or "") or (c.color or "") ~= (fmt.color or "") then
       return false
     end
     if not (c.b or c.i or c.u or c.s or c.h or c.sup or c.sub) then -- (most: none, on both sides)
@@ -1046,7 +1068,7 @@ function M.parse(line)
       s = cur.s == true or nil, h = cur.h or nil, sup = cur.sup == true or nil, sub = cur.sub == true or nil,
     }
     if span_close then -- (in a span of text in another font)
-      c.font, c.size, c.span_bad = cur.font, cur.size, cur.span_bad
+      c.font, c.size, c.color, c.span_bad = cur.font, cur.size, cur.color, cur.span_bad
     end
     chars[#chars + 1] = c
     return at + #ch
@@ -1118,7 +1140,7 @@ function M.parse(line)
       end
       local link, b, i, u, s, h, sup, sub = cur.link, cur.b == true or nil, cur.i == true or nil, cur.u == true or nil,
         cur.s == true or nil, cur.h or nil, cur.sup == true or nil, cur.sub == true or nil
-      local in_span, font, size, bad = span_close, cur.font, cur.size, cur.span_bad
+      local in_span, font, size, color, bad = span_close, cur.font, cur.size, cur.color, cur.span_bad
       local bare = not (link or b or i or u or s or h or sup or sub or in_span) -- (plain text: just where it is, and what)
       local count = #chars
       while pos < stop do
@@ -1130,7 +1152,7 @@ function M.parse(line)
         else
           c = { col = pos - 1, ch = line:sub(pos, pos + len - 1), link = link, b = b, i = i, u = u, s = s, h = h, sup = sup, sub = sub }
           if in_span then
-            c.font, c.size, c.span_bad = font, size, bad
+            c.font, c.size, c.color, c.span_bad = font, size, color, bad
           end
         end
         count = count + 1
@@ -1150,7 +1172,7 @@ function M.parse(line)
       field, after_field = enclosed(line, pos + 3, "⟧")
     end
     if pos == span_close and pos ~= link_close then
-      cur.font, cur.size, cur.span_bad, pos = nil, nil, nil, span_after
+      cur.font, cur.size, cur.color, cur.span_bad, pos = nil, nil, nil, nil, span_after
       span_close, span_after = unpack(table.remove(spans_open) or {})
     elseif pos == link_close then
       cur.link, link_close, pos = nil, nil, line:find(")", pos, true) + 1
@@ -1207,7 +1229,7 @@ function M.parse(line)
       local attrs, bad = M.span_attrs(inside)
       table.insert(spans_open, { span_close, span_after })
       span_close, span_after = close, after
-      cur.font, cur.size, cur.span_bad = attrs and attrs.font, attrs and attrs.size, bad
+      cur.font, cur.size, cur.color, cur.span_bad = attrs and attrs.font, attrs and attrs.size, attrs and attrs.color, bad
       pos = pos + 1
     elseif c == "[" and not cur.link and find_link(pos) then
       link_close, cur.link = find_link(pos)

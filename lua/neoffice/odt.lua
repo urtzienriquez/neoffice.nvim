@@ -364,6 +364,11 @@ local function props_font(ctx, props, out) -- (text properties, over what `out` 
     elseif size and markup.cm(size) then
       out.size = paras.pt(markup.cm(size) * 72 / 2.54)
     end
+    if xml.attr(props, "style:use-window-font-color") == "true" then -- (automatic: black, said)
+      out.color = "black"
+    elseif xml.attr(props, "fo:color") then
+      out.color = markup.text_color(xml.attr(props, "fo:color")) or out.color
+    end
   end
   return out
 end
@@ -424,6 +429,7 @@ function M.font_base_of(ctx, name)
   for k = #chain, 1, -1 do
     out = props_font(ctx, xml.child(chain[k], "style:text-properties"), out)
   end
+  out.color = out.color or "black" -- (automatic)
   return out
 end
 -- (a font-face for a font, so a style can name it: the document's own if it has one)
@@ -559,7 +565,7 @@ local function read_para(ctx, p)
     local function text(s)
       if s ~= "" then
         local own = M.run_font(ctx, f.style)
-        add(merge(flags(ctx, nil, f), { text = s, props = f.style, link = f.link, run_font = own.font, run_size = own.size }))
+        add(merge(flags(ctx, nil, f), { text = s, props = f.style, link = f.link, run_font = own.font, run_size = own.size, run_color = own.color }))
       end
     end
     local k = 0
@@ -1030,7 +1036,8 @@ local function style_for(ctx, piece, base, inherit)
   local inner_el = inner and ctx.styles[inner]
   local without = inner_el and inner_el.parent == ctx.auto
     and M.run_font(ctx, vim.list_extend(vim.list_slice(outer), { xml.attr(inner_el, "style:parent-style-name") }))
-  for _, key in ipairs({ "font", "size" }) do
+  base = vim.tbl_extend("keep", base, { color = "black" })
+  for _, key in ipairs({ "font", "size", "color" }) do
     local want = piece[key]
     if want ~= nil and paras.measure(key, want or base[key]) ~= paras.measure(key, own[key] or inherit[key] or base[key]) then
       if want then
@@ -1042,11 +1049,11 @@ local function style_for(ctx, piece, base, inherit)
       end
     end
   end
-  if vim.iter(FLAGS):all(function(k) return have[k] == piece[k] end) and fonts.font == nil and fonts.size == nil then -- (false: to take out)
+  if vim.iter(FLAGS):all(function(k) return have[k] == piece[k] end) and fonts.font == nil and fonts.size == nil and fonts.color == nil then -- (false: to take out)
     return chain
   end
   local key = table.concat(vim.tbl_map(function(k) return tostring(piece[k]) end, FLAGS), "|") .. "|" .. (inner or "")
-    .. "|" .. tostring(fonts.font) .. "|" .. tostring(fonts.size)
+    .. "|" .. tostring(fonts.font) .. "|" .. tostring(fonts.size) .. "|" .. tostring(fonts.color)
   if not ctx.made[key] then
     automatic(ctx)
     local base = inner and ctx.styles[inner]
@@ -1082,6 +1089,10 @@ local function style_for(ctx, piece, base, inherit)
       for _, attr in ipairs({ "fo:font-size", "style:font-size-asian", "style:font-size-complex" }) do
         xml.set_attr(props, attr, fonts.size or nil)
       end
+    end
+    if fonts.color ~= nil then -- (false: none of its own, automatic)
+      xml.set_attr(props, "fo:color", fonts.color and "#" .. markup.color_hex(fonts.color) or nil)
+      xml.set_attr(props, "style:use-window-font-color", nil)
     end
     xml.append(ctx.auto, style)
     ctx.styles[name], ctx.made[key] = style, name
@@ -1397,6 +1408,7 @@ function M.style_view(ctx, name)
   end
   local font = M.font_base_of(ctx, name)
   out.font, out.size = font.font, font.size
+  out.color = font.color and markup.color_hex(font.color) ~= "000000" and font.color or nil -- (black, automatic: unsaid)
   out.align = M.style_align(ctx, name)
   local weight, slant -- (the first of its chain that says, else the default style)
   local cur = name
@@ -1444,6 +1456,9 @@ function M.set_style(ctx, name, changes)
         for _, attr in ipairs({ "fo:font-size", "style:font-size-asian", "style:font-size-complex" }) do
           xml.set_attr(props, attr, value or nil)
         end
+      elseif key == "color" then -- (none: automatic, said, over what a style it is based on gives)
+        xml.set_attr(props, "fo:color", value and "#" .. markup.color_hex(value) or nil)
+        xml.set_attr(props, "style:use-window-font-color", not value and "true" or nil)
       elseif key == "bold" or key == "italic" then
         for _, suffix in ipairs({ "", "-asian", "-complex" }) do
           local attr = (suffix == "" and "fo:" or "style:") .. (key == "bold" and "font-weight" or "font-style") .. suffix

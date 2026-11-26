@@ -44,7 +44,7 @@ describe("fonts in the markup", function()
     local line = markup.render({ { text = "a [b]{c} d" } })
     assert.equals("a \\[b]{c} d", line)
     assert.is_true(markup.same(line, { { text = "a [b]{c} d" } }))
-    local _, chars = markup.parse("[x]{colour = red}")
+    local _, chars = markup.parse("[x]{shadow = red}")
     assert.truthy(chars[1].span_bad:find("font, size", 1, true))
     assert.same({ font = "Times New Roman", size = "11pt" }, markup.span_attrs("font = Times New Roman, size = 11pt"))
   end)
@@ -111,7 +111,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
 
     it("doesn't write a span's attribute it doesn't know: the save says so and changes nothing", function()
       local before = H.bytes(path)
-      H.replace(at("More of it."), "of it", "[of it]{colour = red}")
+      H.replace(at("More of it."), "of it", "[of it]{shadow = red}")
       local errors = {}
       local notify = vim.notify
       vim.notify = function(msg) errors[#errors + 1] = msg end
@@ -312,7 +312,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
       H.save()
       vim.notify = notify
       assert.equals(before, H.bytes(path))
-      assert.truthy(table.concat(errors, "\n"):find("only the font and size", 1, true))
+      assert.truthy(table.concat(errors, "\n"):find("only the font, size and colour", 1, true))
     end)
 
     it("completes them in braces at a cell's start", function()
@@ -326,6 +326,114 @@ for _, ext in ipairs({ "docx", "odt" }) do
       end
       local labels = vim.tbl_map(function(i) return i.label end, items)
       assert.truthy(vim.tbl_contains(labels, "size = 11pt"), vim.inspect(labels))
+    end)
+  end)
+end
+
+-- text in black said (as Word and LibreOffice often write it): no colour of its own, as shown
+local COLOURED = {
+  docx = function(name, text)
+    if name ~= "word/document.xml" then
+      return text
+    end
+    local p = '<w:p><w:r><w:rPr><w:color w:val="000000"/></w:rPr><w:t>Black text.</w:t></w:r></w:p>'
+    return (text:gsub("<w:body>", "<w:body>" .. p, 1))
+  end,
+  odt = function(name, text)
+    if name ~= "content.xml" then
+      return text
+    end
+    local style = '<style:style style:name="Blk" style:family="text"><style:text-properties fo:color="#000000"/></style:style>'
+    local p = '<text:p><text:span text:style-name="Blk">Black text.</text:span></text:p>'
+    return (text:gsub("<office:automatic%-styles>", "%0" .. style, 1):gsub("<office:text>", "%0" .. p, 1))
+  end,
+}
+local RED, DARKBLUE = { docx = 'w:val="FF0000"', odt = 'fo:color="#ff0000"' }, { docx = 'w:val="000080"', odt = 'fo:color="#000080"' }
+
+for _, ext in ipairs({ "docx", "odt" }) do
+  describe(ext .. " colours", function()
+    local path
+    local function main() return zip.read(path, H.MAIN[ext]) end
+    local function at(text) return vim.fn.index(H.paras(), text) + 1 end
+    before_each(function()
+      path = H.copy("rich." .. ext, COLOURED[ext])
+      H.open(path)
+    end)
+
+    it("show none for black text or a link's, and are written for a few words, and taken back", function()
+      for _, l in ipairs(H.lines()) do
+        assert.is_nil(l:find("color =", 1, true), l) -- (black said, a link's blue: no colour of its own)
+      end
+      H.replace(at("Black text."), "Black", "[Black]{color = red}")
+      H.reopen()
+      assert.truthy(at("[Black]{color = red} text.") > 0, table.concat(H.paras(), "\n"))
+      assert.truthy(main():find(RED[ext], 1, true))
+      H.replace(at("[Black]{color = red} text."), "[Black]{color = red}", "Black")
+      H.reopen()
+      assert.truthy(at("Black text.") > 0)
+      assert.is_nil(main():find(RED[ext], 1, true))
+      if H.has_libreoffice then
+        local ok, out = H.libreoffice_reads(path, "Black text.")
+        assert.is_true(ok, out)
+      end
+    end)
+
+    it("of the paragraphs under a format's line, and none for their style's again", function()
+      local r = H.row(at("Black text."))
+      api.nvim_buf_set_lines(0, r - 1, r - 1, false, { "{color = darkblue}" })
+      H.reopen()
+      assert.truthy(vim.tbl_contains(H.lines(), "{color = darkblue}"), table.concat(H.lines(), "\n"))
+      assert.truthy(main():find(DARKBLUE[ext], 1, true))
+      r = vim.fn.index(H.lines(), "{color = darkblue}") + 1
+      api.nvim_buf_set_lines(0, r - 1, r, false, { "{color = none}" })
+      H.reopen()
+      assert.is_false(vim.tbl_contains(H.lines(), "{color = darkblue}"))
+      assert.is_nil(main():find(DARKBLUE[ext], 1, true))
+    end)
+
+    it("isn't written when it isn't one: the save says so and changes nothing", function()
+      local before = H.bytes(path)
+      H.replace(at("Black text."), "Black", "[Black]{color = sparkly}")
+      local errors = {}
+      local notify = vim.notify
+      vim.notify = function(msg) errors[#errors + 1] = msg end
+      H.save()
+      vim.notify = notify
+      assert.equals(before, H.bytes(path))
+      assert.truthy(table.concat(errors, "\n"):find("not a colour: sparkly", 1, true))
+    end)
+
+    it("of a table cell's text, and its table's again when deleted", function()
+      path = H.copy("rich." .. ext, TABLED[ext])
+      H.open(path)
+      local r = vim.iter(ipairs(H.lines())):find(function(_, l) return l:find("^| 2016") end)
+      api.nvim_buf_set_text(0, r - 1, 2, r - 1, 2, { "{color = red} " })
+      H.reopen()
+      assert.truthy(H.lines()[r]:find("| {color = red} 2016", 1, true), H.lines()[r])
+      assert.truthy(main():find(RED[ext], 1, true))
+      local s, e = H.lines()[r]:find("{color = red} ", 1, true)
+      api.nvim_buf_set_text(0, r - 1, s - 1, r - 1, e, { "" })
+      H.reopen()
+      assert.is_nil(H.lines()[r]:find("{", 1, true), H.lines()[r])
+      assert.is_nil(main():find(RED[ext], 1, true))
+    end)
+
+    it("are completed after a format's braces and a span's", function()
+      local buf = api.nvim_get_current_buf()
+      assert(vim.wait(2000, function() return #vim.lsp.get_clients({ bufnr = buf, name = "neoffice_ls" }) > 0 end))
+      local function labels(text)
+        local r = H.row(at("Black text."))
+        api.nvim_buf_set_lines(0, r - 1, r, false, { text })
+        local params = { textDocument = { uri = vim.uri_from_bufnr(buf) }, position = { line = r - 1, character = #text } }
+        local items = {}
+        for _, res in pairs(vim.lsp.buf_request_sync(buf, "textDocument/completion", params, 2000) or {}) do
+          items = res.result and (res.result.items or res.result) or items
+        end
+        api.nvim_buf_set_lines(0, r - 1, r, false, { "Black text." })
+        return vim.tbl_map(function(i) return i.label end, items)
+      end
+      assert.truthy(vim.tbl_contains(labels("<=> {color = "), "red"))
+      assert.truthy(vim.tbl_contains(labels("Some [words]{"), "color = red"))
     end)
   end)
 end
