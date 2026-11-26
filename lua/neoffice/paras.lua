@@ -148,6 +148,7 @@ function M.parse_style(text)
   end
   return out
 end
+-- (a value with "#" in quotes: the lines at the top read as YAML, where " #" starts a comment)
 function M.render_style(attrs)
   local parts = {}
   for _, key in ipairs(M.STYLE_KEYS) do
@@ -155,7 +156,11 @@ function M.render_style(attrs)
     if v == true then
       parts[#parts + 1] = key
     elseif v and v ~= false then
-      parts[#parts + 1] = key .. " = " .. markup.attr_value(v)
+      local text = markup.attr_value(v)
+      if text:find("#", 1, true) and not text:find('^"') then
+        text = '"' .. text .. '"'
+      end
+      parts[#parts + 1] = key .. " = " .. text
     end
   end
   return table.concat(parts, ", ")

@@ -413,9 +413,9 @@ local function completion(buf, pos)
       align = { "left", "center", "right", "justify", "none" },
     }
     local keys = hbraces and pf.STYLE_KEYS or pbraces and pf.KEYS or markup.SPAN_KEYS
-    if hbraces then -- (a style says what it gives: no none)
+    if hbraces then -- (a style says what it gives: no none; "#..." in quotes, as YAML would read a comment)
       for key, list in pairs(VALUES) do
-        VALUES[key] = vim.tbl_filter(function(v) return v ~= "none" end, list)
+        VALUES[key] = vim.tbl_map(function(v) return v:find("^#") and '"' .. v .. '"' or v end, vim.tbl_filter(function(v) return v ~= "none" end, list))
       end
       VALUES.bold, VALUES.italic = { "" }, { "" }
     end

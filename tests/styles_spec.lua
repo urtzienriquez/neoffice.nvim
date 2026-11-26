@@ -262,3 +262,21 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
   end)
 end
+
+describe("a colour with # at the top", function()
+  it("is written in quotes (\" #\" starts a comment in YAML), read either way, and quoted by formatting", function()
+    local paras = require("neoffice.paras")
+    assert.equals('font = Calibri, color = "#4f81bd", bold', paras.render_style({ font = "Calibri", color = "#4f81bd", bold = true }))
+    assert.same({ color = "#4f81bd", bold = true }, paras.parse_style('color = "#4f81bd", bold'))
+    assert.same({ color = "#4f81bd", bold = true }, paras.parse_style("color = #4f81bd, bold"))
+    neo.config.styles = true
+    H.open(H.copy("rich.docx"))
+    neo.config.styles = false
+    local st = require("neoffice.markup").header(H.lines()).styles[1]
+    local line = H.lines()[st.row]
+    api.nvim_buf_set_lines(0, st.row - 1, st.row, false, { (line:gsub("}$", ", color = #c00000}")) })
+    local edits = require("neoffice.format").edits(api.nvim_get_current_buf())
+    vim.lsp.util.apply_text_edits(edits, api.nvim_get_current_buf(), "utf-8")
+    assert.truthy(H.lines()[st.row]:find('color = "#c00000"', 1, true), H.lines()[st.row])
+  end)
+end)
