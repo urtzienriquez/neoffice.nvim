@@ -240,3 +240,16 @@ describe("cropped images", function()
     end)
   end
 end)
+
+describe("an image placed a little left of or above where it is measured from", function()
+  it("reads its place back (x = -0.1cm), on its line of floating images", function()
+    local floats, markup = require("neoffice.floats"), require("neoffice.markup")
+    assert.same({ float = "left", place = "page", x = "-0.1cm", y = "13.4cm" }, floats.parse("float = left, place = page, x = -0.1cm, y = 13.4cm"))
+    local line = "![](a.png){width = 7.4cm, float = left, place = page, x = -0.1cm, y = 13.4cm}![](b.png){width = 9.5cm, float = left, place = page, x = 7.3cm, y = 13.4cm}"
+    assert.is_true(markup.floats_only(line))
+    local list = require("neoffice").paragraphs({ "Before.", "", line, "{after = none} ![](c.png){width = 15cm}" })
+    assert.equals(2, #list) -- (its images and its text: one paragraph)
+    local geo = floats.geometry({ float = "left", place = "page", x = "-0.1cm", y = "1cm" }, { left = 2, text = 16, top = 2 }, 5)
+    assert.is_true(math.abs(geo.h.offset + 0.1) < 1e-9, vim.inspect(geo))
+  end)
+end)

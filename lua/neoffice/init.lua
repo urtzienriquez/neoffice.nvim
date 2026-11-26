@@ -1261,7 +1261,8 @@ local function open(buf, path)
   end
   local opened = M.paragraphs(lines, alone)
   for k, block in ipairs(opened) do
-    assert(block.text == texts[k], "neoffice: paragraph layout mismatch" .. (vim.env.NEOFFICE_DEBUG and (" " .. k .. ": " .. vim.inspect(block.text) .. " ~= " .. vim.inspect(texts[k])) or "")) -- (see markup.render)
+    assert(block.text == texts[k], "neoffice: paragraph layout mismatch" .. (vim.env.NEOFFICE_DEBUG and (" " .. k .. ": " .. vim.inspect(block.text) .. " ~= " .. vim.inspect(texts[k])
+      .. "\n" .. table.concat(vim.list_slice(lines, math.max(1, block.first - 3), block.last + 3), "\n")) or "")) -- (see markup.render)
   end
   -- what each paragraph is as opened (doc.sigs, to tell at a save which changed): worked out once
   -- the text shows (see M.finish_sigs)

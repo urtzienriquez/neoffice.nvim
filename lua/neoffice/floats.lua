@@ -67,6 +67,12 @@ end
 local function is_length(v)
   return markup.cm(v or "") ~= nil
 end
+-- (a place may be left of or above where it is measured from: "x = -0.1cm")
+local function signed_cm(v)
+  local sign, rest = (v or ""):match("^(%-?)(.*)$")
+  local cm = markup.cm(rest)
+  return cm and (sign == "-" and -cm or cm)
+end
 
 -- The attribute a value alone stands for ("right": float, "12cm": width), or nil.
 function M.name_of(value)
@@ -94,7 +100,8 @@ function M.parse(text)
     local ok = M.VALUES[name] and vim.tbl_contains(M.VALUES[name], value)
       or (name == "width") and (is_length(value) or value:match("^[%d.]+%%$"))
       or name:match("^crop%-") and percent and percent < 100
-      or (name == "gap" or name == "x" or name == "y") and is_length(value)
+      or name == "gap" and is_length(value)
+      or (name == "x" or name == "y") and signed_cm(value) ~= nil
     if not ok then
       return nil, ("not a value of %s: %s (%s)"):format(name, a.value,
         M.VALUES[name] and table.concat(M.VALUES[name], ", ") or name:match("^crop%-") and "a percentage of the image, under 100%"
@@ -212,7 +219,7 @@ function M.geometry(attrs, page, width)
     gap = attrs.gap and markup.cm(attrs.gap) or M.GAP,
     width = width,
   }
-  local x, y = attrs.x and markup.cm(attrs.x), attrs.y and markup.cm(attrs.y)
+  local x, y = attrs.x and signed_cm(attrs.x), attrs.y and signed_cm(attrs.y)
   if attrs.place == "page" then
     geo.h = { rel = "page", offset = x or (float == "right" and page.left + page.text - (width or 0)) or (float == "center" and page.left + (page.text - (width or 0)) / 2) or page.left }
     geo.v = { rel = "page", offset = y or page.top }
