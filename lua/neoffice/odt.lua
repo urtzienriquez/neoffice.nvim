@@ -750,15 +750,22 @@ function M.load(path)
   end
   local paras = {}
   local body = assert(xml.find(ctx.root, "office:text"), "no office:text")
+  ctx.nested_tables = 0
   for _, p in ipairs(xml.collect(body, PARA, { ["text:tracked-changes"] = true })) do
-    local spans, block = read_para(ctx, p)
-    -- its boxes: their paragraphs first (not in a table's cell: there, a box stays as it is)
-    local in_cell = false
+    -- (in a table in a table's cell: not shown, kept as it is, as its cell's other paragraphs are written in place)
+    local in_cell, tables = false, 0
     local up = p.parent
     while up do
       in_cell = in_cell or up.tag == "table:table-cell"
+      tables = tables + (up.tag == "table:table" and 1 or 0)
       up = up.parent
     end
+    if tables > 1 then
+      ctx.nested_tables = ctx.nested_tables + 1
+      goto next_para
+    end
+    local spans, block = read_para(ctx, p)
+    -- its boxes: their paragraphs first (not in a table's cell: there, a box stays as it is)
     local own = {}
     for _, s in ipairs(spans) do
       if s.box and not in_cell then
@@ -772,6 +779,7 @@ function M.load(path)
       end
     end
     paras[#paras + 1] = { node = p, block = block, spans = own }
+    ::next_para::
   end
   for _, c in pairs(ctx.comments) do
     c.was_resolved = c.resolved

@@ -206,9 +206,10 @@ end
 -- Cell padding (cm): left and right, and above and below for each row height.
 M.PADDING = 0.19
 M.HEIGHT = { compact = 0.05, normal = 0.1, tall = 0.2 }
-function M.height_of(cm) -- (the row height of a padding, if it is one of them)
+function M.height_of(cm) -- (the row height of a padding, if it is one of them: as neoffice writes it, to
+  -- a twip; not LibreOffice's own 0.097cm, that would make its tables seem typeset here)
   for name, value in pairs(M.HEIGHT) do
-    if cm and math.abs(cm - value) < 0.006 then
+    if cm and math.abs(cm - value) < 0.001 then
       return name
     end
   end

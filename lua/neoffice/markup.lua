@@ -396,6 +396,10 @@ function M.block(line)
     if line:sub(start, start + #marker - 1) == marker then
       block.align, align_at, start = align, start, start + #marker
       break
+    elseif line:sub(start) == vim.trim(marker) then -- (alone, ending the text: an empty paragraph's, as a
+      -- table cell's, whose spaces at its end don't show)
+      block.align, align_at, start = align, start, #line + 1
+      break
     end
   end
   -- (its own format's attributes, after its mark or alone: "<=> {first = 0} ...", "{before = 6pt} ...";
@@ -529,7 +533,9 @@ end
 
 -- Whether a line holds only floating images (after its paragraph's marks, if any): such a line
 -- is joined to the next with nothing between, as the floating images of the paragraph below it.
-function M.floats_only(line)
+-- (`lead`: whether it starts with them, whatever comes after: text typed after a paragraph's floating
+-- images, on their line)
+function M.floats_only(line, lead)
   if not line:find("float", 1, true) then -- (quick: most lines)
     return false
   end
@@ -538,11 +544,11 @@ function M.floats_only(line)
   local any = false
   while pos <= #line do
     if line:sub(pos, pos + 1) ~= "![" then
-      return false
+      return lead and any or false
     end
     local _, _, after, _, attrs = M.image_at(line, pos)
     if not (after and attrs and attrs.attrs and floats.floating(attrs.attrs)) then
-      return false
+      return lead and any or false
     end
     pos, any = after, true
   end
@@ -889,6 +895,20 @@ function M.render(spans, block, strict)
   -- (only text with characters that could be read as marks can read back otherwise)
   if not strict and could_misread(line) and not M.same(line, spans) then
     return M.render(spans, block, true)
+  end
+  -- (nor as a format's line, which it would be on its own: a paragraph whose text looks like
+  -- attributes, after its mark, "<=> \{first = 0.5cm}")
+  if not strict and not block.cell and line:find("{", 1, true) and M.para_line(line)
+    and vim.iter(spans):any(function(s) return s.text and s.text ~= "" end) then
+    return M.render(spans, block, true)
+  end
+  -- (an empty table cell's paragraph with its alignment: its mark alone, as a cell shows no space
+  -- at its end, and reads it so: see M.block)
+  if block.cell and line:match("^%S+ $") and M.block(line:sub(1, -2)).align then
+    line = line:sub(1, -2)
+    for _, c in ipairs(cols) do
+      c[1], c[2] = math.min(c[1], #line), math.min(c[2], #line)
+    end
   end
   return line, cols
 end

@@ -137,7 +137,8 @@ its own (an empty one too, which shows as a blank line and has none to say). Del
 a style the document hasn't, or an attribute that isn't one, makes the write
 fail, saying so. The language server completes the styles' names (those the
 document has) and their attributes, and folds the header out of the way
-(|zc|). `setup({ styles = false })` doesn't show it.
+(|zc|). `setup({ styles = false })` doesn't show it. Two styles of one name (Word
+allows it) show apart, the second with its id: `Body Text (BodyText0):`.
 
                                                             *neoffice-pages*
 Page settings and sections ~
@@ -339,7 +340,9 @@ keeps its merged cells: empty cells added after them (as a formatter may add
 them) are left out when writing, and a cell typed with text takes a column
 from the merged cell before it, so the table keeps its columns. A
 non-breaking space (forms put one in cells to fill in; LibreOffice shades
-it) shows as a faint `·`; type over it or delete it as any character.
+it) shows as a faint `·`; type over it or delete it as any character. A table
+inside a table's cell isn't shown (opening says so): it is kept as it is, the
+cell's other paragraphs around it.
 
                                                        *neoffice-table-format*
 Tables typeset themselves. Write only the cells; when you write the file, a

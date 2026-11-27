@@ -208,9 +208,13 @@ function M.paragraphs(lines, alone)
           }
         end
       end
-    elseif prev and prev.text ~= "" and not prev.cell and not prev.alone and not alone[row] and #blanks == 0 and not cut and not next((markup.block(line))) then -- continues it
+    elseif prev and prev.text ~= "" and not prev.cell and not prev.alone and not alone[row] and #blanks == 0 and not cut and not next((markup.block(line)))
+      -- (a line of floating images right before a list item, a heading...: that one's, see below)
+      and not (markup.floats_only(line) and lines[row + 1] and next((markup.block(lines[row + 1])))) then -- continues it
       local hard = #(prev.text:match("\\*$")) % 2 == 1 -- (after a "\": a line break, else a space)
-      local floating = not hard and (markup.floats_only(lines[row - 1]) or markup.floats_only(line)) -- (its floating images, on a line of their own, before or after its text: nothing between)
+      -- (its floating images, on a line of their own, before or after its text: nothing between; after
+      -- it, also with text typed after them)
+      local floating = not hard and (markup.floats_only(lines[row - 1]) or markup.floats_only(line, true))
       if floating then
         prev.joins = prev.joins or {}
         prev.joins[row - prev.first] = 0
@@ -479,7 +483,7 @@ local function pieces(buf, para, new)
     local format = pformat.apply(para.format or { attrs = {} }, block.align, block.para)
     block.align, block.para = format.align, format.attrs
   else
-    block.align = block.align ~= "left" and block.align or nil
+    -- (its alignment as it shows: "left" too, against a style that isn't, as a centred title's: <<-)
     block.para = nil -- (not a plain paragraph's: its format isn't neoffice's to change)
   end
   -- where each character is in the buffer (the paragraph's lines were joined with spaces)
@@ -651,7 +655,8 @@ local function pieces(buf, para, new)
       for _, ch in ipairs(chars) do
         if ch.ch ~= "" and ch.ch ~= "\n" and not ch[key] and not (key == "color" and ch.link) then
           local run = at(ch)
-          props_now = run and doc.run[run[1]] or props_now
+          local p = run and doc.run[run[1]]
+          props_now = p and not (doc.link_props[p] and not ch.link) and p or props_now
           local v = props_now and own(props_now)[key] or false
           if weight[v] == nil then
             order[#order + 1], weight[v] = v, 0
@@ -671,6 +676,7 @@ local function pieces(buf, para, new)
   local out, e, parts = {}, 1, {} -- (parts: how many pieces of each deletion so far)
   local props = runs[1] and doc.run[runs[1][1]] -- text before the first run takes its properties
   props = props or inherited
+  local plain_props = not (props and doc.link_props[props]) and props or inherited -- (the last not a link's)
   local has_inserts = false
   for _, m in ipairs(changes) do
     has_inserts = has_inserts or m[5].type == "insert"
@@ -781,6 +787,13 @@ local function pieces(buf, para, new)
       local run = run_at(ch)
       if run then
         props = doc.run[run[1]]
+      end
+      -- (text after a link, typed at its end: as the text before the link, not as the link's run, its
+      -- style's colour and underline)
+      if props and not ch.link and doc.link_props[props] then
+        props = plain_props
+      elseif not ch.link then
+        plain_props = props
       end
       local insert
       for _, m in ipairs(has_inserts and changes or {}) do
@@ -1245,10 +1258,13 @@ local function open(buf, path)
   end
   local fmt = require("neoffice." .. (ext == "doc" and "docx" or ext))
   local ctx, paras = fmt.load(base)
+  if (ctx.nested_tables or 0) > 0 then
+    vim.notify("neoffice: a table inside a table's cell isn't shown; it is kept as it is", vim.log.levels.WARN)
+  end
   find_captions(paras)
   hoist_floats(paras, fmt.page and fmt.page(ctx))
   ctx.dirty, ctx.files = {}, {} -- parts to write on save (name -> true, or content for new files)
-  local doc = { path = path, base = base, is_doc = ext == "doc", fmt = fmt, ctx = ctx, paras = {}, run = {}, object = {}, comment = {}, change = {}, caption_seps = {}, caption_as = {}, boxes = {} }
+  local doc = { path = path, base = base, is_doc = ext == "doc", fmt = fmt, ctx = ctx, paras = {}, run = {}, object = {}, comment = {}, change = {}, caption_seps = {}, caption_as = {}, boxes = {}, link_props = setmetatable({}, { __mode = "k" }) }
   doc.stamp, doc.synced = stamp(path), not new -- (synced: the file has the base's content)
   doc.tracking = M.config.track_changes
   if doc.tracking == nil then
@@ -1402,16 +1418,22 @@ local function open(buf, path)
   for k, para in ipairs(paras) do
     para.block.cell = cells[k] and true or nil
     if cells[k] then -- (spaces at the edges of a cell's text: not shown, as the table can't show them)
-      local text = vim.tbl_filter(function(sp) return sp.text and not sp.deletion and not sp.object end, para.spans)
-      for _, sp in ipairs(text) do
-        sp.text = sp.text:gsub("^%s+", "")
-        if sp.text ~= "" then
+      -- (those before anything shown, an image..., or after it: a space after an image is between)
+      local function trim(sp, pattern) -- (true: something shown, stop)
+        if sp.text and not sp.deletion and not sp.object then
+          sp.text = sp.text:gsub(pattern, "")
+          return sp.text ~= ""
+        end
+        return sp.deletion or sp.image or sp.math or sp.footnote or sp.field or sp.line_break or sp.page_break
+          or (sp.object and sp.visible) or false
+      end
+      for _, sp in ipairs(para.spans) do
+        if trim(sp, "^%s+") then
           break
         end
       end
-      for k2 = #text, 1, -1 do
-        text[k2].text = text[k2].text:gsub("%s+$", "")
-        if text[k2].text ~= "" then
+      for k2 = #para.spans, 1, -1 do
+        if trim(para.spans[k2], "%s+$") then
           break
         end
       end
@@ -1519,6 +1541,9 @@ local function open(buf, path)
     doc.header = {}
     for _, id in ipairs(order) do
       local entry = { id = id, name = doc.fmt.style_name(ctx, id), attrs = doc.fmt.style_view(ctx, id) }
+      if doc.header[entry.name:lower()] then -- (two styles of one name, as Word allows: this one with its id)
+        entry.name = ("%s (%s)"):format(entry.name, id)
+      end
       shown[#shown + 1], doc.header[entry.name:lower()] = entry, entry
     end
     vim.list_extend(lines, markup.render_header(shown, page_line))
@@ -1602,7 +1627,8 @@ local function open(buf, path)
         and floats.floating(para.spans[#para.spans - trailing].image) do
         trailing = trailing + 1
       end
-      local tail = trailing > 0 and trailing < #para.spans and cols[k][#para.spans - trailing + 1]
+      -- (not a list item's: the next item could follow it, and its line would read as that one's)
+      local tail = trailing > 0 and trailing < #para.spans and not para.block.list and cols[k][#para.spans - trailing + 1]
       local cut = tail and tail[1]
       local head = cut and text:sub(1, cut)
       if head and head ~= "" and not head:match("[\n\\]$") and not head:match("^%s*$") and markup.floats_only(text:sub(cut + 1)) then
@@ -1665,6 +1691,9 @@ local function open(buf, path)
         -- (written in the text: nothing to remember)
       elseif s.text then
         marks[#marks + 1] = { "run", s.props or false, ra, ca, rb, cb }
+        if s.link and s.props then -- (a link's run: text typed after it isn't the link's, see pieces)
+          doc.link_props[s.props] = true
+        end
       elseif range_start then
         started[range_start] = { ra, ca }
       elseif range_end then
@@ -2238,8 +2267,8 @@ end
 
 -- The paragraphs' fingerprints as opened, all of them now (before a save, and before anything
 -- that changes the document but not its text: a comment, a change accepted...). If the text changed
--- meanwhile, those that did (or whose rows were touched) aren't taken as they are now: they are
--- written at the next save.
+-- meanwhile, those that did (or whose rows were touched, or whose format did) aren't taken as they
+-- are now: they are written at the next save.
 function M.finish_sigs(buf)
   local doc = M.docs[buf]
   local p = doc and doc.pending
@@ -2257,7 +2286,8 @@ function M.finish_sigs(buf)
   local old_of = match_lines(doc.keys or doc.texts, block_keys(blocks))
   for k, block in ipairs(blocks) do
     local o = old_of[k]
-    if o and o >= p.next and doc.sigs[o] == nil and not touched(doc, block) then
+    -- (and its format still as opened: a format's line above it changes it, not its rows)
+    if o and o >= p.next and doc.sigs[o] == nil and not touched(doc, block) and context_key(block) == context_key(p.blocks[o]) then
       doc.sigs[o], doc.ctx_keys[o] = signature(pieces(buf, block)), context_key(p.blocks[o])
     end
   end
@@ -2540,6 +2570,7 @@ function M.save(buf, target)
       assert(not st.bad, ("the styles at the top, line %d: %s"):format(st.row, st.bad or ""))
       local known = doc.header[st.name:lower()]
       local id = known and known.id or doc.fmt.style_id(doc.ctx, st.name)
+        or doc.fmt.style_id(doc.ctx, st.name:match("%(([^()]+)%)%s*$") or "") -- ("Name (Id)": one of two of a name)
       assert(id, ("not a paragraph style of this document: %s (the styles at the top, line %d)"):format(st.name, st.row))
       local old = known and known.attrs or doc.fmt.style_view(doc.ctx, id)
       local changes = {}
@@ -2921,9 +2952,9 @@ function M.save(buf, target)
         end
       end
     end
-    for _, st in ipairs(next(restyle) and header.styles or {}) do -- (the styles as they now are: what the header is compared with next)
-      local name = doc.fmt.style_name(ctx, st.id)
-      doc.header[name:lower()] = { id = st.id, name = name, attrs = doc.fmt.style_view(ctx, st.id) }
+    for _, st in ipairs(next(restyle) and header.styles or {}) do -- (the styles as they now are: what the header is compared with next;
+      -- each by its line's name, "Name (Id)" for one of two of a name)
+      doc.header[st.name:lower()] = { id = st.id, name = st.name, attrs = doc.fmt.style_view(ctx, st.id) }
     end
     for k, block in ipairs(blocks) do -- (those written may have new marks: new images, equations...)
       doc.sigs[k] = plans[k].written and signature(pieces(buf, block)) or plans[k].sig

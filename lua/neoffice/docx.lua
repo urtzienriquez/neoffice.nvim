@@ -724,7 +724,10 @@ local function read_para(ctx, p)
           type = "delete", node = el, author = xml.attr(el, "w:author") or "?", date = xml.attr(el, "w:date") or "",
           text = xml.text(el), moved = tag == "w:moveFrom" or nil,
         }
-        if change.text ~= "" then -- (its runs as text, formatted, in a range of the deletion)
+        local breaks = vim.iter(xml.collect(el, { ["w:br"] = true, ["w:cr"] = true })):any(function(br)
+          return (xml.attr(br, "w:type") or "textWrapping") == "textWrapping"
+        end)
+        if change.text ~= "" or breaks then -- (its runs as text, formatted, in a range of the deletion; a line break too)
           add({ insert_start = change })
           deleting = true
           walk(el, link)
@@ -800,8 +803,8 @@ latex_of = function(ctx, spans)
     end
   end
   for k, span in ipairs(spans) do
-    if texs[k] then
-      span.math.tex = texs[k]
+    if texs[k] then -- (on one line, as it shows: an equation's rows, "\\" between them, aren't lines)
+      span.math.tex = vim.trim((texs[k]:gsub("%s*\n%s*", " ")))
     else
       span.math = nil
     end
@@ -912,15 +915,22 @@ function M.load(path)
     end
   end
   local paras = {}
+  ctx.nested_tables = 0
   for _, p in ipairs(xml.collect(xml.find(ctx.root, "w:body"), { ["w:p"] = true })) do
-    local spans, block = read_para(ctx, p)
-    -- its boxes: their paragraphs first (not in a table's cell: there, a box stays as it is)
-    local in_cell = false
+    -- (in a table in a table's cell: not shown, kept as it is, as its cell's other paragraphs are written in place)
+    local in_cell, tables = false, 0
     local up = p.parent
     while up do
       in_cell = in_cell or up.tag == "w:tc"
+      tables = tables + (up.tag == "w:tbl" and 1 or 0)
       up = up.parent
     end
+    if tables > 1 then
+      ctx.nested_tables = ctx.nested_tables + 1
+      goto next_para
+    end
+    local spans, block = read_para(ctx, p)
+    -- its boxes: their paragraphs first (not in a table's cell: there, a box stays as it is)
     local own = {}
     for _, s in ipairs(spans) do
       if s.box and not in_cell then
@@ -934,6 +944,7 @@ function M.load(path)
       end
     end
     paras[#paras + 1] = { node = p, block = block, spans = own }
+    ::next_para::
   end
   latex_of(ctx, ctx.equations)
   -- (or the headings themselves are numbered, as LibreOffice writes it)
@@ -1600,13 +1611,18 @@ function M.styles_in_use(ctx)
   used[""] = nil
   return vim.tbl_keys(used)
 end
-function M.style_id(ctx, name) -- (by its name, whatever its case; nil if it has none)
+function M.style_id(ctx, name) -- (by its name, whatever its case, else by its id; nil if it has neither)
+  local by_id
   for _, st in ipairs(xml.collect(styles_el(ctx), { ["w:style"] = true })) do
     local n = xml.child(st, "w:name")
-    if xml.attr(st, "w:type") == "paragraph" and (n and xml.attr(n, "w:val") or ""):lower() == name:lower() then
-      return xml.attr(st, "w:styleId")
+    if xml.attr(st, "w:type") == "paragraph" then
+      if (n and xml.attr(n, "w:val") or ""):lower() == name:lower() then
+        return xml.attr(st, "w:styleId")
+      end
+      by_id = by_id or (xml.attr(st, "w:styleId") == name and name) or nil
     end
   end
+  return by_id
 end
 local function chain_of(ctx, id)
   local chain, cur = {}, id
@@ -2893,11 +2909,19 @@ function M.fill(ctx, p, block, pieces)
         local attrs = revision(ctx, "w:del", del).attrs -- (a fresh id: a deletion may now be in several paragraphs)
         del.node, del.text = xml.elem(del.moved and "w:moveFrom" or "w:del", attrs), piece.deleted
         for _, seg in ipairs(piece.segs or { { text = piece.deleted } }) do -- (formatted as it was)
-          local run = text_run(vim.tbl_extend("force", seg, { text = (seg.text:gsub("\n", " ")) }))
-          for _, el in ipairs(run.children) do
-            el.tag = el.tag == "w:t" and "w:delText" or el.tag
+          -- (a line break in it: deleted too, w:br)
+          for j, part in ipairs(vim.split(seg.text, "\n", { plain = true })) do
+            if j > 1 then
+              xml.append(del.node, xml.elem("w:r", {}, { xml.elem("w:br") }))
+            end
+            if part ~= "" then
+              local run = text_run(vim.tbl_extend("force", seg, { text = part }))
+              for _, el in ipairs(run.children) do
+                el.tag = el.tag == "w:t" and "w:delText" or el.tag
+              end
+              xml.append(del.node, run)
+            end
           end
-          xml.append(del.node, run)
         end
       end
       if piece.object and not piece.object.tag then -- (a field: its runs)
