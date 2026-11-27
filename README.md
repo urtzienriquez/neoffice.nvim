@@ -22,6 +22,8 @@ else in the file stays exactly as it was.
   one that differs says how (`<|> A centred one.`, `{before = 12pt} More space.`). A few words in
   another font or colour: `[words]{font = Arial}`, `[words]{color = red}` (and `{color = darkblue}`
   for paragraphs, `color = ...` for a style). A code action moves a format into its style.
+- A paragraph's style in its format: `{style = First Paragraph} Its text.`, or a format's line for
+  those after it; shown where a paragraph's style isn't the usual one where it is.
 - Paragraphs: `# ` headings (numbered on demand), `% ` title, `> ` quote, `- ` and numbered lists
   written as their numbering's pattern (`1.` for every item, `1.1.` or `1.a.` for sub-items: the
   document counts),

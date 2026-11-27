@@ -1554,6 +1554,37 @@ function M.style_id(ctx, shown) -- (by its name, whatever its case: a named styl
     end
   end
 end
+-- A plain paragraph's style ({style = ...}, see paras.lua): `name`, if it hasn't it already. One
+-- with direct formatting of its own (an automatic style, maybe others' too) gets a copy of it, based
+-- on `name`: its own formatting stays, the others' paragraphs as they are.
+function M.set_para_style(ctx, p, name)
+  if M.style_of(ctx, p) == name then
+    return
+  end
+  local current = xml.attr(p, "text:style-name")
+  local auto = current and ctx.auto_paras[current]
+  if not auto then
+    xml.set_attr(p, "text:style-name", name)
+    return
+  end
+  local key = "para-style|" .. current .. "|" .. name
+  if not ctx.made[key] then
+    local style = xml.copy(auto)
+    xml.set_attr(style, "style:parent-style-name", name)
+    local new, n = nil, 1
+    repeat
+      new, n = "NeoP" .. n, n + 1
+    until ctx.parent_style[new] == nil
+    xml.set_attr(style, "style:name", new)
+    xml.append(automatic(ctx), style)
+    ctx.made[key], ctx.auto_paras[new], ctx.parent_style[new] = new, style, name
+    if ctx.para_style_el then
+      ctx.para_style_el[new] = style
+    end
+  end
+  xml.set_attr(p, "text:style-name", ctx.made[key])
+end
+
 function M.style_view(ctx, name)
   local paras = require("neoffice.paras")
   local out = vim.deepcopy(style_attrs(ctx, name))
@@ -2882,6 +2913,9 @@ function M.fill(ctx, p, block, pieces)
     xml.set_attr(p, "text:style-name", caption_style(ctx, block.caption))
   elseif not block.caption and in_caption and #xml.collect(p, { ["text:sequence"] = true }) > 0 and not (level or block.title or block.quote) then
     xml.set_attr(p, "text:style-name", nil)
+  end
+  if block.style_id then -- (a plain paragraph's style: first, what its alignment and format are against)
+    M.set_para_style(ctx, p, block.style_id)
   end
   local page = vim.iter(pieces):any(function(piece) return piece.page_break end) -- (.odt: before it)
   set_layout(ctx, p, block.align, page)

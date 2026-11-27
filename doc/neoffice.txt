@@ -225,6 +225,7 @@ alone all of them: >
   {none}
   From here on, as their style says.
 <
+  `style`                         its paragraph style, by name (see below)
   `align`                         `left`, `center`, `right`, `justify`
   `indent-left`, `indent-right`   indentation (cm, mm, in, pt)
   `first`                         the first line's indent (negative: hanging)
@@ -243,6 +244,23 @@ differs from the paragraphs around it says how, at its start: `{before =
 are attributes: `{this} text` is text). The marks are short for alignment:
 `<|> A centered one.`, `->> {before = 6pt} Right, and more space.` (a line
 with only a mark is a format's line too: `<=>` is `{align = justify}`).
+
+                                                   *neoffice-para-style*
+`style` gives a paragraph another of the document's paragraph styles, by its
+name, whatever its case: `{style = First Paragraph} Its text.` for one, a
+format's line for those after it (until a line says `style = none`, or
+`none`). Plain paragraphs have one of two usual styles, by where they are:
+first ones (the first in the document, and right after a heading, title or
+quote) the one most of those have, the others the one most of them have. In
+a document made by pandoc these are First Paragraph and Body Text; in most
+others both are Normal. Opened, a paragraph whose style isn't the usual one
+where it is says it, at its start; `none` is the usual one where it is. A
+paragraph you type gets the usual one where it is (not the style of the
+paragraph before it, nor a caption's after a table); one whose `{style =
+...}` you delete too. A style the document doesn't have stops the save, and
+it says where. The language server completes the document's styles after
+`style = `. To change how all first paragraphs look, give them a style
+(First Paragraph) and change that style at the top (|neoffice-styles|).
 
                                               *neoffice-format-into-style*
 On a format's line, a code action moves its attributes into the style of

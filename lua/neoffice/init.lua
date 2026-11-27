@@ -617,6 +617,8 @@ local function pieces(buf, para, new)
     block.align, block.para = format.align, format.attrs
   else
     -- (its alignment as it shows: "left" too, against a style that isn't, as a centred title's: <<-)
+    assert(not (para.box and block.para and block.para.style),
+      ("line %d: a style is for paragraphs of the text, not one in a table cell or a box"):format(para.first))
     block.para = nil -- (not a plain paragraph's: its format isn't neoffice's to change)
   end
   -- where each character is in the buffer (the paragraph's lines were joined with spaces)
@@ -1369,6 +1371,30 @@ local function template(ext)
   return copy
 end
 
+-- Which of n paragraphs (or blocks) are first ones: the first in the document, or right after a
+-- heading, title or quote, as pandoc's First Paragraph; place(k): "break" (a heading, title, quote),
+-- "other", or nil for one that doesn't count (an empty one).
+function M.first_paragraphs(n, place)
+  local out, before = {}, "break"
+  for k = 1, n do
+    local p = place(k)
+    if p then
+      out[k] = before == "break"
+      before = p
+    end
+  end
+  return out
+end
+
+-- A paragraph style as {style = ...} names it: its name, or "Name (Id)" for one of two of a name.
+function M.style_label(doc, id)
+  local name = doc.fmt.style_name(doc.ctx, id)
+  if doc.fmt.style_id(doc.ctx, name) ~= id then
+    name = ("%s (%s)"):format(name, id)
+  end
+  return name
+end
+
 -- :Neoffice styles reset: the document's styles as a fresh document's (the plugin's empty one, see
 -- fmt.reset_styles), and the styles at the top as they now are. Written with the next :w.
 function M.reset_styles(buf)
@@ -1747,6 +1773,63 @@ local function open(buf, path)
     local candidates = {}
     for k, para in ipairs(paras) do -- (fonts first: they are part of a paragraph's format)
       fonts_of(para.block, para.spans, plain(para.block) and not cells[k] and not para.box)
+    end
+    -- (its style, where it isn't the one plain paragraphs in its place have: "style = ...". Two places:
+    -- first ones (first in the document, or after a heading, title or quote) and others; the style most of
+    -- each have is the one there, doc.first_style and doc.plain_style; see M.first_paragraphs)
+    if doc.fmt.style_of then
+      local is_plain = {}
+      for k, para in ipairs(paras) do
+        is_plain[k] = not cells[k] and not para.box and plain(para.block) and para.node and content(para.spans)
+      end
+      local first = M.first_paragraphs(#paras, function(k)
+        local para = paras[k]
+        if cells[k] or para.box then
+          return "other"
+        elseif not content(para.spans) and plain(para.block) then
+          return nil -- (an empty one: as if it weren't there)
+        end
+        local b = para.block
+        return (b.heading or b.title or b.quote) and "break" or "other"
+      end)
+      local counts, order = { first = {}, other = {} }, { first = {}, other = {} }
+      for k, para in ipairs(paras) do
+        local id = is_plain[k] and doc.fmt.style_of(ctx, para.node)
+        if type(id) == "string" then
+          local where = first[k] and "first" or "other"
+          if not counts[where][id] then
+            table.insert(order[where], id)
+          end
+          counts[where][id] = (counts[where][id] or 0) + 1
+        end
+      end
+      local default = doc.fmt.style_of(ctx, xml.elem(doc.fmt.MAIN == "content.xml" and "text:p" or "w:p"))
+      local function most(where, fallback) -- (the one most have; of as many, the fallback, else the first seen)
+        local best, n = fallback, counts[where][fallback] or 0
+        for _, id in ipairs(order[where]) do
+          if counts[where][id] > n then
+            best, n = id, counts[where][id]
+          end
+        end
+        return best
+      end
+      doc.plain_style = most("other", #order.other == 0 and most("first", default) or default)
+      doc.first_style = most("first", doc.plain_style)
+      doc.style_labels = {} -- (label shown -> its id: what a save reads back, even for a style not defined)
+      doc.style_shown = {} -- (the paragraphs it was shown for: see M.save)
+      if type(doc.plain_style) == "string" and type(doc.first_style) == "string" then
+        for k, para in ipairs(paras) do
+          local id = is_plain[k] and doc.fmt.style_of(ctx, para.node)
+          if type(id) == "string" and id ~= (first[k] and doc.first_style or doc.plain_style) then
+            local label = M.style_label(doc, id)
+            doc.style_labels[label:lower()], doc.style_shown[k] = id, true
+            para.block.para = para.block.para or {}
+            para.block.para.style = label
+          end
+        end
+      else
+        doc.plain_style, doc.first_style = nil, nil
+      end
     end
     for k, para in ipairs(paras) do
       local b = para.block
@@ -3547,6 +3630,19 @@ function M.save(buf, target)
 
     local plans, equations = {}, {}
     local reusable = not doc.all_dirty and not doc.untracked and not doc.tracking and next(restyle) == nil
+    local first_block = M.first_paragraphs(#blocks, function(k) -- (first paragraphs: see M.first_paragraphs)
+      local b = blocks[k]
+      if b.cell or b.box then
+        return "other"
+      end
+      local kind, start = markup.block(b.text)
+      if kind.fence or kind.row then
+        return "other"
+      elseif b.text:sub(start or 1):match("^%s*$") and plain(kind) then
+        return nil
+      end
+      return (kind.heading or kind.title or kind.quote) and "break" or "other"
+    end)
     local settled_on = {} -- (paragraphs a comment was moved to, see settle_comments: written again, with it)
     if next(doc.comment_at or {}) then
       for k, block in ipairs(blocks) do
@@ -3588,6 +3684,20 @@ function M.save(buf, target)
         if piece.math then
           equations[#equations + 1] = piece.math
         end
+      end
+      if doc.plain_style and plain(kind) and not block.cell and not block.box then -- (a plain paragraph's style: see paras.lua)
+        -- (the one it says; else the one it has, if that is one of the two usual ones and it wasn't
+        -- shown: the usual one where it was; else the usual one where it is: a new paragraph's, one
+        -- whose {style = ...} was taken away, a heading made text)
+        local want = kind.para and kind.para.style
+        local id = want and ((doc.style_labels or {})[want:lower()] or doc.fmt.style_id(doc.ctx, want)
+          or doc.fmt.style_id(doc.ctx, want:match("%(([^()]+)%)%s*$") or ""))
+        assert(not want or id, ("line %d: not a paragraph style of this document: %s"):format(block.first, want or ""))
+        local current = o and doc.paras[o] and doc.fmt.style_of(doc.ctx, doc.paras[o])
+        if not id and not (doc.style_shown or {})[o] and (current == doc.plain_style or current == doc.first_style) then
+          id = current
+        end
+        kind.style_id = id or (first_block[k] and doc.first_style or doc.plain_style)
       end
       plans[k] = { old = old_of[k], block = kind, pieces = list, sig = signature(kind, list), cell = block.cell, box = block.box }
       assert(not (block.format and block.format.bad), block.format and block.format.bad) -- (its format's line: right)

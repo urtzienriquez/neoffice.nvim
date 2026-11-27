@@ -10,18 +10,18 @@ local CITED = {
     if name ~= "content.xml" then
       return text
     end
-    local p = '<text:p>Energy matters <text:reference-mark-start text:name="' .. NAME .. '"/>(1)'
-      .. '<text:reference-mark-end text:name="' .. NAME .. '"/> a lot.</text:p><text:p>Another one.</text:p>'
+    local p = '<text:p text:style-name="Text_20_body">Energy matters <text:reference-mark-start text:name="' .. NAME .. '"/>(1)'
+      .. '<text:reference-mark-end text:name="' .. NAME .. '"/> a lot.</text:p><text:p text:style-name="Text_20_body">Another one.</text:p>'
     return (text:gsub("</office:text>", p .. "</office:text>", 1))
   end,
   docx = function(name, text)
     if name ~= "word/document.xml" then
       return text
     end
-    local p = '<w:p><w:r><w:t xml:space="preserve">Energy matters </w:t></w:r>'
+    local p = '<w:p><w:pPr><w:pStyle w:val="BodyText"/></w:pPr><w:r><w:t xml:space="preserve">Energy matters </w:t></w:r>'
       .. '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION {"citationID":"x"} </w:instrText></w:r>'
       .. '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>(1)</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
-      .. '<w:r><w:t xml:space="preserve"> a lot.</w:t></w:r></w:p><w:p><w:r><w:t>Another one.</w:t></w:r></w:p>'
+      .. '<w:r><w:t xml:space="preserve"> a lot.</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="BodyText"/></w:pPr><w:r><w:t>Another one.</w:t></w:r></w:p>'
     return (text:gsub("<w:sectPr", p .. "<w:sectPr", 1))
   end,
 }

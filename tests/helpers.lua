@@ -37,6 +37,17 @@ neo.config.doc_cache = vim.fn.tempname() -- (.doc files' conversions: not in you
 neo.config.styles = false -- (the styles at the top: tested on their own, styles_spec.lua)
 neo.config.page = false -- (and the page's settings: pages_spec.lua)
 
+-- A document's plain paragraphs all of its default style (as Word's often are, not the fixtures'
+-- First Paragraph and Body Text, pandoc's): for H.copy's edit, `text = H.default_styles(name, text)`.
+function H.default_styles(name, text)
+  if name == "word/document.xml" then
+    return (text:gsub('<w:pStyle w:val="BodyText" ?/>', ""):gsub('<w:pStyle w:val="FirstParagraph" ?/>', ""))
+  elseif name == "content.xml" then
+    return (text:gsub('text:style%-name="Text_20_body"', 'text:style-name="Standard"'):gsub('text:style%-name="First_20_Paragraph"', 'text:style-name="Standard"'))
+  end
+  return text
+end
+
 function H.open(path)
   vim.cmd("silent! %bwipeout!")
   vim.cmd("edit " .. vim.fn.fnameescape(path))

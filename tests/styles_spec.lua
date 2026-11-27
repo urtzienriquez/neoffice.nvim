@@ -115,6 +115,7 @@ end
 -- two paragraphs of the default style whose font and size are set on their text, first
 local SIZED = {
   docx = function(name, text)
+    text = H.default_styles(name, text)
     if name ~= "word/document.xml" then
       return text
     end
@@ -123,6 +124,7 @@ local SIZED = {
     return (text:gsub("<w:body>", "<w:body>" .. p .. p:gsub("Sized text", "More of it"), 1))
   end,
   odt = function(name, text)
+    text = H.default_styles(name, text)
     if name ~= "content.xml" then
       return text
     end

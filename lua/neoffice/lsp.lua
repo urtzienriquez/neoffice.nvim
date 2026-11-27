@@ -501,6 +501,16 @@ local function completion(buf, pos)
           offer(family, family:lower():sub(1, #typed) == typed and "1" or "2", "installed")
         end
       end
+    elseif name == "style" and pbraces and not hbraces then -- (the document's paragraph styles)
+      local doc = require("neoffice").docs[buf]
+      local typed = vim.trim(value):lower()
+      local names = doc and doc.fmt.paragraph_styles and doc.fmt.paragraph_styles(doc.ctx) or {}
+      table.insert(names, "none")
+      for _, v in ipairs(names) do
+        if v:lower():find(typed, 1, true) then
+          add(v, #before - #value, KIND.EnumMember, v == "none" and "the style most plain paragraphs have" or "a paragraph style of this document")
+        end
+      end
     elseif name and VALUES[name] then
       for _, v in ipairs(VALUES[name]) do
         add(v, #before - #value, KIND.EnumMember, pf.DESCRIBE[name])
@@ -512,7 +522,7 @@ local function completion(buf, pos)
           if (key == "bold" or key == "italic") and hbraces then -- (said alone)
             add(key, #before - #typed, KIND.Property, pf.DESCRIBE[key])
           end
-          for _, v in ipairs(key == "font" and { "" } or (key ~= "bold" and key ~= "italic") and VALUES[key] or {}) do
+          for _, v in ipairs((key == "font" or key == "style") and { "" } or (key ~= "bold" and key ~= "italic") and VALUES[key] or {}) do
             if v ~= "none" then
               add(key .. " = " .. v, #before - #typed, KIND.Property, pf.DESCRIBE[key])
             end

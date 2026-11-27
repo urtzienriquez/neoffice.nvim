@@ -5,6 +5,8 @@
 --   before, after               the space before and after the paragraph (pt...)
 --   line                        line spacing: single, 1.5, double (or another multiple), or a
 --                               length (exactly that)
+--   style                       its paragraph style, by name ("First Paragraph"): shown where it
+--                               isn't the one most plain paragraphs have; none: that one
 --   font, size, color           the font of its text, its size (pt) and its colour (a name, or
 --                               #rrggbb): what most of its text has (a few words in another:
 --                               "[words]{font = Arial}", markup.lua)
@@ -17,12 +19,13 @@
 local markup = require("neoffice.markup")
 local M = {}
 
-M.KEYS = { "align", "font", "size", "color", "indent-left", "indent-right", "first", "before", "after", "line" } -- (in the order written)
+M.KEYS = { "style", "align", "font", "size", "color", "indent-left", "indent-right", "first", "before", "after", "line" } -- (in the order written)
 M.ALIGNS = { "left", "center", "right", "justify" }
 -- A style's (in the document's header, see init.lua): these, and bold and italic (said alone).
 M.STYLE_KEYS = { "font", "size", "color", "align", "bold", "italic", "indent-left", "indent-right", "first", "before", "after", "line" }
 M.LAYOUT = { "indent-left", "indent-right", "first", "before", "after", "line" } -- (the paragraph's own: not its text's)
 M.DESCRIBE = {
+  style = "its paragraph style, by its name (none: the one most plain paragraphs have)",
   align = "its alignment: left, center, right, justify (none: its style's)",
   bold = "its text in bold", italic = "its text in italics",
   font = "the font of its text (Times New Roman, Arial...)",
@@ -62,8 +65,9 @@ function M.measure(key, value)
   return m or nil
 end
 function M.measure_of(key, value)
-  if key == "font" then -- (its name: whatever its case)
-    return vim.trim(value):lower()
+  if key == "font" or key == "style" then -- (its name: whatever its case)
+    local name = vim.trim(value):lower()
+    return name ~= "" and name or nil
   elseif key == "color" then -- (its hex value: black is Word's "automatic" too, and a grey that looks it,
     -- as text pasted from web pages has: #222222)
     local hex = markup.color_hex(value)
@@ -93,7 +97,10 @@ function M.parse(text)
   local out = {}
   for _, a in ipairs((markup.attributes(text))) do
     local name = a.name == "colour" and "color" or a.name
-    local value = name == "font" and vim.trim(a.value) or a.value:lower()
+    local value = (name == "font" or name == "style") and vim.trim(a.value) or a.value:lower()
+    if name == "style" and value:lower() == "none" then
+      value = "none"
+    end
     if not name or not vim.tbl_contains(M.KEYS, name) then
       return nil, ("not a paragraph's attribute: %s (they are %s)"):format(a.name or a.value, table.concat(M.KEYS, ", "))
     end
@@ -101,7 +108,7 @@ function M.parse(text)
       return nil, ("not a value of %s: %s (%s, or none)"):format(name, a.value,
         name == "line" and "single, 1.5, double, a multiple or a length" or name == "size" and "a size: 11pt, 12pt"
           or name == "color" and "a colour: red, darkblue... or #rrggbb"
-          or name == "font" and "a font's name" or name == "align" and table.concat(M.ALIGNS, ", ")
+          or name == "font" and "a font's name" or name == "style" and "a paragraph style's name" or name == "align" and table.concat(M.ALIGNS, ", ")
           or "a length: 1cm, 5mm, 6pt" .. (name == "first" and ", negative for a hanging indent" or ""))
     end
     out[name] = name == "size" and value ~= "none" and M.size(value) or name == "color" and value ~= "none" and markup.text_color(value) or value

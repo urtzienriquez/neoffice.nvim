@@ -1961,6 +1961,18 @@ function M.style_id(ctx, name) -- (by its name, whatever its case, else by its i
   end
   return by_id
 end
+-- A plain paragraph's style ({style = ...}, see paras.lua): `id`, if it hasn't it already. (pPr's
+-- first element, as the schema wants)
+function M.set_para_style(ctx, ppr, id)
+  local style = xml.child(ppr, "w:pStyle")
+  local current = style and xml.attr(style, "w:val") or default_style_id(ctx)
+  if current == id then
+    return
+  end
+  style = style or xml.append(ppr, xml.elem("w:pStyle"), 1)
+  xml.set_attr(style, "w:val", id)
+end
+
 local function chain_of(ctx, id)
   local chain, cur = {}, id
   for _ = 1, 10 do
@@ -3294,6 +3306,10 @@ function M.fill(ctx, p, block, pieces)
     local el = xml.elem(tag, attrs)
     xml.set_attr(el, "w:id", id)
     xml.append(mark_rpr, el, 1) -- (first, as the schema wants)
+  end
+  if block.style_id then -- (a plain paragraph's style: first, what its alignment and format are against)
+    ppr = ppr or xml.elem("w:pPr")
+    M.set_para_style(ctx, ppr, block.style_id)
   end
   if block.align or (ppr and xml.child(ppr, "w:jc")) then
     ppr = ppr or xml.elem("w:pPr")

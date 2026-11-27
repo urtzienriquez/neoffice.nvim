@@ -263,6 +263,7 @@ describe("a new paragraph", function()
   -- a paragraph whose font and size are set on its text (as Word and LibreOffice often do), first
   local SIZED = {
     docx = function(name, text)
+      text = H.default_styles(name, text)
       if name ~= "word/document.xml" then
         return text
       end
@@ -271,6 +272,7 @@ describe("a new paragraph", function()
       return (text:gsub("<w:body>", "<w:body>" .. p .. p:gsub("Sized text", "More of it"), 1))
     end,
     odt = function(name, text)
+      text = H.default_styles(name, text)
       if name ~= "content.xml" then
         return text
       end
@@ -320,6 +322,7 @@ describe("an edited paragraph whose text has no formatting of its own (odt)", fu
       if name ~= "content.xml" then
         return text
       end
+      text = H.default_styles(name, text)
       local style = '<style:style style:name="Sized" style:family="text"><style:text-properties style:font-name="Times New Roman" fo:font-size="11pt" fo:color="#ff0000"/></style:style>'
       local p = '<text:p><text:span text:style-name="Sized">Sized text.</text:span></text:p><text:p>Plain text.</text:p>'
       return (text:gsub("<office:automatic%-styles>", "%0" .. style, 1):gsub("<office:text>", "%0" .. p, 1))

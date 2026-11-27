@@ -608,7 +608,7 @@ function M.attributes(text, names)
       end
       if quoted then
         value, e = quoted, qe
-      elseif words and words:find(" ", 1, true) and (name:lower() == "font" or name:lower() == "size" and words:match("^%S+%s*[x×]%s*%S+$") or name:lower() == "margins" and words:match("^%S+%s+%S+$")) then -- (only a font's name has spaces, a page's size: "21cm x 29.7cm", and its margins: "2.5cm 3cm")
+      elseif words and words:find(" ", 1, true) and (name:lower() == "font" or name:lower() == "style" or name:lower() == "size" and words:match("^%S+%s*[x×]%s*%S+$") or name:lower() == "margins" and words:match("^%S+%s+%S+$")) then -- (only a font's name and a style's have spaces, a page's size: "21cm x 29.7cm", and its margins: "2.5cm 3cm")
         value, e = words, we
       end
     end

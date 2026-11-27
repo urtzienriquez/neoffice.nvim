@@ -49,7 +49,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
 
     it("combine with other formatting", function()
-      H.set(4, "**bold^{sup}** *W_{i}*")
+      H.set(4, "**bold^{sup}** *W_{i}*") -- (its {style = ...} gone with the line: the usual one there)
       H.reopen()
       assert.equals("**bold^{sup}** *W_{i}*", H.paras()[4])
     end)
@@ -67,7 +67,7 @@ describe("docx equations", function()
   if not H.has_pandoc then
     it("show as ￼ without pandoc, and are kept as they are", function()
       assert.equals("Inline ￼ here.", H.paras()[2])
-      assert.equals("Prices: \\$5 and \\$10.", H.paras()[4])
+      assert.equals("{style = First Paragraph} Prices: \\$5 and \\$10.", H.paras()[4]) -- (as the fixture has it: not where it goes)
       local before = H.paragraph_xml(path)
       H.replace(2, "Inline", "An inline")
       H.reopen()
@@ -80,7 +80,7 @@ describe("docx equations", function()
     it("show as LaTeX, inline and on their own line", function()
       assert.equals("Inline $x^{2} + y_{1}$ here.", H.paras()[2])
       assert.equals("$$B = W_{food} + W_{met} - E$$", H.paras()[3])
-      assert.equals("Prices: \\$5 and \\$10.", H.paras()[4])
+      assert.equals("{style = First Paragraph} Prices: \\$5 and \\$10.", H.paras()[4]) -- (as the fixture has it: not where it goes)
     end)
   end
 
