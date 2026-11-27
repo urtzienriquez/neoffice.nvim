@@ -145,8 +145,9 @@ local SUBCOMMANDS = {
   prev = function() changes().jump(-1) end,
   track = function(arg) changes().track(arg ~= "" and arg or nil) end, -- record your edits: on/off
   numbers = function(arg) require("neoffice").numbers(arg ~= "" and arg or nil) end, -- number headings: on/off
+  pdf = function(arg) require("neoffice.pdf").command(arg) end, -- export it as a PDF; auto [on|off]: after each save
 }
-local ARGUMENTS = { accept = { "all" }, reject = { "all" }, track = { "on", "off" }, numbers = { "on", "off" }, comments = { "text" } }
+local ARGUMENTS = { accept = { "all" }, reject = { "all" }, track = { "on", "off" }, numbers = { "on", "off" }, comments = { "text" }, pdf = { "auto" } }
 local NAMES = vim.tbl_keys(SUBCOMMANDS)
 table.sort(NAMES)
 
@@ -170,7 +171,7 @@ end, {
     local words = vim.split(cmdline:sub(1, #cmdline - #lead), "%s+", { trimempty = true })
     local list = #words == 1 and NAMES or ARGUMENTS[words[2]] or {}
     local by_author = (words[2] == "accept" or words[2] == "reject") and words[3] == "all" or words[2] == "changes" and #words == 2
-    if words[2] == "comments" and words[3] == "text" then
+    if words[2] == "comments" and words[3] == "text" or words[2] == "pdf" and words[3] == "auto" then
       list = { "on", "off" }
     end
     if by_author then -- the authors of the changes (names may have spaces: the rest of the line)
@@ -179,5 +180,5 @@ end, {
     end
     return vim.tbl_filter(function(item) return vim.startswith(item, lead) end, list)
   end,
-  desc = "neoffice: comments [text [on|off]], comment, reply, edit, resolve, delete, changes [author], accept [all [author]], reject [all [author]], next, prev, track [on|off], numbers [on|off]",
+  desc = "neoffice: comments [text [on|off]], comment, reply, edit, resolve, delete, changes [author], accept [all [author]], reject [all [author]], next, prev, track [on|off], numbers [on|off], pdf [auto [on|off]]",
 })

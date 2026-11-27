@@ -52,6 +52,9 @@ One command, `:Neoffice` (alone, it lets you pick):
 - `:Neoffice accept|reject [all [author]]` — the change at the cursor, the selection, or all
 - `:Neoffice next|prev` — jump between changes; `:Neoffice changes [author]` lists them
 - `:Neoffice numbers [on|off]` — number the headings
+- `:Neoffice pdf` — the document as a PDF next to it, opened; `pdf auto [on|off]` writes it again after each save
+  (one LibreOffice kept running in the background: a fraction of a second each; a viewer that reloads files,
+  like zathura, shows each save)
 
 One key is set in documents: `g?` opens the help. The comments panel has its own, two keys a family as in
 fugitive (`aa` reply, `ee` edit, `rr` resolve, `dd` delete, `<CR>` go to it, `gq` close, `g?` its help).
@@ -67,7 +70,8 @@ exports your manuscript to Word, and brings your collaborators' revisions back i
 - zlib (on every Linux and macOS system: documents are read and written in Neovim itself); without
   it, the `zip` and `unzip` commands
 - Optional: [pandoc](https://pandoc.org) to edit equations (without it they are kept as they
-  are, shown as `￼`), LibreOffice for `.doc` files; to show images other than PNG (made in the
+  are, shown as `￼`), LibreOffice for `.doc` files and PDFs (fastest with its Python bridge,
+  `python3-uno`); to show images other than PNG (made in the
   background, so opening never waits): ImageMagick (JPEG, GIF, TIFF, WebP...), `pdftoppm` (PDF),
   `rsvg-convert` (SVG), LibreOffice (EMF, WMF, SVM)
 

@@ -22,7 +22,7 @@ through LuaJIT; without zlib, the `zip` and `unzip` commands). Optional: pandoc
 (|neoffice-equations|), LibreOffice (`soffice`, for .doc files: converted to
 .docx when opened, and back when written; a conversion is kept, by the file's
 content, so it opens at once the next time, see `doc_cache` in
-|neoffice-options|), and to show images
+|neoffice-options|; and for PDFs, |neoffice-pdf|), and to show images
 other than PNG (|neoffice-images|): ImageMagick, `pdftoppm`, `rsvg-convert`.
 
 ==============================================================================
@@ -767,6 +767,30 @@ neoffice, and so is the documents' filetype). It answers:
 `lsp = false` (|neoffice-options|) turns it off.
 
 ==============================================================================
+PDF                                                             *neoffice-pdf*
+
+`:Neoffice pdf` writes the document, as saved, as a PDF next to it
+(report.docx gives report.pdf, in the same folder; one there is replaced) and
+opens it. `:Neoffice pdf auto` writes it again after each |:w| (on, or off
+again; `auto on`, `auto off` say which). A viewer that reloads a file when it
+changes (zathura, Okular, Evince, sioyek, SumatraPDF, Skim...) then shows each
+save as you make it, in the same window.
+
+LibreOffice (`soffice`) makes it, with its Python bridge (`import uno`, as
+Linux distributions package it: python3-uno, libreoffice-script-provider-python):
+one LibreOffice, hidden, started at the first export and stopped when Nvim
+quits, so an export takes a fraction of a second. Without the bridge, each
+export starts LibreOffice, which takes a few seconds. Exports run in the
+background: typing and saving never wait for one, and a save made while one is
+being written is exported after it (the last one only).
+
+The PDF is of the file as saved: unsaved changes aren't in it (you are told).
+Neither the document nor its folder is touched: LibreOffice reads a copy in
+Nvim's cache, and the PDF is written under a hidden name next to the document,
+then put in place, so a viewer never shows half of one. Settings: `pdf` in
+|neoffice-options|.
+
+==============================================================================
 FOR OTHER PLUGINS                                              *neoffice-read*
 
 `require("neoffice.read")` reads documents for other plugins (manuscript.nvim
@@ -817,6 +841,9 @@ Everything is a subcommand of :Neoffice. Alone, it lets you pick one.
                                 heading styles (toggles). The numbers are
                                 shown before the headings, but aren't part of
                                 the text.
+:Neoffice pdf                   Write the document, as saved, as a PDF next
+                                to it, and open it (|neoffice-pdf|).
+:Neoffice pdf auto [on|off]     Write it again after each save (toggles).
 
 <Tab> completes the subcommands and the authors' names.
 
@@ -890,6 +917,15 @@ setup() is optional. Every field is optional too; these are the defaults: >lua
     doc_cache = nil,       -- where .doc files converted by LibreOffice are kept, so
                            -- one opens at once the next time (nil: Neovim's cache
                            -- directory; false: converted each time)
+    pdf = {                -- PDF exports (|neoffice-pdf|)
+      auto = false,        -- after each save, in every document (:Neoffice pdf
+                           -- auto turns it on or off in one)
+      open = true,         -- open the PDF the first time it is written
+      viewer = nil,        -- the program to open it with ("zathura", or
+                           -- { "okular", "--unique" }); nil: the system's
+      quiet = false,       -- no message when one is written
+      timeout = 120,       -- seconds before an export is given up
+    },
     image_width = 60,      -- at most this many columns wide
     image_height = 20,     -- and this many lines high
     captions = {           -- their words, and what goes after the number

@@ -37,6 +37,10 @@ M.config = {
   -- where .doc files converted by LibreOffice are kept, by their content, so one opens at once the
   -- next time (false: converted each time; nil: Neovim's cache directory)
   doc_cache = nil,
+  -- PDF exports (:Neoffice pdf; :help neoffice-pdf): next to the document, by LibreOffice
+  -- auto: after each save, in every document (:Neoffice pdf auto turns it on or off in one);
+  -- open: open the PDF the first time it is written (viewer: a command, else the system's)
+  pdf = { auto = false, open = true, viewer = nil, quiet = false, timeout = 120 },
   image_width = 60, -- at most this many columns wide
   image_height = 20, -- and this many lines high
   -- captions ("Table: ...", "Figure: ..."): their words, and what goes between the number and the text
@@ -3989,6 +3993,9 @@ function M.save(buf, target)
     require("neoffice.comments").saved(buf) -- (as saved: where undoing its comments makes it unmodified)
   end
   vim.notify("neoffice: Saved " .. vim.fn.fnamemodify(target, ":~:."))
+  if target == doc.path then -- (its PDF again, if it is exported after each save: see pdf.lua)
+    require("neoffice.pdf").saved(buf, doc.path)
+  end
 end
 
 return M
