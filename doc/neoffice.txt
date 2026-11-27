@@ -600,11 +600,13 @@ from the start with `comment_text = true`, |neoffice-options|).
 replies. It opens on the comment closest to the cursor, and follows the cursor
 as you move in the document; the text of the comment it is on is highlighted
 in the document (NeofficeCommentCurrent), and moving in the panel scrolls the
-document to it when it is out of view. Each comment shows its author and date,
-its text and its replies; a resolved one, marked ✓, is dimmed. Its bar says
-how many are open and resolved. :w in it saves the document (its comments
-are the document's). Its keys are two keys a family, as fugitive's (each can
-be changed, or dropped: |neoffice-keymaps|); g? in it opens this:
+document to it when it is out of view. It looks as fugitive's status window:
+the document it is about and its help, then the comments in two sections,
+Open and Resolved (with how many), each its author and date, its text
+indented under it, and its replies a step in. :w in it saves the document
+(its comments are the document's). Its keys are two keys a family, as
+fugitive's (each can be changed, or dropped: |neoffice-keymaps|); g? in it
+opens this:
 
   <CR>     go to the comment under the cursor in the document
   aa       add a reply to it (in a buffer: |neoffice-comment-buffer|)
@@ -920,12 +922,12 @@ Highlight groups (all `default`, so your colour scheme can set them):
   NeofficeCommentSign       the comment sign
   NeofficeCommentVirt       a comment's text at the end of its line
   NeofficeCommentCurrent    the text of the comment the panel is on
-  NeofficeCommentAuthor     in the comments panel: an author
-  NeofficeCommentDate       its dates, and its bar's counts
-  NeofficeCommentDone       a resolved comment (NeofficeCommentDoneMark: its ✓)
-  NeofficeCommentTitle      its bar's title
-  NeofficeCommentRule       the line between comments
-  NeofficeCommentHelp       in a comment's buffer, its `#` lines
+  The comments panel and a comment's buffer are highlighted by their syntax
+  files (syntax/neoffice-comments.vim, syntax/neoffice-comment.vim), as
+  fugitive's: neofficeCommentsHeader (Label), neofficeCommentsHelpTag (Tag),
+  neofficeCommentsHeading (PreProc), neofficeCommentsCount (Number),
+  neofficeCommentsAuthor (Identifier), neofficeCommentsDate (Comment),
+  neofficeCommentsResolved (Comment), neofficeCommentHelp (Comment).
   NeofficeTitle             the title
   NeofficeNumber            heading numbers
   NeofficeAlign             the alignment marks and format lines

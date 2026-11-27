@@ -1754,7 +1754,7 @@ local function open(buf, path)
   setup_buffer(buf)
   require("neoffice.changes").start(buf)
   if new then
-    vim.notify("[neoffice] New document: it is created when you write it")
+    vim.notify("neoffice: New document: it is created when you write it")
   end
 end
 
@@ -1768,7 +1768,7 @@ function M.open(buf, path)
     end
     api.nvim_buf_set_lines(buf, 0, -1, false, {})
     vim.bo[buf].modified, vim.bo[buf].modifiable, vim.bo[buf].readonly = false, false, true
-    vim.notify("[neoffice] Could not read " .. path .. ": " .. err, vim.log.levels.ERROR)
+    vim.notify("neoffice: Could not read " .. path .. ": " .. err, vim.log.levels.ERROR)
   end
 end
 
@@ -2050,7 +2050,7 @@ function M.numbers(arg)
   local buf = api.nvim_get_current_buf()
   local doc = M.docs[buf]
   if not doc then
-    return vim.notify("[neoffice] Not a document buffer", vim.log.levels.WARN)
+    return vim.notify("neoffice: Not a document buffer", vim.log.levels.WARN)
   end
   local on = arg == "on" or (arg ~= "off" and not doc.ctx.numbered)
   if on ~= doc.ctx.numbered then
@@ -2059,7 +2059,7 @@ function M.numbers(arg)
     doc.unsaved_other = true
   end
   M.decorate(buf)
-  vim.notify("[neoffice] Heading numbers " .. (on and "on" or "off"))
+  vim.notify("neoffice: Heading numbers " .. (on and "on" or "off"))
 end
 
 -- Give columns [c1, c2) of a line this bold/italic/underline (rewriting its marks) and these
@@ -2507,7 +2507,7 @@ function M.save(buf, target)
   M.finish_sigs(buf)
   local doc = M.docs[buf]
   if not doc then
-    return vim.notify("[neoffice] This document wasn't opened correctly: not saving it", vim.log.levels.ERROR)
+    return vim.notify("neoffice: This document wasn't opened correctly: not saving it", vim.log.levels.ERROR)
   end
   target = vim.fn.fnamemodify(target or doc.path, ":p")
   local ok, err = pcall(function()
@@ -2950,14 +2950,14 @@ function M.save(buf, target)
   end)
   if not ok then
     err = tostring(err):gsub("^[^\n]-%.lua:%d+: ", "") -- (where in neoffice it was found: not for you)
-    return vim.notify("[neoffice] Save failed, the file was not changed: " .. err, vim.log.levels.ERROR)
+    return vim.notify("neoffice: Save failed, the file was not changed: " .. err, vim.log.levels.ERROR)
   end
   if target == doc.path then
     vim.bo[buf].modified = false
     doc.unsaved_other = nil
     require("neoffice.comments").saved(buf) -- (as saved: where undoing its comments makes it unmodified)
   end
-  vim.notify("[neoffice] Saved " .. vim.fn.fnamemodify(target, ":~:."))
+  vim.notify("neoffice: Saved " .. vim.fn.fnamemodify(target, ":~:."))
 end
 
 return M

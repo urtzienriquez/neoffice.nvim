@@ -85,7 +85,7 @@ for _, name in ipairs({ "rich.docx", "office.docx", "rich.odt" }) do
       vim.cmd("Neoffice comments") -- in the panel, on the last reply's header line
       local lines, row = api.nvim_buf_get_lines(0, 0, -1, false), nil
       for k = #lines, 1, -1 do
-        if lines[k]:find("↳", 1, true) then
+        if lines[k]:find("^  %S.-, %d%d%d%d%-%d%d%-%d%d$") then -- (a reply's author and date)
           row = k
           break
         end
@@ -223,7 +223,7 @@ describe("the comments panel", function()
     api.nvim_buf_set_lines(0, 0, 0, false, filler) -- (the comment far down: out of view)
     api.nvim_win_set_cursor(doc_win, { 1, 0 })
     vim.cmd("Neoffice comments")
-    api.nvim_win_set_cursor(0, { 1, 0 })
+    api.nvim_win_set_cursor(0, { vim.fn.match(api.nvim_buf_get_lines(0, 0, -1, false), "^Alice, ") + 1, 0 })
     api.nvim_exec_autocmds("CursorMoved", { buffer = 0 })
     local row = api.nvim_win_get_cursor(doc_win)[1]
     assert.truthy(api.nvim_buf_get_lines(api.nvim_win_get_buf(doc_win), row - 1, row, false)[1]:find("^Commented"))
@@ -237,6 +237,7 @@ describe("the comments panel", function()
     vim.cmd("Neoffice comments")
     local function line() return api.nvim_get_current_line() end
     api.nvim_win_set_cursor(0, { 1, 0 })
+    vim.cmd("normal ]]") -- (from the top: the first comment)
     assert.truthy(line():find("Alice"))
     vim.cmd("normal ]]")
     assert.truthy(line():find(neo.config.author, 1, true))
@@ -308,7 +309,7 @@ for _, name in ipairs({ "rich.docx", "office.docx", "rich.odt" }) do
       vim.cmd("Neoffice comments")
       local lines, row = api.nvim_buf_get_lines(0, 0, -1, false), nil
       for k, l in ipairs(lines) do
-        if l:find("↳", 1, true) then
+        if l:find("^  %S.-, %d%d%d%d%-%d%d%-%d%d$") then -- (a reply's author and date)
           row = k
         end
       end
@@ -355,32 +356,30 @@ for _, name in ipairs({ "rich.docx", "office.docx", "rich.odt" }) do
 end
 
 describe("the comments panel's look", function()
-  it("has its counts and help in its bar, each comment's author, date and text, and no keys listed", function()
-    H.open(H.copy("rich.docx"))
+  it("is as fugitive's status window: what it is about, its help, Open and Resolved, each comment's author, date and text", function()
+    local path = H.copy("rich.docx")
+    H.open(path)
     H.cursor(3, "Commented")
-    comments.add(false, "Another")
+    comments.reply("A reply")
+    H.cursor(12, "paragraph")
+    comments.add(nil, "Another")
+    comments.resolve()
     vim.cmd("Neoffice comments")
-    local bar = vim.wo.winbar
-    assert.truthy(bar:find("2 open · 0 resolved", 1, true), bar)
-    assert.truthy(bar:find("g? help", 1, true), bar)
     local lines = api.nvim_buf_get_lines(0, 0, -1, false)
-    local alice = vim.fn.index(lines, "● Alice") + 1
-    assert.truthy(alice > 0, table.concat(lines, "\n"))
-    assert.equals("  A comment", lines[alice + 1]) -- (not the text it is on: the document shows it)
-    assert.is_nil(vim.iter(lines):find(function(l) return l:find("aa reply", 1, true) end)) -- (the keys: in the help)
-    local rule = vim.iter(ipairs(lines)):find(function(_, l) return l:find("──", 1, true) end)
-    assert.truthy(rule)
-    api.nvim_win_set_cursor(0, { rule, 0 })
-    local notify = vim.notify
-    vim.notify = function() end
-    comments.reply("To nothing") -- (on the line between two comments: to none of them)
-    vim.notify = notify
-    local date = api.nvim_buf_get_extmarks(0, neo.ns.comment, { alice - 1, 0 }, { alice - 1, -1 }, { details = true })
-    assert.truthy(vim.iter(date):find(function(m) return m[4].virt_text and m[4].virt_text[1][1] == "2024-01-01" end))
+    assert.equals("Document: " .. vim.fn.fnamemodify(path, ":t"), lines[1])
+    assert.equals("Help: g?", lines[2])
+    assert.equals("", vim.wo.winbar)
+    local open, resolved = vim.fn.index(lines, "Open (1)") + 1, vim.fn.index(lines, "Resolved (1)") + 1
+    assert.truthy(open > 0 and resolved > open, table.concat(lines, "\n"))
+    assert.same({ "Alice, 2024-01-01", "    A comment" }, vim.list_slice(lines, open + 1, open + 2))
+    assert.truthy(lines[open + 3]:match("^  %S.-, %d%d%d%d%-%d%d%-%d%d$"), lines[open + 3]) -- (its reply)
+    assert.equals("    A reply", lines[open + 4])
+    assert.equals("    Another", lines[resolved + 2])
+    assert.equals("neoffice-comments", vim.b.current_syntax)
+    api.nvim_win_set_cursor(0, { 2, 0 }) -- (its help line: no comment)
+    comments.reply("To nothing")
     vim.cmd("Neoffice comments")
-    for _, c in ipairs(H.comments()) do
-      assert.equals(0, #c.replies)
-    end
+    assert.equals(1, #vim.iter(H.comments()):find(function(c) return c.author == "Alice" end).replies)
   end)
 end)
 

@@ -37,7 +37,7 @@ function M.text(arg)
       end
     end
   end
-  vim.notify("[neoffice] Comment text " .. (on and "shown" or "hidden"))
+  vim.notify("neoffice: Comment text " .. (on and "shown" or "hidden"))
 end
 
 -- All comment marks of a document, in document order: { buf, id, row, col, end_row, end_col, c }
@@ -72,69 +72,54 @@ local function render()
   if not (panel.buf and api.nvim_buf_is_valid(panel.buf) and neo().docs[panel.doc]) then
     return
   end
-  local ns = neo().ns.comment
-  local width = panel.win and api.nvim_win_is_valid(panel.win) and api.nvim_win_get_width(panel.win) or 50
-  local lines, rows, marks_of = {}, {}, {} -- (marks_of: each line's highlights, and its date on the right)
-  local function add(text, mark, reply, hl, date)
+  -- as fugitive's status window: what it is about, its help, then its sections (highlighted by
+  -- syntax/neoffice-comments.vim)
+  local lines, rows = {}, {}
+  local function add(text, mark, reply)
     lines[#lines + 1], rows[#lines + 1] = text, { mark, reply }
-    marks_of[#lines] = { hl = hl, date = date }
   end
-  local open, resolved = 0, 0
-  panel.threads = {} -- (the first line of each comment)
-  for i, m in ipairs(marks(panel.doc)) do
-    local c = m.c
-    if i > 1 then -- (between threads: a thin rule, as a comment may have empty lines of its own)
-      add("  " .. ("─"):rep(math.max(width - 4, 4)), nil, nil, { { 0, -1, "NeofficeCommentRule" } })
-    end
-    if c.resolved then
-      resolved = resolved + 1
-    else
-      open = open + 1
-    end
-    local dim = c.resolved and "NeofficeCommentDone" or nil
-    panel.threads[#panel.threads + 1] = #lines + 1
-    add((c.resolved and "✓ " or "● ") .. c.author, m, nil, { { 0, #"● ", c.resolved and "NeofficeCommentDoneMark" or "NeofficeCommentSign" },
-      { #"● ", -1, dim or "NeofficeCommentAuthor" } }, c.date:sub(1, 10))
-    for _, l in ipairs(vim.split(c.text, "\n")) do
-      add("  " .. l, m, nil, dim and { { 0, -1, dim } } or nil)
-    end
-    for k, r in ipairs(c.replies) do
-      add("  ↳ " .. r.author, m, k, { { 2, #"  ↳ ", dim or "NeofficeCommentDate" }, { #"  ↳ ", -1, dim or "NeofficeCommentAuthor" } }, r.date:sub(1, 10))
-      for _, l in ipairs(vim.split(r.text, "\n")) do
-        add("    " .. l, m, k, dim and { { 0, -1, dim } } or nil)
+  local help = M.keys().help
+  help = type(help) == "table" and help[1] or help
+  add("Document: " .. vim.fn.fnamemodify(api.nvim_buf_get_name(panel.doc), ":t"))
+  if help then
+    add("Help: " .. help)
+  end
+  local all = marks(panel.doc)
+  panel.threads, panel.order = {}, {} -- (each comment's first line, by its place in the document; and as listed)
+  for _, resolved in ipairs({ false, true }) do
+    local these = vim.tbl_filter(function(m) return (m.c.resolved or false) == resolved end, all)
+    if #these > 0 then
+      add("")
+      add(("%s (%d)"):format(resolved and "Resolved" or "Open", #these))
+      for _, m in ipairs(these) do
+        local c = m.c
+        for k, x in ipairs(all) do
+          if x == m then
+            panel.threads[k] = #lines + 1
+          end
+        end
+        panel.order[#panel.order + 1] = #lines + 1
+        add(("%s, %s"):format(c.author, c.date:sub(1, 10)), m)
+        for _, l in ipairs(vim.split(c.text, "\n")) do
+          add("    " .. l, m)
+        end
+        for k, r in ipairs(c.replies) do
+          add(("  %s, %s"):format(r.author, r.date:sub(1, 10)), m, k)
+          for _, l in ipairs(vim.split(r.text, "\n")) do
+            add("    " .. l, m, k)
+          end
+        end
       end
     end
   end
-  if #lines == 0 then
+  if #all == 0 then
     add("")
-    add("  No comments.", nil, nil, { { 0, -1, "NeofficeCommentDate" } })
-    add("  :Neoffice comment adds one, on the", nil, nil, { { 0, -1, "NeofficeCommentDate" } })
-    add("  selection or the cursor's word.", nil, nil, { { 0, -1, "NeofficeCommentDate" } })
+    add("No comments. :Neoffice comment adds one.")
   end
   vim.bo[panel.buf].modifiable = true
   api.nvim_buf_set_lines(panel.buf, 0, -1, false, lines)
   vim.bo[panel.buf].modifiable = false
   vim.bo[panel.buf].modified = false -- (drawn, not changed: nothing of its own to save, :q closes it)
-  api.nvim_buf_clear_namespace(panel.buf, ns, 0, -1)
-  for row, mk in pairs(marks_of) do
-    for _, h in ipairs(mk.hl or {}) do
-      local e = h[2] < 0 and #lines[row] or h[2]
-      if e > h[1] then
-        api.nvim_buf_set_extmark(panel.buf, ns, row - 1, h[1], { end_col = e, hl_group = h[3] })
-      end
-    end
-    if mk.date then
-      api.nvim_buf_set_extmark(panel.buf, ns, row - 1, 0, { virt_text = { { mk.date, "NeofficeCommentDate" } }, virt_text_pos = "right_align" })
-    end
-  end
-  -- (at its top: how many, and its help)
-  if panel.win and api.nvim_win_is_valid(panel.win) and api.nvim_win_get_buf(panel.win) == panel.buf then
-    local help = M.keys().help
-    help = type(help) == "table" and help[1] or help
-    local bar = ("%%#NeofficeCommentTitle# Comments %%#NeofficeCommentDate# %d open · %d resolved%%=%s"):format(open, resolved,
-      help and ("%#NeofficeCommentDate#" .. help:gsub("%%", "%%%%") .. " help ") or "")
-    api.nvim_set_option_value("winbar", bar, { win = panel.win, scope = "local" })
-  end
   panel.rows = rows
 end
 
@@ -146,7 +131,7 @@ local function at_cursor()
     local row = panel.rows[cursor[1]]
     return row and row[1], row and row[2]
   elseif not neo().docs[buf] then
-    return vim.notify("[neoffice] Not a document buffer", vim.log.levels.WARN)
+    return vim.notify("neoffice: Not a document buffer", vim.log.levels.WARN)
   end
   local pos, on_line = { cursor[1] - 1, cursor[2] }, nil
   for _, m in ipairs(marks(buf)) do
@@ -157,7 +142,7 @@ local function at_cursor()
     on_line = on_line or (m.row == pos[1] and m)
   end
   if not on_line then
-    vim.notify("[neoffice] No comment here")
+    vim.notify("neoffice: No comment here")
   end
   return on_line or nil
 end
@@ -247,7 +232,7 @@ local function step(dir)
   local h = history[buf]
   local s = h and table.remove(dir > 0 and h.undone or h.done)
   if not s then
-    return vim.notify(dir > 0 and "[neoffice] Nothing to redo" or "[neoffice] Nothing to undo")
+    return vim.notify(dir > 0 and "neoffice: Nothing to redo" or "neoffice: Nothing to undo")
   end
   if dir > 0 then
     s.redo()
@@ -257,7 +242,7 @@ local function step(dir)
     table.insert(h.undone, s)
   end
   settle(buf)
-  vim.notify(("[neoffice] %s: %s"):format(dir > 0 and "Redone" or "Undone", s.what))
+  vim.notify(("neoffice: %s: %s"):format(dir > 0 and "Redone" or "Undone", s.what))
 end
 function M.undo() step(-1) end
 function M.redo() step(1) end
@@ -293,9 +278,6 @@ local function compose(spec)
   api.nvim_buf_set_lines(buf, 0, -1, false, vim.list_extend(vim.deepcopy(spec.lines), help))
   vim.bo[buf].undolevels = undolevels
   vim.bo[buf].modified = false
-  api.nvim_buf_call(buf, function()
-    vim.cmd([[syntax match NeofficeCommentHelp /^#.*/]])
-  end)
   api.nvim_win_set_cursor(win, { 1, 0 })
   -- (as git takes a commit's message: what :w wrote, once the buffer closes; :q! with nothing
   -- written leaves it)
@@ -308,7 +290,7 @@ local function compose(spec)
       if written then
         local ok, err = pcall(spec.write, written)
         if not ok then
-          vim.notify("[neoffice] " .. tostring(err), vim.log.levels.ERROR)
+          vim.notify("neoffice: " .. tostring(err), vim.log.levels.ERROR)
         end
       end
     end)
@@ -319,7 +301,7 @@ local function compose(spec)
     if text == "" then -- (as git: an empty message aborts, also one written before)
       written = nil
       vim.bo[buf].modified = false
-      return vim.notify("[neoffice] The text is empty: nothing will be added")
+      return vim.notify("neoffice: The text is empty: nothing will be added")
     end
     written = text
     vim.bo[buf].modified = false
@@ -331,7 +313,7 @@ function M.reply(text)
   neo().finish_all()
   local m = at_cursor()
   if not m then
-    return vim.notify("[neoffice] No comment here", vim.log.levels.WARN)
+    return vim.notify("neoffice: No comment here", vim.log.levels.WARN)
   end
   local function write(t)
     local c, reply = m.c, { author = neo().config.author, date = now(), text = t, replies = {} }
@@ -368,7 +350,7 @@ function M.edit()
   neo().finish_all()
   local m, reply = at_cursor()
   if not m then
-    return vim.notify("[neoffice] No comment here", vim.log.levels.WARN)
+    return vim.notify("neoffice: No comment here", vim.log.levels.WARN)
   end
   local x = reply and m.c.replies[reply] or m.c
   compose({ title = ("Editing %s's %s of %s."):format(x.author, reply and "reply" or "comment", x.date:sub(1, 10)), lines = vim.split(x.text, "\n"),
@@ -440,7 +422,7 @@ end
 -- To the next (dir 1) or previous (-1) comment in the panel.
 local function to_comment(dir)
   local row = api.nvim_win_get_cursor(0)[1]
-  local threads = panel.threads or {}
+  local threads = panel.order or {}
   for k = dir > 0 and 1 or #threads, dir > 0 and #threads or 1, dir do
     if dir * (threads[k] - row) > 0 then
       return api.nvim_win_set_cursor(0, { threads[k], 0 })
@@ -537,7 +519,7 @@ function M.toggle_panel()
   end
   local buf = api.nvim_get_current_buf()
   if not neo().docs[buf] then
-    return vim.notify("[neoffice] Not a document buffer", vim.log.levels.WARN)
+    return vim.notify("neoffice: Not a document buffer", vim.log.levels.WARN)
   end
   panel.doc = buf
   if not (panel.buf and api.nvim_buf_is_valid(panel.buf)) then
@@ -580,7 +562,7 @@ function M.toggle_panel()
   api.nvim_win_set_buf(panel.win, panel.buf)
   -- (as :setlocal, for its window only: not inherited by the windows opened from it)
   for name, value in pairs({ number = false, relativenumber = false, wrap = true, signcolumn = "no", winfixwidth = true, cursorline = true,
-    foldcolumn = "0", list = false, spell = false, statuscolumn = "", linebreak = true, breakindent = true }) do
+    foldcolumn = "0", list = false, spell = false, statuscolumn = "", linebreak = true, breakindent = true, winbar = "" }) do
     api.nvim_set_option_value(name, value, { win = panel.win, scope = "local" })
   end
   render()
@@ -604,7 +586,7 @@ function M.add(use_marks, text)
   neo().finish_all()
   local buf = api.nvim_get_current_buf()
   if not neo().docs[buf] then
-    return vim.notify("[neoffice] Not a document buffer", vim.log.levels.WARN)
+    return vim.notify("neoffice: Not a document buffer", vim.log.levels.WARN)
   end
   local mode = use_marks == true and vim.fn.visualmode() or vim.fn.mode()
   local r1, c1, r2, c2, pending

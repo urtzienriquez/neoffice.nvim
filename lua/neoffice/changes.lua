@@ -343,7 +343,7 @@ local function deleted(buf, old, chars, i, j, at, span)
   end
   if kept then
     vim.schedule(function()
-      vim.notify("[neoffice] With tracking on, images, equations, footnotes, fields and breaks can't be"
+      vim.notify("neoffice: With tracking on, images, equations, footnotes, fields and breaks can't be"
         .. " deleted (they are put back): turn tracking off to delete them", vim.log.levels.WARN)
     end)
   end
@@ -574,11 +574,11 @@ function M.track(arg)
   local buf = api.nvim_get_current_buf()
   local doc = neo().docs[buf]
   if not doc then
-    return vim.notify("[neoffice] Not a document buffer", vim.log.levels.WARN)
+    return vim.notify("neoffice: Not a document buffer", vim.log.levels.WARN)
   end
   doc.tracking = arg == "on" or (arg ~= "off" and not doc.tracking)
   M.snapshot(buf)
-  vim.notify("[neoffice] Tracking changes " .. (doc.tracking and "on" or "off"))
+  vim.notify("neoffice: Tracking changes " .. (doc.tracking and "on" or "off"))
 end
 
 -- ── Reviewing ───────────────────────────────────────────────────────────────
@@ -640,7 +640,7 @@ local function apply(buf, m, action, a, b)
   local doc, ch = neo().docs[buf], neo().docs[buf].change[m[1]]
   local s, e = range(m)
   if ch.no_text and action == "reject" then -- (what it deleted isn't text: an image, a tab...)
-    vim.notify("[neoffice] This deletion (of an image, a tab...) can't be rejected here: reject it in Word or LibreOffice", vim.log.levels.WARN)
+    vim.notify("neoffice: This deletion (of an image, a tab...) can't be rejected here: reject it in Word or LibreOffice", vim.log.levels.WARN)
     return false
   end
   if ch.type == "format" then
@@ -697,7 +697,7 @@ function M.resolve(action, all, use_marks, author)
   neo().finish_all()
   local buf = api.nvim_get_current_buf()
   if not neo().docs[buf] then
-    return vim.notify("[neoffice] Not a document buffer", vim.log.levels.WARN)
+    return vim.notify("neoffice: Not a document buffer", vim.log.levels.WARN)
   end
   local selection = not all and neo().selection(use_marks)
   -- what to review: all, the selection (a block: each line's part of it), or what is at the cursor
@@ -739,7 +739,7 @@ function M.resolve(action, all, use_marks, author)
     end
   end
   if not next(ids) and not vim.iter(areas):any(function(area) return #changes_in(area) > 0 end) then
-    return vim.notify("[neoffice] No tracked change here")
+    return vim.notify("neoffice: No tracked change here")
   end
   if next(ids) then -- (written with the document: see docx.save)
     doc.mark_decisions = doc.mark_decisions or {}
@@ -782,7 +782,7 @@ function M.jump(dir)
       return api.nvim_win_set_cursor(0, { m[2] + 1, m[3] })
     end
   end
-  vim.notify("[neoffice] No more tracked changes")
+  vim.notify("neoffice: No more tracked changes")
 end
 
 function M.list(author) -- (all of them, or those of one author)

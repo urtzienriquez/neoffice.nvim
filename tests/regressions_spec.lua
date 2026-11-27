@@ -333,7 +333,7 @@ describe("comments", function()
     vim.cmd("wincmd p")
     api.nvim_buf_set_lines(0, 0, 0, false, { "", "", "", "" })
     vim.cmd("wincmd p")
-    api.nvim_win_set_cursor(0, { 1, 0 })
+    api.nvim_win_set_cursor(0, { vim.fn.match(api.nvim_buf_get_lines(0, 0, -1, false), "^Alice, ") + 1, 0 })
     require("neoffice.comments").jump()
     assert.truthy(api.nvim_get_current_line():find("^Commented text"))
     neo.config.comment_text = true
