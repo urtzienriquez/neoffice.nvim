@@ -1067,6 +1067,60 @@ for c in ("\\!$^_*~=+}[" .. "\226"):gmatch(".") do -- (\226: the first byte of â
   MARKS[c:byte()] = true
 end
 
+-- Marks that close nothing, in a text: what would be written as characters, not formatting
+-- (a "**" whose other one was deleted...). { col (0-based), mark, flag (what it would format) }, in
+-- order. Escaped ones ("\*\*") are characters on purpose; so is a lone "*" between spaces or
+-- letters ("2 * 3", "2*3"): only one where a word starts ("*word") counts. A "~~", "==" or "++" is
+-- written as it is when it can't be a mark ("C++", "a == b"): one counts where a word starts too,
+-- unless `anywhere`.
+M.ORPHAN_FLAGS = { ["**"] = "b", ["*"] = "i", ["~~"] = "s", ["=="] = "h", ["++"] = "u", ["^{"] = "sup", ["_{"] = "sub" }
+local SHAPED = { ["~~"] = true, ["=="] = true, ["++"] = true }
+function M.orphan_marks(text, anywhere)
+  local out = {}
+  if not text:find("[*~=+^_]") then
+    return out
+  end
+  local _, chars = M.parse_shared(text)
+  local function plain(c) -- (a character as written, not escaped, not an image...)
+    return c and not c.esc and not c.len
+  end
+  local k = 1
+  while k <= #chars do
+    local c, n, p = chars[k], chars[k + 1], chars[k - 1]
+    local next_to = plain(n) and n.col == c.col + #c.ch
+    local two = plain(c) and next_to and c.ch .. n.ch
+    local after = two and chars[k + 2]
+    local starts = not (p and p.col + #p.ch == c.col and not p.ch:find("^%s")) -- (nothing right before it but a space)
+      and after and after.col == n.col + #n.ch and not after.ch:find("^%s")
+    if two and M.ORPHAN_FLAGS[two] and #two == 2 and (anywhere or not SHAPED[two] or starts) then
+      out[#out + 1] = { col = c.col, mark = two, flag = M.ORPHAN_FLAGS[two] }
+      k = k + 2
+    else
+      if plain(c) and c.ch == "*" and next_to and not n.ch:find("^%s") and n.ch ~= "*"
+        and not (p and p.col + #p.ch == c.col and not p.ch:find("^%s")) then -- (where a word starts)
+        out[#out + 1] = { col = c.col, mark = "*", flag = "i" }
+      end
+      k = k + 1
+    end
+  end
+  -- (and a "^{" or "_{" whose "}" was deleted: what follows it is a superscript, or subscript, to
+  -- the end)
+  local last = chars[#chars]
+  for _, key in ipairs(last and { "sup", "sub" } or {}) do
+    if last[key] and not text:sub(last.col + (last.len or #last.ch) + 1):find("}", 1, true) then
+      local first = #chars
+      while first > 1 and chars[first - 1][key] do
+        first = first - 1
+      end
+      local mark = key == "sup" and "^{" or "_{"
+      local at = text:sub(1, chars[first].col):match(".*()" .. vim.pesc(mark))
+      out[#out + 1] = { col = at and at - 1 or chars[first].col, mark = mark, flag = key, spreads = true }
+    end
+  end
+  table.sort(out, function(x, y) return x.col < y.col end)
+  return out
+end
+
 -- M.parse's result for a text, the same tables each time for the last few texts read: only to be
 -- read, never changed (typing reads the line it changes again and again: before the edit and after
 -- it, and to decorate it).

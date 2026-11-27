@@ -294,7 +294,12 @@ Escapes ~
 A `\` makes the next character plain text when it could be read as a mark:
 `\*`, `\[`, `\#`, `\$`, `\_{`, `\-`, `\>`, `\|`, `\=`, `\+`, `\~`, `\\`, ...
 Before any other character it is just a backslash (`C:\Users` stays as it
-is), and a mark that is never closed is just text (`if a == b`). Brackets
+is), and a mark that is never closed is just text (`if a == b`). So deleting
+one of a pair (a word deleted with the `**` in it) would turn the other into
+characters and lose the formatting: such a mark shows as a warning, and a
+save that would lose formatting so (or leave a `^{` or `_{` open, raising or
+lowering all that follows) stops and says where. Put the other one back, or
+escape it (`\*\*`) if the characters are what you mean. Brackets
 are text (`[B]`, `[1, 2]`) unless they start a link, an image or a footnote:
 only then is one written `\[` (as in `\[not a link](x)`, or `\[x]{y}`, which
 would read as a span of text in another font). Text that

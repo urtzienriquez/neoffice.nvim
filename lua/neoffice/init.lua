@@ -288,6 +288,61 @@ function M.blocks(buf)
   return M.paragraphs(api.nvim_buf_get_lines(buf, 0, -1, false), alone)
 end
 
+-- Where a byte of a paragraph's text is in the buffer: row (1-based), column (0-based).
+function M.position_in(buf, para, offset)
+  if para.cell then
+    return para.first, (para.col or 0) + offset
+  end
+  local lines = api.nvim_buf_get_lines(buf, para.first - 1, para.last, false)
+  offset = M.buffer_offset(para, offset)
+  local row = 1
+  while row < #lines and offset > #lines[row] do
+    offset, row = offset - #lines[row] - M.join(para, row), row + 1
+  end
+  return para.first + row - 1, offset
+end
+
+-- (a paragraph edited: a mark that now closes nothing, where the formatting it closed is gone, as
+-- when a word is deleted with the "**" in it; or a "^{" or "_{" no longer closed, so what follows is
+-- a superscript or subscript: the save stops, and says where; see markup.orphan_marks)
+local function check_marks(buf, block, was)
+  local function count(text, list)
+    local n = {}
+    for _, o in ipairs(list or markup.orphan_marks(text, true)) do
+      n[o.mark] = (n[o.mark] or 0) + 1
+    end
+    return n
+  end
+  local now = markup.orphan_marks(block.text, true)
+  if #now == 0 then
+    return
+  end
+  local before, flags_was, flags_now = count(was), {}, {}
+  for _, pair in ipairs({ { was, flags_was }, { block.text, flags_now } }) do
+    for _, c in ipairs(select(2, markup.parse_shared(pair[1]))) do
+      for _, flag in ipairs(markup.FLAGS) do
+        if c[flag] then
+          pair[2][flag] = (pair[2][flag] or 0) + 1
+        end
+      end
+    end
+  end
+  local seen = {}
+  for _, o in ipairs(now) do
+    seen[o.mark] = (seen[o.mark] or 0) + 1
+    local new = seen[o.mark] > (before[o.mark] or 0)
+    local lost = (flags_now[o.flag] or 0) < (flags_was[o.flag] or 0)
+    if new and (o.spreads or lost) then
+      local row, col = M.position_in(buf, block, o.col)
+      local escaped = o.mark:gsub(".", "\\%0")
+      assert(false, o.spreads
+        and ("line %d, column %d: this %s isn't closed any more, so all that follows it would be a %s; close it with }"):format(row, col + 1, o.mark, o.flag == "sup" and "superscript" or "subscript")
+        or ("line %d, column %d: this %s closes nothing any more (its other one was deleted), so it would be written as characters and the %s it closed lost; put the other one back, or write %s for the characters"):format(
+          row, col + 1, o.mark, ({ b = "bold", i = "italics", s = "strikethrough", h = "highlight", u = "underline" })[o.flag] or "formatting", escaped))
+    end
+  end
+end
+
 local function covers(mark, row, col)
   local d = mark[4]
   return (mark[2] < row or mark[2] == row and mark[3] <= col) and (d.end_row > row or d.end_row == row and d.end_col > col)
@@ -3081,6 +3136,9 @@ function M.save(buf, target)
     for k, block in ipairs(blocks) do
       assert(not (block.format and block.format.bad), block.format and block.format.bad) -- (its format's line: right)
       local o = old_of[k]
+      if o and doc.texts[o] ~= block.text then -- (a mark it lost the other one of: see check_marks)
+        check_marks(buf, block, doc.texts[o])
+      end
       if reusable and o and doc.texts[o] == block.text and doc.sigs[o] and doc.ctx_keys[o] == context_key(block) and not touched(doc, block) then
         -- (as it was, its text, rows and format: its fingerprint as it was; its pieces only if needed)
         plans[k] = { old = o, lazy = block, sig = doc.sigs[o], cell = block.cell, box = block.box }

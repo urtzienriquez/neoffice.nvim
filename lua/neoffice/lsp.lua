@@ -209,6 +209,15 @@ local function attribute_diagnostics(buf)
       add(st.row, 0, #line, vim.lsp.protocol.DiagnosticSeverity.Error, ("not a paragraph style of this document: %s"):format(st.name))
     end
   end
+  -- marks that close nothing: written as characters, or (^{, _{) formatting all that follows
+  for _, block in ipairs(doc and neo().blocks(buf) or {}) do
+    for _, o in ipairs(block.text ~= "" and markup.orphan_marks(block.text) or {}) do
+      local r, c = neo().position_in(buf, block, o.col)
+      add(r, c, c + #o.mark, vim.lsp.protocol.DiagnosticSeverity.Warning, o.spreads
+        and ("this %s isn't closed: all that follows it is a %s (close it with })"):format(o.mark, o.flag == "sup" and "superscript" or "subscript")
+        or ("this %s closes nothing: it is written as characters (write %s for them, or put back its other one to format)"):format(o.mark, (o.mark:gsub(".", "\\%0"))))
+    end
+  end
   for r, line in ipairs(lines) do
     if line:find("]{", 1, true) then -- a span of text's attributes ("[words]{font = Arial}")
       for _, c in ipairs(select(2, markup.parse(line))) do
