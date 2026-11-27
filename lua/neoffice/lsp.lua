@@ -833,17 +833,21 @@ function M.server(dispatchers)
         dispatchers.on_exit(0, 15)
       elseif method == "textDocument/didOpen" or method == "textDocument/didChange" then
         local uri = params.textDocument.uri
-        if not pending[uri] then -- (once typing pauses)
-          pending[uri] = true
-          vim.defer_fn(function()
+        -- (once typing pauses: each change puts it off again, so nothing is checked as you type)
+        local timer = pending[uri] or vim.uv.new_timer()
+        pending[uri] = timer
+        timer:stop()
+        timer:start(method == "textDocument/didOpen" and 0 or 300, 0, vim.schedule_wrap(function()
+          if pending[uri] == timer then
             pending[uri] = nil
-            local buf = vim.uri_to_bufnr(uri)
-            if not closing and api.nvim_buf_is_loaded(buf) then
-              local ok, diagnostics = pcall(attribute_diagnostics, buf)
-              dispatchers.notification("textDocument/publishDiagnostics", { uri = uri, diagnostics = ok and diagnostics or {} })
-            end
-          end, 150)
-        end
+            timer:close()
+          end
+          local buf = vim.uri_to_bufnr(uri)
+          if not closing and api.nvim_buf_is_loaded(buf) then
+            local ok, diagnostics = pcall(attribute_diagnostics, buf)
+            dispatchers.notification("textDocument/publishDiagnostics", { uri = uri, diagnostics = ok and diagnostics or {} })
+          end
+        end))
       end
       return true
     end,

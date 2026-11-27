@@ -111,4 +111,43 @@ describe(".doc", function()
     H.reopen()
     assert.equals("Changed in a .doc.", H.paras()[12])
   end)
+
+  it("opens at once the next time: the conversion kept, and what was written read back", function()
+    if not H.has_libreoffice then
+      return pending("needs LibreOffice")
+    end
+    local neo = require("neoffice")
+    local cache, was = vim.fn.tempname(), neo.config.doc_cache
+    neo.config.doc_cache = cache
+    local dir = vim.fn.tempname()
+    vim.system({ "soffice", "-env:UserInstallation=file://" .. dir .. "/p", "--headless", "--convert-to", "doc", "--outdir", dir, H.FIXTURES .. "rich.docx" }):wait()
+    local path = dir .. "/rich.doc"
+    H.open(path)
+    local function kept()
+      local n = 0
+      for _ in vim.fs.dir(cache) do
+        n = n + 1
+      end
+      return n
+    end
+    assert.equals(1, kept())
+    local system = vim.system
+    local function without_libreoffice(fn) -- (each conversion would fail)
+      vim.system = function(cmd, ...)
+        assert(cmd[1] ~= "soffice", "LibreOffice was run")
+        return system(cmd, ...)
+      end
+      local ok, err = pcall(fn)
+      vim.system = system
+      assert(ok, err)
+    end
+    without_libreoffice(function() H.open(path) end)
+    assert.equals("# Introduction", H.paras()[1])
+    H.set(12, "Changed in a .doc.")
+    H.save()
+    assert(vim.wait(60000, function() return kept() == 2 end, 50), "what was written was never read back")
+    without_libreoffice(function() H.open(path) end)
+    assert.equals("Changed in a .doc.", H.paras()[12])
+    neo.config.doc_cache = was
+  end)
 end)

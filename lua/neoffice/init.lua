@@ -34,6 +34,9 @@ M.config = {
   images = true, -- show images in the buffer (needs Neovim's vim.ui.img and a terminal that supports it)
   lsp = true, -- a language server for documents: headings as symbols (gO), folding, hover on comments
   comment_text = false, -- each comment's author and text at the end of its line (:Neoffice comments text)
+  -- where .doc files converted by LibreOffice are kept, by their content, so one opens at once the
+  -- next time (false: converted each time; nil: Neovim's cache directory)
+  doc_cache = nil,
   image_width = 60, -- at most this many columns wide
   image_height = 20, -- and this many lines high
   -- captions ("Table: ...", "Figure: ..."): their words, and what goes between the number and the text
@@ -101,6 +104,9 @@ function M.place(buf, kind, data, r1, c1, r2, c2)
   end
   local id = api.nvim_buf_set_extmark(buf, M.ns[kind], r1, c1, opts)
   M.docs[buf][kind][id] = data
+  if kind == "change" then -- (see changes.lua: changed)
+    M.docs[buf].change_version = (M.docs[buf].change_version or 0) + 1
+  end
   return id
 end
 
@@ -939,17 +945,37 @@ local function touched(doc, block)
   return false
 end
 
+local PIECE_KEYS = { "text", "props", "link", "insert", "font", "size", "color", "b", "i", "u", "s", "h", "sup", "sub", "object",
+  "note", "image", "math", "footnote", "deletion", "deleted", "part", "segs", "line_break", "page_break", "insert_start",
+  "insert_end", "comment_start", "comment_end", "paragraph_mark", "mark", "original", "visible" }
+local PIECE_KNOWN = {}
+for _, key in ipairs(PIECE_KEYS) do
+  PIECE_KNOWN[key] = true
+end
 local function signature(block, list)
   local l = block.list
   local out = { table.concat({ tostring(block.heading), tostring(block.title), tostring(block.quote), tostring(block.align), tostring(block.caption),
     block.para and pformat.key({ attrs = block.para }) or "",
     tostring(block.cell), l and table.concat({ l.kind, l.level, tostring(l.pattern), tostring(l.id), tostring(l.continues) }, ",") or "" }, "|") }
   for _, piece in ipairs(list) do
+    -- (its keys in an order of their own: the usual ones as listed, any other after them, sorted)
     local keys = {}
-    for key in pairs(piece) do
-      keys[#keys + 1] = key
+    for _, key in ipairs(PIECE_KEYS) do
+      if piece[key] ~= nil then
+        keys[#keys + 1] = key
+      end
     end
-    table.sort(keys)
+    local extra
+    for key in pairs(piece) do
+      if not PIECE_KNOWN[key] then
+        extra = extra or {}
+        extra[#extra + 1] = key
+      end
+    end
+    if extra then
+      table.sort(extra)
+      vim.list_extend(keys, extra)
+    end
     for _, key in ipairs(keys) do
       local v = piece[key]
       if key == "segs" then -- (the deleted text's formatting)
@@ -1014,7 +1040,9 @@ local function setup_buffer(buf)
   M.languages()
   vim.bo[buf].filetype = "neoffice"
   pcall(vim.treesitter.start, buf) -- markdown (see plugin/neoffice.lua): highlights the marks
-  vim.bo[buf].syntax = "neoffice" -- adds <u> (see syntax/neoffice.vim)
+  -- (underlines, superscripts... drawn as the text is decorated, see M.decorate_marks; by the syntax,
+  -- syntax/neoffice.vim, when the marks are concealed: it hides them)
+  vim.bo[buf].syntax = M.config.conceal and "neoffice" or ""
   -- Tab types a tab (a document's tab, shown as →), not spaces, whatever 'expandtab' and 'smarttab'
   -- say (a completion plugin that uses Tab hands it on to this, as blink.cmp does); >> and << move a
   -- list item by a level: two spaces, never a tab
@@ -1045,7 +1073,7 @@ local function setup_buffer(buf)
     buffer = buf,
     callback = function()
       require("neoffice.changes").after_edit(buf)
-      M.decorate_soon(buf)
+      M.decorate_changed(buf)
     end,
   })
   api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI", "TextChanged" }, {
@@ -1059,19 +1087,91 @@ local function setup_buffer(buf)
   require("neoffice.images").attach(buf, group)
   vim.schedule(function() -- (once the text shows: opening doesn't wait for the colours)
     if api.nvim_buf_is_valid(buf) then
-      M.decorate(buf)
+      M.decorate_first(buf)
     end
   end)
 end
 
 -- Convert a file with LibreOffice (to = "docx", "doc:MS Word 97", ...) into `dir`; returns the new path.
-local converted = {} -- (a .doc file, as it was -> its .docx, this session)
-local function convert(path, to, dir)
-  local profile = "-env:UserInstallation=file://" .. vim.fn.stdpath("cache") .. "/neoffice-libreoffice"
-  local r = vim.system({ "soffice", profile, "--headless", "--convert-to", to, "--outdir", dir, path }):wait()
+-- (on_done: in the background, with a profile of its own, so as not to wait for it nor be in the
+-- way of a conversion waited for; on_done(path or nil) once done)
+local background = {} -- (the conversions waiting: one at a time, as they share a profile)
+local function convert(path, to, dir, on_done)
+  local profile = "-env:UserInstallation=file://" .. vim.fn.stdpath("cache") .. "/neoffice-libreoffice" .. (on_done and "-background" or "")
+  local cmd = { "soffice", profile, "--headless", "--norestore", "--convert-to", to, "--outdir", dir, path }
   local out = dir .. "/" .. vim.fn.fnamemodify(path, ":t:r") .. "." .. to:match("^%w+")
+  if on_done then
+    local function run()
+      vim.system(cmd, {}, vim.schedule_wrap(function(r)
+        table.remove(background, 1)
+        on_done(r.code == 0 and vim.uv.fs_stat(out) and out or nil)
+        if background[1] then
+          background[1]()
+        end
+      end))
+    end
+    background[#background + 1] = run
+    if #background == 1 then
+      run()
+    end
+    return
+  end
+  local r = vim.system(cmd):wait()
   assert(r.code == 0 and vim.uv.fs_stat(out), "LibreOffice (soffice) could not convert " .. path)
   return out
+end
+
+-- .doc files as LibreOffice converts them to .docx, kept by the .doc's content (its SHA-256): one
+-- opens at once the next time, in any session, while it is as it was (and one neoffice wrote, as
+-- read back from what it wrote: see M.save). The last ones used only.
+local DOC_CACHE_KEEP = 100
+local function doc_cache()
+  local dir = M.config.doc_cache
+  if dir == false then
+    return nil
+  end
+  return dir or vim.fs.joinpath(vim.fn.stdpath("cache"), "neoffice", "doc")
+end
+local function content_key(path)
+  local f = io.open(path, "rb")
+  if not f then
+    return nil
+  end
+  local data = f:read("*a")
+  f:close()
+  return vim.fn.sha256(data)
+end
+local function cached_doc(key) -- (its .docx, if kept: marked as used)
+  local dir = doc_cache()
+  local file = dir and key and vim.fs.joinpath(dir, key .. ".docx")
+  if file and vim.uv.fs_stat(file) then
+    local now = os.time()
+    pcall(vim.uv.fs_utime, file, now, now)
+    return file
+  end
+end
+local function keep_doc(key, docx) -- (and the least recently used go, beyond the last ones)
+  local dir = doc_cache()
+  if not (dir and key) then
+    return
+  end
+  vim.fn.mkdir(dir, "p")
+  local file = vim.fs.joinpath(dir, key .. ".docx")
+  if not vim.uv.fs_copyfile(docx, file .. ".part") or not os.rename(file .. ".part", file) then
+    os.remove(file .. ".part")
+    return
+  end
+  local kept = {}
+  for name, kind in vim.fs.dir(dir) do
+    local stat = kind == "file" and name:match("%.docx$") and vim.uv.fs_stat(vim.fs.joinpath(dir, name))
+    if stat then
+      kept[#kept + 1] = { name = name, mtime = stat.mtime.sec }
+    end
+  end
+  table.sort(kept, function(x, y) return x.mtime > y.mtime end)
+  for k = DOC_CACHE_KEEP + 1, #kept do
+    os.remove(vim.fs.joinpath(dir, kept[k].name))
+  end
 end
 
 -- A copy of the plugin's empty document (templates/), to start a new one from.
@@ -1238,17 +1338,18 @@ local function open(buf, path)
   local ext = path:match("%.(%w+)$"):lower()
   local new = not vim.uv.fs_stat(path) -- a new document: created on the first :w
   local base
-  if ext == "doc" then -- (converted by LibreOffice: once a session, while the file stays as it was)
-    local s = not new and vim.uv.fs_stat(path)
-    local key = s and ("%s:%d:%d.%d"):format(path, s.size, s.mtime.sec, s.mtime.nsec)
+  if ext == "doc" then -- (converted by LibreOffice: once, while the file stays as it was, see doc_cache)
     if new then
       base = template("docx")
     else
-      if not (converted[key] and vim.uv.fs_stat(converted[key])) then
-        converted[key] = convert(path, "docx", vim.fn.tempname())
+      local key = content_key(path)
+      local docx = cached_doc(key)
+      if not docx then
+        docx = convert(path, "docx", vim.fn.tempname())
+        keep_doc(key, docx)
       end
       base = vim.fn.tempname() .. ".docx"
-      assert(vim.uv.fs_copyfile(converted[key], base))
+      assert(vim.uv.fs_copyfile(docx, base))
     end
   elseif new then
     base = template(ext)
@@ -1740,14 +1841,34 @@ local function open(buf, path)
       -- (the rows changed since the fingerprints were taken, as they move with later changes: their
       -- paragraphs' are taken again at the next save)
       local delta = new_end_row - old_end_row
-      for _, r in ipairs(d.touched) do
+      local function moved(r) -- (a range of rows as the edit moves it)
         if r[1] > start_row + old_end_row then
           r[1], r[2] = r[1] + delta, r[2] + delta
         elseif r[2] >= start_row then
           r[2] = math.max(r[2] + delta, start_row + new_end_row)
         end
       end
-      d.touched[#d.touched + 1] = { start_row, start_row + new_end_row }
+      -- (one range for the rows edited here and those it overlaps or touches: typing in a paragraph
+      -- keeps one, however long it goes on)
+      local new, kept = { start_row, start_row + new_end_row }, {}
+      for _, r in ipairs(d.touched) do
+        moved(r)
+        if r[2] + 1 >= new[1] and r[1] <= new[2] + 1 then
+          new[1], new[2] = math.min(new[1], r[1]), math.max(new[2], r[2])
+        else
+          kept[#kept + 1] = r
+        end
+      end
+      kept[#kept + 1] = new
+      d.touched = kept
+      -- (and the rows to decorate again: see M.decorate_changed)
+      local dirty = d.decor_dirty
+      if dirty then
+        moved(dirty)
+        dirty[1], dirty[2] = math.min(dirty[1], start_row), math.max(dirty[2], start_row + new_end_row)
+      else
+        d.decor_dirty = { start_row, start_row + new_end_row }
+      end
     end,
     on_reload = function() end, -- (read again from disk: opened again, as a new document; this one stays attached)
     on_detach = function() -- (no longer told what changes: every paragraph's fingerprint taken again at each save)
@@ -1756,32 +1877,39 @@ local function open(buf, path)
       end
     end,
   })
-  local function step() -- (a few at a time, so typing isn't held up)
+  local function step(budget, most) -- (a few at a time, so typing isn't held up)
     local d = M.docs[buf]
     local p = d and d.pending
     if not p then
       return
     end
-    if api.nvim_buf_get_changedtick(buf) ~= p.tick then
-      return M.finish_sigs(buf)
+    if api.nvim_buf_get_changedtick(buf) ~= p.tick then -- (edited meanwhile: the rest once typing pauses)
+      return M.finish_sigs_later(buf)
     end
-    local stop = math.min(p.next + 39, #p.blocks)
-    for k = p.next, stop do
+    local deadline = vim.uv.hrtime() + (budget or 4e6) -- (4 ms at a time, so a key typed meanwhile isn't kept waiting)
+    local k = p.next
+    while k <= #p.blocks do
       d.sigs[k], d.ctx_keys[k] = signature(pieces(buf, p.blocks[k])), context_key(p.blocks[k])
+      k = k + 1
+      if vim.uv.hrtime() > deadline or most and k > most then
+        break
+      end
     end
-    p.next = stop + 1
+    p.next = k
     if p.next > #p.blocks then
       d.pending = nil
     else
-      vim.schedule(step)
+      vim.defer_fn(function() step() end, 0) -- (on a timer: keys typed meanwhile go first)
     end
   end
-  vim.schedule(step)
   vim.bo[buf].modified = false
   doc.unsaved_other = nil -- (a change neither to its text nor to its comments, not saved yet: see comments.settle)
   require("neoffice.comments").reset(buf) -- (as opened: what was done to its comments before is gone)
   setup_buffer(buf)
   require("neoffice.changes").start(buf)
+  -- (the first ones now, for a few milliseconds, a hundred at most: all of a short document's, the
+  -- first screens of a long one's, where an edit right after opening is; the rest after)
+  step(20e6, 100)
   if new then
     vim.notify("neoffice: New document: it is created when you write it")
   end
@@ -1828,39 +1956,18 @@ end
 
 -- Decorations that follow the text: titles highlighted (NeofficeTitle, above tree-sitter) and,
 -- when the document numbers its headings, their numbers (1, 1.1, ...) shown before them.
-local decorating = {}
--- (each paragraph's characters, by its text, for each buffer: typing changes one paragraph, not the
--- others; those of the texts decorated last time only, so it doesn't grow)
+-- (each paragraph's characters, by its text, for each buffer: of the texts decorated last time
+-- only, so it doesn't grow)
 local parsed = {}
-function M.decorate_soon(buf) -- (once typing pauses: decorations are for the whole buffer)
-  if not decorating[buf] then
-    decorating[buf] = true
-    vim.defer_fn(function()
-      decorating[buf] = nil
-      if api.nvim_buf_is_valid(buf) then
-        M.decorate(buf)
-      end
-    end, 50)
-  end
-end
-
-function M.decorate(buf)
-  buf = buf == 0 and api.nvim_get_current_buf() or buf
-  local doc = M.docs[buf]
-  if not doc then
-    return
-  end
-  api.nvim_buf_clear_namespace(buf, NS_DECOR, 0, -1)
-  for other in pairs(parsed) do -- (a buffer no longer a document's: forgotten)
-    if not M.docs[other] then
-      parsed[other] = nil
-    end
-  end
-  parsed[buf] = { last = parsed[buf] and parsed[buf].now or {}, now = {} }
-  local lines, count = api.nvim_buf_get_lines(buf, 0, -1, false), {}
-  for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.change, 0, -1, { details = true })) do
+-- Decorate rows s..e (1-based) of a buffer, whose decorations there are cleared: `lines` has them
+-- (by row, and the row after them), `paras` their paragraphs (rows as the buffer's), `header` the
+-- styles at the top if decorated (rows in s..e), and `number(key, row, col)` places a heading's
+-- number (key: its level) or a caption's ("caption.table"). `fresh`: each paragraph's characters
+-- read again, not kept (see `parsed`).
+local function decorate_rows(buf, doc, lines, s, e, paras, header, number, fresh)
+  for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.change, { s - 1, 0 }, { e - 1, -1 }, { details = true, overlap = true })) do
     local ch = doc.change[m[1]]
-    for row = m[2], m[4].end_row - 1 do -- (a deleted line break: shown as a struck ¶ at the end of its line)
+    for row = math.max(m[2], s - 1), math.min(m[4].end_row - 1, e - 1) do -- (a deleted line break: shown as a struck ¶ at the end of its line)
       if ch and ch.type == "delete" then
         local hl = require("neoffice.changes").style(ch).hl_group
         api.nvim_buf_set_extmark(buf, NS_DECOR, row, #lines[row + 1], { virt_text = { { "¶", hl } }, virt_text_pos = "inline" })
@@ -1869,7 +1976,8 @@ function M.decorate(buf)
   end
   if M.config.show_tabs then -- tabs: a → in the marks' gray, over the one 'list' shows (whatever colours the
     -- window is given: some colour schemes set its 'winhighlight' as they like)
-    for r, line in ipairs(lines) do
+    for r = s, e do
+      local line = lines[r]
       local c = line:find("\t", 1, true)
       while c do
         api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, c - 1, { virt_text = { { "→", "NeofficeMark" } }, virt_text_pos = "overlay", priority = 150 })
@@ -1883,27 +1991,23 @@ function M.decorate(buf)
       end
     end
   end
-  -- the styles at its top: their names, and the rest as formatting; but as YAML (as markdown's front
-  -- matter, by tree-sitter) where it can be: its keys, values and comments as in an R Markdown file
-  local header = markup.header(lines)
-  if languages and pcall(vim.treesitter.language.add, "yaml") then
-    header = nil
-  end
-  for r = 1, header and header.last or 0 do
+  -- the styles at its top: their names, and the rest as formatting (unless shown as YAML: see M.decorate)
+  for r = s, header and math.min(header.last, e) or 0 do
     local line = lines[r]
-    local s, e = line:find("^%s+[^:{}]-%s*:")
+    local s_, e_ = line:find("^%s+[^:{}]-%s*:")
     if line:match("^page:") then -- (the page's settings: its name as a style's)
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = 5, hl_group = "NeofficeStyleName", priority = 150 })
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 5, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
-    elseif s and r > 2 and r < header.last then
+    elseif s_ and r > 2 and r < header.last then
       local first = line:find("%S")
-      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, first - 1, { end_col = e - 1, hl_group = "NeofficeStyleName", priority = 150 })
-      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, e - 1, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, first - 1, { end_col = e_ - 1, hl_group = "NeofficeStyleName", priority = 150 })
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, e_ - 1, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
     else
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
     end
   end
-  for r, line in ipairs(lines) do -- a table's options (above it); a format's line (its mark, its attributes)
+  for r = s, e do -- a table's options (above it); a format's line (its mark, its attributes)
+    local line = lines[r]
     if line:find("^\\newpage%s*{") and markup.section_line(line) then -- (a section's: as a box's line)
       local brace = line:find("{", 1, true)
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = brace - 1, hl_group = "NeofficeSection", priority = 150 })
@@ -1927,10 +2031,10 @@ function M.decorate(buf)
       end
     end
   end
-  for _, para in ipairs(M.blocks(buf)) do
+  for _, para in ipairs(paras) do
     -- (its marks, in gray: only a paragraph with a character that could be one has any)
     if para.text:find("[\\*_~=+^%[{$!<⟦¶]") or para.text:find("^[#%%>%-]") or para.text:find("^%d+[.)]") then
-      M.decorate_marks(buf, para, lines)
+      M.decorate_marks(buf, para, lines, fresh)
     end
     local block, text_start = markup.block(lines[para.first])
     -- the alignment mark (above Markdown's highlighting, which takes ">..." for a quote)
@@ -1943,11 +2047,7 @@ function M.decorate(buf)
       })
     end
     if block.caption and not para.cell then -- its number (as the document shows it): "Table 1: ..."
-      local key = "caption." .. block.caption
-      count[key] = (count[key] or 0) + 1
-      api.nvim_buf_set_extmark(buf, NS_DECOR, para.first - 1, #markup.captions()[block.caption], {
-        virt_text = { { " " .. count[key], "NeofficeNumber" } }, virt_text_pos = "inline",
-      })
+      number("caption." .. block.caption, para.first - 1, #markup.captions()[block.caption])
       api.nvim_buf_set_extmark(buf, NS_DECOR, para.first - 1, 0, {
         end_col = text_start - 1, hl_group = "NeofficeCaption", priority = 200,
       })
@@ -1956,18 +2056,260 @@ function M.decorate(buf)
         end_row = para.last - 1, end_col = #lines[para.last], hl_group = "NeofficeTitle", priority = 200,
       })
     elseif block.heading and doc.ctx.numbered then
-      count[block.heading] = (count[block.heading] or 0) + 1
-      for deeper = block.heading + 1, 9 do
-        count[deeper] = nil
-      end
-      local number = {}
-      for level = 1, block.heading do
-        number[level] = count[level] or 0
-      end
-      api.nvim_buf_set_extmark(buf, NS_DECOR, para.first - 1, text_start - 1, {
-        virt_text = { { table.concat(number, ".") .. " ", "NeofficeNumber" } }, virt_text_pos = "inline",
-      })
+      number(block.heading, para.first - 1, text_start - 1)
     end
+  end
+end
+
+-- (a heading's or caption's number, shown: doc.numbers[mark] = its key, see decorate_rows)
+local function put_number(buf, doc, key, row, col, text)
+  local id = api.nvim_buf_set_extmark(buf, NS_DECOR, row, col, { virt_text = { { text, "NeofficeNumber" } }, virt_text_pos = "inline" })
+  doc.numbers[id] = key
+end
+local function counter() -- (the numbers in order: the headings' "1.2 ", the captions' " 3")
+  local count = {}
+  return function(key)
+    count[key] = (count[key] or 0) + 1
+    if type(key) ~= "number" then
+      return " " .. count[key]
+    end
+    for deeper = key + 1, 9 do
+      count[deeper] = nil
+    end
+    local number = {}
+    for level = 1, key do
+      number[level] = count[level] or 0
+    end
+    return table.concat(number, ".") .. " "
+  end
+end
+-- (the styles at the top, decorated here: not where tree-sitter shows them as YAML)
+local function decorated_header(lines)
+  local header = markup.header(lines)
+  if languages and pcall(vim.treesitter.language.add, "yaml") then
+    return nil
+  end
+  return header
+end
+
+function M.decorate(buf)
+  buf = buf == 0 and api.nvim_get_current_buf() or buf
+  local doc = M.docs[buf]
+  if not doc then
+    return
+  end
+  doc.decor_dirty, doc.decorating = nil, nil
+  api.nvim_buf_clear_namespace(buf, NS_DECOR, 0, -1)
+  for other in pairs(parsed) do -- (a buffer no longer a document's: forgotten)
+    if not M.docs[other] then
+      parsed[other] = nil
+    end
+  end
+  parsed[buf] = { last = parsed[buf] and parsed[buf].now or {}, now = {} }
+  local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
+  local header = markup.header(lines)
+  doc.header_rows = header and header.last or 0
+  doc.numbers = {}
+  doc.has_boxes = false -- (whether a box's line is in it: see M.decorate_changed)
+  for _, l in ipairs(lines) do
+    if l:byte(1) == 58 and markup.box_line(l) then -- (":")
+      doc.has_boxes = true
+      break
+    end
+  end
+  local next_number = counter()
+  decorate_rows(buf, doc, lines, 1, #lines, M.blocks(buf), decorated_header(lines), function(key, row, col)
+    put_number(buf, doc, key, row, col, next_number(key))
+  end)
+end
+
+-- The first time (once the text shows): as M.decorate, a few paragraphs at a time (all of a short
+-- document at once), so a long one doesn't hold up the first keys typed. If the text changes
+-- meanwhile, all of it once typing pauses (until then, edits aren't decorated on their own).
+function M.decorate_first(buf)
+  local doc = M.docs[buf]
+  if not doc then
+    return
+  end
+  local tick = api.nvim_buf_get_changedtick(buf)
+  doc.decor_dirty = nil
+  api.nvim_buf_clear_namespace(buf, NS_DECOR, 0, -1)
+  parsed[buf] = { last = parsed[buf] and parsed[buf].now or {}, now = {} }
+  local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
+  local header = markup.header(lines)
+  doc.header_rows = header and header.last or 0
+  doc.numbers, doc.has_boxes = {}, false
+  for _, l in ipairs(lines) do
+    if l:byte(1) == 58 and markup.box_line(l) then -- (":")
+      doc.has_boxes = true
+      break
+    end
+  end
+  local paras, shown, next_number = M.blocks(buf), decorated_header(lines), counter()
+  local function number(key, row, col)
+    put_number(buf, doc, key, row, col, next_number(key))
+  end
+  local state = {}
+  doc.decorating = state
+  local k, row = 1, 1 -- (the next paragraph, and the first row not decorated yet)
+  local function slice(budget)
+    if M.docs[buf] ~= doc or doc.decorating ~= state then -- (gone, or decorated since)
+      return
+    end
+    if api.nvim_buf_get_changedtick(buf) ~= tick then -- (edited meanwhile: all of it once typing pauses)
+      local function later(t)
+        vim.defer_fn(function()
+          if M.docs[buf] ~= doc or doc.decorating ~= state then
+            return
+          end
+          local now = api.nvim_buf_get_changedtick(buf)
+          if now ~= t then
+            return later(now)
+          end
+          M.decorate(buf)
+        end, 300)
+      end
+      return later(api.nvim_buf_get_changedtick(buf))
+    end
+    local deadline = vim.uv.hrtime() + budget
+    while k <= #paras do
+      local from = k -- (a few paragraphs, and the rows from the first not done to the next paragraph's)
+      repeat
+        k = k + 1
+      until k > #paras or k - from >= 8
+      local last = k <= #paras and paras[k].first - 1 or #lines
+      decorate_rows(buf, doc, lines, row, last, vim.list_slice(paras, from, k - 1), row == 1 and shown or nil, number)
+      row = last + 1
+      if vim.uv.hrtime() > deadline then -- (the next few on a timer: keys typed meanwhile go first)
+        return vim.defer_fn(function() slice(4e6) end, 0)
+      end
+    end
+    if row <= #lines then -- (rows after the last paragraph: blank lines...)
+      decorate_rows(buf, doc, lines, row, #lines, {}, row == 1 and shown or nil, number)
+    end
+    doc.decorating = nil
+  end
+  slice(20e6)
+end
+
+-- After an edit: only the paragraphs it touched decorated again (the rows Neovim said changed, out
+-- to the blank lines around them: whole paragraphs, tables, format's lines), as typing goes. Their
+-- headings' and captions' numbers stay as they were unless which there are changed: then all are
+-- numbered again.
+local SPAN = 64
+function M.decorate_changed(buf)
+  local doc = M.docs[buf]
+  local dirty = doc and doc.decor_dirty
+  if not dirty then
+    return
+  end
+  if not doc.numbers or doc.decorating then -- (not decorated yet, or being decorated: that does all of it)
+    return
+  end
+  doc.decor_dirty = nil
+  local n = api.nvim_buf_line_count(buf)
+  local s, e = math.min(dirty[1] + 1, n), math.min(dirty[2] + 1, n)
+  while s > 1 do -- (up to a blank line)
+    local from = math.max(1, s - SPAN)
+    local chunk, found = api.nvim_buf_get_lines(buf, from - 1, s - 1, false), nil
+    for i = #chunk, 1, -1 do
+      if chunk[i] == "" then
+        found = from + i - 1
+        break
+      end
+    end
+    if found then
+      s = found + 1
+      break
+    end
+    s = from
+  end
+  while e < n do -- (down to one)
+    local to = math.min(n, e + SPAN)
+    local chunk, found = api.nvim_buf_get_lines(buf, e, to, false), nil
+    for i = 1, #chunk do
+      if chunk[i] == "" then
+        found = e + i
+        break
+      end
+    end
+    if found then
+      e = found - 1
+      break
+    end
+    e = to
+  end
+  if s <= (doc.header_rows or 0) + 1 then -- (the styles at the top: read from the first row)
+    s = 1
+  end
+  if e < s or e - s > 5000 then -- (nothing left, or most of it: all of it)
+    return M.decorate(buf)
+  end
+  local lines, slice = {}, api.nvim_buf_get_lines(buf, s - 1, math.min(e + 1, n), false)
+  for i, l in ipairs(slice) do
+    lines[s + i - 1] = l
+  end
+  slice[e - s + 2] = nil -- (the row after them: only looked at)
+  local header = s == 1 and markup.header(slice) or nil
+  local before = {} -- (read after the boxes' lines above them, so as inside a box or not as they are)
+  if s == 1 then
+    doc.header_rows = header and header.last or 0
+  else -- (and a blank line: the rows can't read as the styles at the top, nor go on a paragraph)
+    for _, l in ipairs(doc.has_boxes ~= false and api.nvim_buf_get_lines(buf, doc.header_rows or 0, s - 1, false) or {}) do
+      if l:byte(1) == 58 and markup.box_line(l) then -- (":")
+        before[#before + 1] = l
+      end
+    end
+    before[#before + 1] = ""
+  end
+  local shift = s - 1 - #before
+  slice = vim.list_extend(before, slice)
+  local alone = {}
+  for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.empty, { s - 1, 0 }, { e - 1, -1 }, { details = true })) do
+    if m[3] == 0 and not m[4].invalid then
+      alone[m[2] + 1 - shift] = true
+    end
+  end
+  local paras = {}
+  for _, para in ipairs(M.paragraphs(slice, alone)) do
+    if para.first + shift >= s then -- (not the blank line put first)
+      para.first, para.last, para.owns = para.first + shift, para.last + shift, para.owns and para.owns + shift
+      paras[#paras + 1] = para
+    end
+  end
+  -- (a box's line there, before or now: whether what follows is in a box changes, so all of it)
+  for r = s, e do
+    if lines[r]:byte(1) == 58 and markup.box_line(lines[r]) then
+      return M.decorate(buf)
+    end
+  end
+  -- the numbers there: as they were, if the same headings and captions are there
+  local was, old = {}, api.nvim_buf_get_extmarks(buf, NS_DECOR, { s - 1, 0 }, { e - 1, -1 }, { details = true })
+  for _, m in ipairs(old) do
+    if m[4].hl_group == "NeofficeBox" then
+      return M.decorate(buf)
+    end
+  end
+  for _, m in ipairs(old) do
+    if doc.numbers[m[1]] then
+      was[#was + 1] = { key = doc.numbers[m[1]], text = m[4].virt_text[1][1] }
+      doc.numbers[m[1]] = nil
+    end
+  end
+  api.nvim_buf_clear_namespace(buf, NS_DECOR, s - 1, e)
+  local wanted = {}
+  decorate_rows(buf, doc, lines, s, e, paras, header and decorated_header(slice), function(key, row, col)
+    wanted[#wanted + 1] = { key = key, row = row, col = col }
+  end, true)
+  local same = #wanted == #was
+  for k = 1, same and #wanted or 0 do
+    same = same and wanted[k].key == was[k].key
+  end
+  if not same then -- (a heading or caption more, or less, or of another level: all numbered again)
+    return M.decorate(buf)
+  end
+  for k, w in ipairs(wanted) do
+    put_number(buf, doc, w.key, w.row, w.col, was[k].text)
   end
 end
 
@@ -1990,8 +2332,8 @@ local function chars_of(buf, text) -- (see `parsed`)
   return chars
 end
 
-function M.decorate_marks(buf, para, lines)
-  local chars = chars_of(buf, para.text)
+function M.decorate_marks(buf, para, lines, fresh)
+  local chars = fresh and select(2, markup.parse_shared(para.text)) or chars_of(buf, para.text) -- (only read)
   local function position(offset, ends) -- (the paragraph's lines were joined by one character)
     if para.cell then
       return para.first - 1, para.col + offset
@@ -2055,7 +2397,44 @@ function M.decorate_marks(buf, para, lines)
     local r2, c2 = position(chars[to].col + (chars[to].len or #chars[to].ch), true)
     api.nvim_buf_set_extmark(buf, NS_DECOR, r1, c1, { end_row = r2, end_col = c2, hl_group = group, priority = 150 })
   end
-  local GROUP = { b = "NeofficeBold", i = "NeofficeItalic", s = "NeofficeStrike" } -- (underlines: by the syntax, syntax/neoffice.vim)
+  -- what syntax/neoffice.vim would show, unless it does (the marks concealed: see setup_buffer), under
+  -- everything else as it would be: underlines, superscripts, subscripts, footnotes, fields, page breaks
+  if not M.config.conceal then
+    local function under(from, to, group) -- (bytes from..to-1 of the text)
+      if to > from then
+        local r1, c1 = position(from)
+        local r2, c2 = position(to, true)
+        api.nvim_buf_set_extmark(buf, NS_DECOR, r1, c1, { end_row = r2, end_col = c2, hl_group = group, priority = 90 })
+      end
+    end
+    for _, key in ipairs({ "u", "sup", "sub" }) do -- (each run of such characters, as one: what is between them too)
+      local group = key == "u" and "neofficeUnderline" or key == "sup" and "neofficeSuperscript" or "neofficeSubscript"
+      local from
+      for k = 1, #chars + 1 do
+        local c = chars[k]
+        if from and not (c and c[key]) then
+          local last = chars[k - 1]
+          under(chars[from].col, last.col + (last.len or #last.ch), group)
+          from = nil
+        end
+        if c and c[key] and not from then
+          from = k
+        end
+      end
+    end
+    for _, c in ipairs(chars) do
+      if c.footnote then -- ("^[" and "]" as marks, its text as a footnote's)
+        under(c.col, c.col + 2, "neofficeFootnoteMark")
+        under(c.col + 2, c.col + c.len - 1, "neofficeFootnote")
+        under(c.col + c.len - 1, c.col + c.len, "neofficeFootnoteMark")
+      elseif c.field then
+        under(c.col, c.col + c.len, "neofficeField")
+      elseif c.page_break then
+        under(c.col, c.col + c.len, "neofficeBreak")
+      end
+    end
+  end
+  local GROUP = { b = "NeofficeBold", i = "NeofficeItalic", s = "NeofficeStrike" }
   for _, key in ipairs({ "h", "b", "i", "s" }) do
     local from
     for k = 1, #chars + 1 do
@@ -2298,6 +2677,52 @@ function M.finish_sigs(buf)
   end
 end
 
+-- The same, after edits, a few at a time and only while typing pauses (each time the text changes,
+-- its paragraphs are matched with those opened again, once it pauses): so typing right after
+-- opening isn't held up. (Anything that needs them all, a save..., takes the rest at once.)
+local IDLE = 300
+function M.finish_sigs_later(buf, delay) -- (delay: until the next few, if not a pause in typing)
+  local doc = M.docs[buf]
+  local p = doc and doc.pending
+  if not p or p.waiting then
+    return
+  end
+  p.waiting = true
+  local tick = api.nvim_buf_get_changedtick(buf)
+  vim.defer_fn(function()
+    p.waiting = nil
+    if M.docs[buf] ~= doc or doc.pending ~= p then
+      return
+    end
+    if api.nvim_buf_get_changedtick(buf) ~= tick then -- (still typing)
+      return M.finish_sigs_later(buf)
+    end
+    if p.map_tick ~= tick then -- (the paragraphs as they are now, and those they were)
+      p.map = { blocks = M.blocks(buf), next = 1 }
+      p.map.old_of = match_lines(doc.keys or doc.texts, block_keys(p.map.blocks))
+      p.map_tick = tick
+    end
+    local map, deadline = p.map, vim.uv.hrtime() + 4e6
+    while map.next <= #map.blocks do
+      local block, o = map.blocks[map.next], map.old_of[map.next]
+      map.next = map.next + 1
+      -- (as in M.finish_sigs)
+      if o and o >= p.next and doc.sigs[o] == nil and not touched(doc, block) and context_key(block) == context_key(p.blocks[o]) then
+        doc.sigs[o], doc.ctx_keys[o] = signature(pieces(buf, block)), context_key(p.blocks[o])
+      end
+      if vim.uv.hrtime() > deadline then -- (the next few right after, unless typing goes on)
+        return M.finish_sigs_later(buf, 0)
+      end
+    end
+    doc.pending = nil
+    for o = p.next, #p.blocks do
+      if doc.sigs[o] == nil then
+        doc.sigs[o] = false -- (never the same: written)
+      end
+    end
+  end, delay or IDLE)
+end
+
 function M.finish_all() -- (every document's: before a change from a command or a panel)
   for buf, doc in pairs(M.docs) do
     M.finish_sigs(buf)
@@ -2403,25 +2828,40 @@ end
 -- the comments and changes: `notes`), to put back if the save fails: each node's children and
 -- attributes, and the fields of ctx (one level deep) and of the notes.
 local function checkpoint(ctx, notes)
-  local nodes, seen = {}, {}
-  local function walk(n)
-    if seen[n] then
+  -- (each element, its children and its attributes as they are: those flat, name, value...; nil
+  -- when it had none, false when an empty list)
+  local nodes, kids_of, attrs_of, count, seen = {}, {}, {}, 0, {}
+  local function walk(root)
+    if seen[root] then
       return
     end
-    seen[n] = true
-    local attrs = {}
-    for k, kv in ipairs(n.attrs or {}) do
-      attrs[k] = { kv[1], kv[2] }
-    end
-    local children = {}
-    for k, c in ipairs(n.children) do
-      children[k] = c
-    end
-    nodes[#nodes + 1] = { n, children, n.attrs and attrs }
-    for _, c in ipairs(n.children) do
-      if c.children then
-        walk(c)
+    seen[root] = true
+    local stack, top = { root }, 1
+    while top > 0 do
+      local n = stack[top]
+      stack[top], top = nil, top - 1
+      local kids, copy = n.children, {}
+      for k = 1, #kids do
+        local c = kids[k]
+        copy[k] = c
+        if c.children then
+          top = top + 1
+          stack[top] = c
+        end
       end
+      local attrs, flat = n.attrs, nil
+      if attrs then
+        flat = false
+        if #attrs > 0 then
+          flat = {}
+          for k = 1, #attrs do
+            local kv = attrs[k]
+            flat[2 * k - 1], flat[2 * k] = kv[1], kv[2]
+          end
+        end
+      end
+      count = count + 1
+      nodes[count], kids_of[count], attrs_of[count] = n, copy, flat
     end
   end
   local fields = {}
@@ -2452,9 +2892,18 @@ local function checkpoint(ctx, notes)
         t[key] = value
       end
     end
-    for _, entry in ipairs(nodes) do
-      local n = entry[1]
-      n.children, n.attrs = entry[2], entry[3]
+    for i = 1, count do
+      local n, flat = nodes[i], attrs_of[i]
+      n.children = kids_of[i]
+      if flat == nil then
+        n.attrs = nil
+      else
+        local attrs = {}
+        for k = 1, flat and #flat / 2 or 0 do
+          attrs[k] = { flat[2 * k - 1], flat[2 * k] }
+        end
+        n.attrs = attrs
+      end
       for _, c in ipairs(n.children) do
         c.parent = n
       end
@@ -2735,8 +3184,13 @@ function M.save(buf, target)
       if cell then
         return outside(cell.tbl)
       end
-      local content = node.parent
-      local last = content and vim.iter(content.children):rev():find(function(c) return c.tag end)
+      local content, last = node.parent, nil
+      for k = content and #content.children or 0, 1, -1 do -- (its last element)
+        if content.children[k].tag then
+          last = content.children[k]
+          break
+        end
+      end
       if content and content.tag == "w:sdtContent" and last == node and content.parent then
         return outside(content.parent)
       end
@@ -2974,6 +3428,16 @@ function M.save(buf, target)
       local file = doc.is_doc and convert(doc.base, "doc:MS Word 97", vim.fn.tempname()) or doc.base
       assert(vim.uv.fs_copyfile(file, target .. ".neoffice~"))
       assert(os.rename(target .. ".neoffice~", target))
+      if doc.is_doc and doc_cache() then -- (what was written, read back in the background: opened at once next time)
+        local key = content_key(file)
+        if key and not cached_doc(key) then
+          convert(file, "docx", vim.fn.tempname(), function(docx)
+            if docx then
+              keep_doc(key, docx)
+            end
+          end)
+        end
+      end
       if target == doc.path then
         doc.synced, doc.stamp = true, stamp(target)
       end

@@ -90,6 +90,11 @@ local function part(ctx, name, empty)
   return ctx.parts[name] or nil
 end
 
+-- (the styles changed, or one was added: what is kept from them read again)
+local function styles_changed(ctx)
+  ctx.default_style, ctx.font_default = nil, nil
+end
+
 -- A style of the document for comments ("CommentText", "CommentReference"), by its id or its
 -- name, if it has one.
 local function comment_style(ctx, id, kind)
@@ -422,6 +427,12 @@ function M.run_font(ctx, r)
   return ctx.run_fonts[r] -- (as it is: not to be changed)
 end
 function M.font_default(ctx) -- (the document's: its default paragraph style's, else Normal's, as LibreOffice writes it)
+  if not ctx.font_default then -- (kept until the styles change: see styles_changed; a copy each time)
+    ctx.font_default = M.font_default_now(ctx)
+  end
+  return vim.deepcopy(ctx.font_default)
+end
+function M.font_default_now(ctx)
   local styles = part(ctx, STYLES) or {}
   local flagged = vim.iter(xml.collect(styles, { ["w:style"] = true })):find(function(st)
     return xml.attr(st, "w:type") == "paragraph" and xml.attr(st, "w:default") == "1"
@@ -546,8 +557,26 @@ function M.seq_name(instr)
 end
 
 -- A footnote's text (one line: its paragraphs joined by spaces).
+local function footnote_el(ctx, id) -- (by its id, as has() finds it: the first; an index, made again when out of date)
+  local notes = part(ctx, FOOTNOTES)
+  if not notes then
+    return nil
+  end
+  local el = ctx.footnote_index_of == notes and ctx.footnote_index[id]
+  if not (el and el.parent and xml.attr(el, "w:id") == id) then
+    ctx.footnote_index, ctx.footnote_index_of = {}, notes
+    for _, n in ipairs(xml.collect(notes, { ["w:footnote"] = true })) do
+      local nid = xml.attr(n, "w:id")
+      if nid and ctx.footnote_index[nid] == nil then
+        ctx.footnote_index[nid] = n
+      end
+    end
+    el = ctx.footnote_index[id]
+  end
+  return el
+end
 local function footnote_text(ctx, id)
-  local note = has(part(ctx, FOOTNOTES) or {}, "w:footnote", "w:id", id)
+  local note = footnote_el(ctx, id)
   local paras = note and xml.collect(note, { ["w:p"] = true }) or {}
   return (table.concat(vim.tbl_map(xml.text, paras), " "):gsub("^%s+", ""))
 end
@@ -1302,6 +1331,7 @@ end
 local function title_style(ctx)
   local styles = xml.find(part(ctx, STYLES) or {}, "w:styles")
   if not ctx.title_style and styles then
+    styles_changed(ctx)
     xml.append(styles, xml.elem("w:style", { { "w:type", "paragraph" }, { "w:styleId", "Title" } }, {
       xml.elem("w:name", { { "w:val", "Title" } }),
       xml.elem("w:basedOn", { { "w:val", "Normal" } }),
@@ -1320,6 +1350,7 @@ local function heading_style(ctx, level)
   local styles = xml.find(part(ctx, STYLES) or {}, "w:styles")
   if not ctx.style_of[level] and styles then
     local id = "Heading" .. level
+    styles_changed(ctx)
     xml.append(styles, xml.elem("w:style", { { "w:type", "paragraph" }, { "w:styleId", id } }, {
       xml.elem("w:name", { { "w:val", "heading " .. level } }),
       xml.elem("w:basedOn", { { "w:val", "Normal" } }),
@@ -1345,6 +1376,7 @@ local function caption_style(ctx, kind)
   local styles = xml.find(part(ctx, STYLES) or {}, "w:styles")
   if not id and styles then
     id = "Caption"
+    styles_changed(ctx)
     xml.append(styles, xml.elem("w:style", { { "w:type", "paragraph" }, { "w:styleId", id } }, {
       xml.elem("w:name", { { "w:val", "caption" } }),
       xml.elem("w:basedOn", { { "w:val", "Normal" } }),
@@ -1417,6 +1449,7 @@ end
 local function quote_style(ctx)
   local styles = xml.find(part(ctx, STYLES) or {}, "w:styles")
   if not ctx.quote_style and styles then
+    styles_changed(ctx)
     xml.append(styles, xml.elem("w:style", { { "w:type", "paragraph" }, { "w:styleId", "Quote" } }, {
       xml.elem("w:name", { { "w:val", "Quote" } }),
       xml.elem("w:basedOn", { { "w:val", "Normal" } }),
@@ -1570,12 +1603,15 @@ M.own_align = own_align
 local function styles_el(ctx)
   return part(ctx, STYLES) or {}
 end
-default_style_id = function(ctx)
-  local styles = styles_el(ctx)
-  local flagged = vim.iter(xml.collect(styles, { ["w:style"] = true })):find(function(st)
-    return xml.attr(st, "w:type") == "paragraph" and xml.attr(st, "w:default") == "1"
-  end)
-  return flagged and xml.attr(flagged, "w:styleId") or (has(styles, "w:style", "w:styleId", "Normal") and "Normal") or nil
+default_style_id = function(ctx) -- (kept until the styles change: see styles_changed)
+  if ctx.default_style == nil then
+    local styles = styles_el(ctx)
+    local flagged = vim.iter(xml.collect(styles, { ["w:style"] = true })):find(function(st)
+      return xml.attr(st, "w:type") == "paragraph" and xml.attr(st, "w:default") == "1"
+    end)
+    ctx.default_style = flagged and xml.attr(flagged, "w:styleId") or (has(styles, "w:style", "w:styleId", "Normal") and "Normal") or false
+  end
+  return ctx.default_style or nil
 end
 function M.style_of(ctx, p) -- (a paragraph's)
   local ppr = xml.child(p, "w:pPr")
@@ -1732,6 +1768,7 @@ function M.set_style(ctx, id, changes)
     write_layout(xml.child(style, "w:pPr"), layout_have, layout_want)
   end
   ctx.dirty[STYLES], ctx.style_attrs, ctx.style_fonts, ctx.style_aligns = true, nil, nil, nil -- (what styles give: read again)
+  styles_changed(ctx)
 end
 
 -- The width of the text in cm: the page's, minus its margins (of the last section: the document's

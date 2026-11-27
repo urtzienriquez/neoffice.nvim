@@ -32,6 +32,15 @@ end
 
 -- Whether XML text is a document Word and LibreOffice can read: one root element, and every
 -- prefix it uses (w:, text:, svg: ...) declared where it is used. true, or nil and why.
+local prefixes = {} -- (a name's prefix, "w" of "w:p", or false: names repeat, so each is read once)
+local function prefix_of(name)
+  local prefix = prefixes[name]
+  if prefix == nil then
+    prefix = name:match("^([^:]+):") or false
+    prefixes[name] = prefix
+  end
+  return prefix
+end
 function M.check(s) -- (s: the text, or the tree it was written from, as M.parse makes them)
   local ok, doc = true, s
   if type(s) == "string" then
@@ -48,26 +57,29 @@ function M.check(s) -- (s: the text, or the tree it was written from, as M.parse
     return nil, ("%d root elements"):format(roots)
   end
   local problem
+  local function used(name, declared, el)
+    local prefix = prefix_of(name)
+    if prefix and prefix ~= "xml" and prefix ~= "xmlns" and not declared[prefix] then
+      problem = problem or ("the prefix %s (in <%s>) isn't declared"):format(prefix, el.tag)
+    end
+  end
   local function walk(el, scope)
-    local declared = scope
-    for _, kv in ipairs(el.attrs) do
-      local prefix = kv[1]:match("^xmlns:(.+)$")
+    local declared, attrs = scope, el.attrs
+    for k = 1, #attrs do
+      local name = attrs[k][1]
+      local prefix = name:byte(1) == 120 and name:match("^xmlns:(.+)$") -- ("x")
       if prefix then
         declared = declared == scope and setmetatable({}, { __index = scope }) or declared
         declared[prefix] = true
       end
     end
-    local function used(name)
-      local prefix = name:match("^([^:]+):")
-      if prefix and prefix ~= "xml" and prefix ~= "xmlns" and not declared[prefix] then
-        problem = problem or ("the prefix %s (in <%s>) isn't declared"):format(prefix, el.tag)
-      end
+    used(el.tag, declared, el)
+    for k = 1, #attrs do
+      used(attrs[k][1], declared, el)
     end
-    used(el.tag)
-    for _, kv in ipairs(el.attrs) do
-      used(kv[1])
-    end
-    for _, c in ipairs(el.children) do
+    local kids = el.children
+    for k = 1, #kids do
+      local c = kids[k]
       if c.tag and not problem then
         walk(c, declared)
       end
@@ -131,42 +143,56 @@ function M.parse(s)
   return doc
 end
 
-local function write(n, out)
+local function write(n, out, k) -- (k: how many pieces are in out; returns how many after n's)
   if n.text then
-    out[#out + 1] = M.escape(n.text)
-    return
+    k = k + 1
+    out[k] = M.escape(n.text)
+    return k
   elseif n.raw then
-    out[#out + 1] = n.raw
-    return
+    k = k + 1
+    out[k] = n.raw
+    return k
   end
   local tag = n.tag
+  local kids = n.children
   if tag then
-    out[#out + 1] = "<" .. tag
-    for _, kv in ipairs(n.attrs) do
-      out[#out + 1] = " " .. kv[1] .. '="' .. M.escape(kv[2], true) .. '"'
+    k = k + 1
+    out[k] = "<" .. tag
+    local attrs = n.attrs
+    for i = 1, #attrs do
+      local kv = attrs[i]
+      k = k + 1
+      out[k] = " " .. kv[1] .. '="' .. M.escape(kv[2], true) .. '"'
     end
-    if #n.children == 0 then
-      out[#out + 1] = "/>"
-      return
+    if #kids == 0 then
+      k = k + 1
+      out[k] = "/>"
+      return k
     end
-    out[#out + 1] = ">"
+    k = k + 1
+    out[k] = ">"
   end
-  local before = #out
-  for _, child in ipairs(n.children) do
-    write(child, out)
+  local before = k
+  for i = 1, #kids do
+    k = write(kids[i], out, k)
   end
   if tag then
-    if #out == before then -- (children that write nothing: an empty element)
+    if k == before then -- (children that write nothing: an empty element)
       out[before] = "/>"
     else
-      out[#out + 1] = "</" .. tag .. ">"
+      k = k + 1
+      out[k] = "</" .. tag .. ">"
     end
   end
+  return k
 end
 
 function M.serialize(n)
   local out = {}
-  write(n, out)
+  local k = write(n, out, 0)
+  for i = #out, k + 1, -1 do -- (nothing past what was written)
+    out[i] = nil
+  end
   return table.concat(out)
 end
 

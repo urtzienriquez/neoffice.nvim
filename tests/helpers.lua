@@ -33,6 +33,7 @@ function H.copy(name, edit)
   return path
 end
 
+neo.config.doc_cache = vim.fn.tempname() -- (.doc files' conversions: not in your cache)
 neo.config.styles = false -- (the styles at the top: tested on their own, styles_spec.lua)
 neo.config.page = false -- (and the page's settings: pages_spec.lua)
 

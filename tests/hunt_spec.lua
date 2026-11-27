@@ -151,7 +151,12 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
 
     it("gives a format's line to the paragraphs after it when it is written right after opening", function()
-      local path = H.copy("rich." .. ext)
+      local many = {} -- (long enough that the paragraphs' fingerprints aren't all taken at once)
+      for n = 1, 120 do
+        many[#many + 1] = ext == "docx" and ("<w:p><w:r><w:t>Paragraph %d.</w:t></w:r></w:p>"):format(n) or ("<text:p>Paragraph %d.</text:p>"):format(n)
+      end
+      local path = edited("rich." .. ext, ext == "docx" and { ["word/document.xml"] = { { "<w:body>", "<w:body>" .. table.concat(many) } } }
+        or { ["content.xml"] = { { "<office:text>", "<office:text>" .. table.concat(many) } } })
       vim.cmd("silent! %bwipeout!")
       vim.cmd("edit " .. vim.fn.fnameescape(path)) -- (no wait: before the paragraphs' fingerprints are all taken)
       assert.truthy(H.doc().pending)

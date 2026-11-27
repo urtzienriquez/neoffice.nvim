@@ -20,7 +20,9 @@ settings, ...) is kept, and only what you change is written (see
 Requires Nvim 0.10+ and zlib (documents are read and written in Nvim itself,
 through LuaJIT; without zlib, the `zip` and `unzip` commands). Optional: pandoc
 (|neoffice-equations|), LibreOffice (`soffice`, for .doc files: converted to
-.docx when opened, once a session, and back when written), and to show images
+.docx when opened, and back when written; a conversion is kept, by the file's
+content, so it opens at once the next time, see `doc_cache` in
+|neoffice-options|), and to show images
 other than PNG (|neoffice-images|): ImageMagick, `pdftoppm`, `rsvg-convert`.
 
 ==============================================================================
@@ -880,6 +882,9 @@ setup() is optional. Every field is optional too; these are the defaults: >lua
     images = true,         -- show images (where the terminal can)
     lsp = true,            -- the language server (|neoffice-lsp|)
     comment_text = false,  -- each comment's text at the end of its line
+    doc_cache = nil,       -- where .doc files converted by LibreOffice are kept, so
+                           -- one opens at once the next time (nil: Neovim's cache
+                           -- directory; false: converted each time)
     image_width = 60,      -- at most this many columns wide
     image_height = 20,     -- and this many lines high
     captions = {           -- their words, and what goes after the number

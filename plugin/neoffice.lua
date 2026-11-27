@@ -86,6 +86,17 @@ local function highlights()
     NeofficeCommentSign = { link = "DiagnosticWarn" },
     NeofficeCommentVirt = { link = "Comment" },
     NeofficeCommentCurrent = { link = "Search" }, -- (the text of the comment the panel is on)
+    -- (++underline++, ^{superscripts}, _{subscripts}, ^[footnotes], ⟦fields⟧, \newpage: drawn by
+    -- neoffice, or by syntax/neoffice.vim when the marks are concealed)
+    neofficeUnderline = { link = "Underlined" },
+    neofficeHighlight = { link = "Search" },
+    neofficeSuperscript = { link = "Special" },
+    neofficeSubscript = { link = "Special" },
+    neofficeFootnote = { link = "Comment" },
+    neofficeFootnoteMark = { link = "NeofficeMark" },
+    neofficeField = { link = "Special" },
+    neofficeBreak = { link = "NeofficeMark" },
+    neofficeScriptMark = { link = "NeofficeMark" },
   }) do
     hl.default = true
     api.nvim_set_hl(0, name, hl)

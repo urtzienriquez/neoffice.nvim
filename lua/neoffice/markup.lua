@@ -1067,6 +1067,26 @@ for c in ("\\!$^_*~=+}[" .. "\226"):gmatch(".") do -- (\226: the first byte of â
   MARKS[c:byte()] = true
 end
 
+-- M.parse's result for a text, the same tables each time for the last few texts read: only to be
+-- read, never changed (typing reads the line it changes again and again: before the edit and after
+-- it, and to decorate it).
+local shared = {}
+function M.parse_shared(text)
+  for k, entry in ipairs(shared) do
+    if entry[1] == text then
+      if k > 1 then -- (the most recent first)
+        table.remove(shared, k)
+        table.insert(shared, 1, entry)
+      end
+      return entry[2], entry[3]
+    end
+  end
+  local block, chars = M.parse(text)
+  table.insert(shared, 1, { text, block, chars })
+  shared[9] = nil
+  return block, chars
+end
+
 -- Returns the block (see M.prefix: list numbers aren't read) and a list of characters:
 -- { col = byte column in the line (0-based), ch = "x", b, i, u, s, sup, sub = bool, h = false|colour,
 -- link = url|nil }
