@@ -31,13 +31,42 @@ for _, ext in ipairs({ "docx", "odt" }) do
       neo.config.styles = false
     end)
 
-    it("shows the styles its paragraphs have, and what each gives; and saves without changes byte for byte", function()
+    it("shows the styles its paragraphs have, under those they are based on, each with what it says itself; and saves without changes byte for byte", function()
       local lines = H.lines()
       assert.equals("---", lines[1])
       assert.equals("styles:", lines[2])
       local body = line_of(BODY[ext])
       assert.truthy(body, table.concat(lines, "\n"))
-      assert.same({ font = "Cambria", size = "12pt", before = "9pt", after = "9pt" }, body.attrs)
+      assert.same({ before = "9pt", after = "9pt" }, body.attrs) -- (its own: the rest from the one above it)
+      local root = header().styles[1] -- (the default one: all it gives)
+      assert.same({ "Cambria", "12pt" }, { root.attrs.font, root.attrs.size })
+      local function depth(st) return #H.lines()[st.row]:match("^( *)") / 2 - 1 end
+      assert.same({ 0, 1, 2 }, { depth(root), depth(body), depth(line_of("First Paragraph")) })
+      -- (highlighted by neoffice, each line as tree-sitter shows YAML: read together, the indented
+      -- ones would be wrong, a key with braces having none under it)
+      api.nvim_buf_set_lines(0, 2, 2, false, { "  # a comment" })
+      require("neoffice").decorate(0)
+      local ns = api.nvim_get_namespaces().neoffice_decorations
+      local function groups(row)
+        local out = {}
+        for _, m in ipairs(api.nvim_buf_get_extmarks(0, ns, { row - 1, 0 }, { row - 1, -1 }, { details = true })) do
+          if m[4].hl_group then
+            out[m[4].hl_group .. ":" .. H.lines()[row]:sub(m[3] + 1, m[4].end_col)] = true
+          end
+        end
+        return out
+      end
+      local g = groups(line_of(BODY[ext]).row)
+      local ok, q = pcall(vim.treesitter.query.get, "yaml", "highlights")
+      if ok and q then -- (as an R Markdown file's YAML is shown: each line read alone, without its indentation)
+        assert.truthy(g["@property.yaml:" .. BODY[ext]] and g["@string.yaml:before = 9pt"], vim.inspect(g))
+        assert.truthy(groups(3)["@comment.yaml:# a comment"], vim.inspect(groups(3)))
+      else -- (without a YAML parser: the names, comments, the rest in gray)
+        local gray = vim.iter(vim.tbl_keys(g)):any(function(k) return k:match("^NeofficeMark::%s*{before = 9pt, after = 9pt}$") ~= nil end)
+        assert.truthy(g["NeofficeStyleName:" .. BODY[ext]] and gray, vim.inspect(g))
+        assert.truthy(groups(3)["NeofficeHeaderComment:  # a comment"], vim.inspect(groups(3)))
+      end
+      api.nvim_buf_set_lines(0, 2, 3, false, {})
       assert.truthy(line_of("Heading 1").attrs.bold)
       assert.truthy(H.paras()[1]) -- (the paragraphs after it, as they were)
       local before = H.bytes(path)
@@ -46,14 +75,16 @@ for _, ext in ipairs({ "docx", "odt" }) do
       assert.equals(before, H.bytes(path))
     end)
 
-    it("changes a style, and the styles based on it keep what they show", function()
+    it("changes a style, and the styles based on it follow where they say nothing themselves", function()
       local st = line_of(BODY[ext])
       local text = H.lines()[st.row]
-      api.nvim_buf_set_lines(0, st.row - 1, st.row, false, { (text:gsub("size = 12pt", "size = 14pt"):gsub("}$", ", align = justify}")) })
+      api.nvim_buf_set_lines(0, st.row - 1, st.row, false, { (text:gsub("}$", ", size = 14pt, align = justify}")) })
       H.reopen()
-      assert.same({ font = "Cambria", size = "14pt", align = "justify", before = "9pt", after = "9pt" }, line_of(BODY[ext]).attrs)
-      assert.equals("12pt", line_of("First Paragraph").attrs.size) -- (based on it: as it showed)
-      assert.is_nil(line_of("First Paragraph").attrs.align)
+      assert.same({ size = "14pt", align = "justify", before = "9pt", after = "9pt" }, line_of(BODY[ext]).attrs)
+      assert.is_nil(line_of("First Paragraph").attrs.size) -- (based on it: says nothing of its own)
+      local doc = H.doc()
+      local first = doc.fmt.style_id(doc.ctx, "First Paragraph")
+      assert.same({ "14pt", "justify" }, { doc.fmt.style_view(doc.ctx, first).size, doc.fmt.style_view(doc.ctx, first).align }) -- (it follows)
       local styles = zip.read(path, STYLES[ext])
       assert.truthy(styles:find(ext == "docx" and 'w:sz w:val="28"' or 'fo:font%-size="14pt"'), styles:sub(1, 400))
       assert.is_true(require("neoffice.xml").check(styles))
@@ -61,6 +92,32 @@ for _, ext in ipairs({ "docx", "odt" }) do
         local ok, out = H.libreoffice_reads(path, "Commented text")
         assert.is_true(ok, out)
       end
+    end)
+
+    it("gives a style what the one above it gives when a value is taken off its line", function()
+      local st = line_of(BODY[ext])
+      api.nvim_buf_set_lines(0, st.row - 1, st.row, false, { (H.lines()[st.row]:gsub("before = 9pt, ", "")) })
+      H.reopen()
+      assert.same({ after = "9pt" }, line_of(BODY[ext]).attrs)
+      local doc = H.doc()
+      local id = doc.fmt.style_id(doc.ctx, BODY[ext])
+      local root = header().styles[1]
+      assert.is_true(require("neoffice.paras").same_style_value("before", root.attrs.before, doc.fmt.style_view(doc.ctx, id).before)) -- (the default style's)
+      local styles = zip.read(path, STYLES[ext])
+      local own = ext == "docx" and styles:match('<w:style [^>]*w:styleId="BodyText".-</w:style>') or styles:match('<style:style style:name="Text_20_body".-</style:style>')
+      assert.is_nil(own:find(ext == "docx" and "w:before=" or "fo:margin%-top"), own) -- (none of its own: not a 0 said)
+      assert.is_true(require("neoffice.xml").check(styles))
+    end)
+
+    it("changes the styles under the default one where they say nothing, when it changes", function()
+      local root = header().styles[1]
+      api.nvim_buf_set_lines(0, root.row - 1, root.row, false, { (H.lines()[root.row]:gsub("font = [^,}]+", "font = Arial")) })
+      H.reopen()
+      assert.equals("Arial", header().styles[1].attrs.font)
+      local doc = H.doc()
+      local id = doc.fmt.style_id(doc.ctx, BODY[ext])
+      assert.equals("Arial", doc.fmt.style_view(doc.ctx, id).font) -- (it says no font: the default style's)
+      assert.is_nil(line_of(BODY[ext]).attrs.font)
     end)
 
     it("changes nothing when its lines, or all of them, are deleted", function()
@@ -145,7 +202,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
       H.open(path)
       local buf = api.nvim_get_current_buf()
       local r = H.row(1) - 1
-      assert.equals("{font = Times New Roman, size = 11pt}", H.lines()[r])
+      assert.equals("{font = Times New Roman, size = 11pt}+", H.lines()[r])
       assert(vim.wait(2000, function() return #vim.lsp.get_clients({ bufnr = buf, name = "neoffice_ls" }) > 0 end))
       local params = { textDocument = { uri = vim.uri_from_bufnr(buf) }, range = { start = { line = r - 1, character = 0 }, ["end"] = { line = r - 1, character = 0 } }, context = { diagnostics = {} } }
       local actions = {}
@@ -212,8 +269,8 @@ for _, ext in ipairs({ "docx", "odt" }) do
       if ext == "docx" then
         assert.truthy(main:find('<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:p>', 1, true), main:sub(1, 1500))
         local note_style = zip.read(path, "word/styles.xml"):match('<w:style w:type="paragraph" w:styleId="NoteX">.-</w:style>')
-        assert.truthy(note_style:find("<w:rFonts", 1, true), note_style) -- (the footnote's: as it was)
-        assert.is_nil(note_style:find('w:ascii="Arial"', 1, true))
+        -- (the footnote's: as it was, nothing of its own; it follows the default style, as in Word)
+        assert.equals('<w:style w:type="paragraph" w:styleId="NoteX"><w:name w:val="Note X"/><w:basedOn w:val="Normal"/></w:style>', note_style)
       else
         assert.truthy(main:find('<text:p text:style%-name="Tight"/>'), main:sub(1, 3000))
       end
@@ -335,9 +392,8 @@ describe(":Neoffice styles reset", function()
     zip.write(path, { ["word/styles.xml"] = styles })
     H.open(path)
     assert.truthy(line_of("My Own").text:find("Courier New", 1, true), line_of("My Own").text)
-    local body = line_of("Body Text").text
     vim.cmd("Neoffice styles reset")
-    assert.equals(body, line_of("My Own").text) -- (as Body Text, what it is based on)
+    assert.equals("", line_of("My Own").text) -- (nothing of its own: as Body Text, what it is based on)
     H.save()
     local written = zip.read(path, "word/styles.xml"):match('<w:style [^>]*w:styleId="MyOwn".-</w:style>')
     assert.truthy(written:find('w:basedOn w:val="BodyText"', 1, true), written)
@@ -369,5 +425,86 @@ describe(":Neoffice styles reset", function()
     vim.notify = notify
     assert.is_nil(table.concat(said, "\n"):find("failed", 1, true), table.concat(said, "\n"))
     assert.truthy(zip.read(path, "styles.xml"):find('xmlns:loext="', 1, true))
+  end)
+end)
+
+-- a style that says its first line isn't indented (0), based on one that indents it, and a paragraph
+-- that says so of its own: a 0 said is said, not "nothing said" (else the base's indent shows, and
+-- is written when the style's line is edited)
+for _, ext in ipairs({ "docx", "odt" }) do
+  describe(ext .. " an indent of 0 said by a style or a paragraph", function()
+    before_each(function() neo.config.styles = true end)
+    after_each(function() neo.config.styles = false end)
+    local function indented(path)
+      if ext == "docx" then
+        local styles = zip.read(path, "word/styles.xml")
+        styles = styles:gsub('(<w:style [^>]*w:styleId="BodyText".-<w:pPr>)', '%1<w:ind w:firstLine="567"/>', 1)
+        styles = styles:gsub('(<w:style [^>]*w:styleId="FirstParagraph".-)</w:style>', '%1<w:pPr><w:ind w:firstLine="0"/></w:pPr></w:style>', 1)
+        zip.write(path, { ["word/styles.xml"] = styles })
+      else
+        local styles = zip.read(path, "styles.xml")
+        styles = styles:gsub('(<style:style style:name="Text_20_body".-<style:paragraph%-properties)', '%1 fo:text-indent="1cm"', 1)
+        styles = styles:gsub('(<style:style style:name="First_20_Paragraph"[^>]-)/>', '%1><style:paragraph-properties fo:text-indent="0cm"/></style:style>', 1)
+        zip.write(path, { ["styles.xml"] = styles })
+      end
+    end
+    local function style_line(name)
+      for _, l in ipairs(H.lines()) do
+        if l:match("^%s+" .. vim.pesc(name) .. ":") then
+          return l
+        end
+      end
+    end
+
+    it("shows the style without the base's indent, and keeps its 0 when its line is edited", function()
+      local path = H.copy("rich." .. ext)
+      indented(path)
+      H.open(path)
+      assert.truthy(style_line(BODY[ext]):find("first = 1cm", 1, true), style_line(BODY[ext]))
+      local line = style_line("First Paragraph")
+      assert.truthy(line:find("first = 0cm", 1, true), line) -- (its own 0, over the base's 1cm)
+      local doc = H.doc()
+      assert.is_nil(doc.fmt.style_view(doc.ctx, doc.fmt.style_id(doc.ctx, "First Paragraph")).first) -- (as it comes out: none)
+      local r = vim.fn.index(H.lines(), line) + 1
+      api.nvim_buf_set_lines(0, r - 1, r, false, { (line:gsub("}%s*$", ", size = 14pt}")) })
+      H.reopen()
+      line = style_line("First Paragraph")
+      assert.truthy(line:find("size = 14pt", 1, true), line)
+      assert.truthy(line:find("first = 0cm", 1, true), line)
+      doc = H.doc()
+      assert.is_nil(doc.fmt.style_view(doc.ctx, doc.fmt.style_id(doc.ctx, "First Paragraph")).first)
+    end)
+  end)
+end
+
+-- a paragraph of a style based on the default one, whose text says the default style's font (as
+-- Word writes text often): it shows none of its own, so when the default style's font changes it
+-- follows, as the style it is in does (its paragraph written again, not only its style's)
+describe("docx the default style's font changed", function()
+  before_each(function() neo.config.styles = true end)
+  after_each(function() neo.config.styles = false end)
+  it("changes the text of the styles under it that showed none of their own", function()
+    local path = H.copy("rich.docx", function(name, text)
+      if name ~= "word/document.xml" then
+        return text
+      end
+      return (text:gsub('(<w:commentRangeStart w:id="0" />)<w:r><w:t xml:space="preserve">Commented', '%1<w:r><w:rPr><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria"/></w:rPr><w:t xml:space="preserve">Commented', 1))
+    end)
+    H.open(path)
+    local function above(text)
+      for r, l in ipairs(H.lines()) do
+        if l:find(text, 1, true) then
+          return H.lines()[r - 1]
+        end
+      end
+    end
+    assert.equals("", above("Commented text")) -- (the default style's font: nothing to say)
+    local root = header().styles[1]
+    assert.equals("Cambria", root.attrs.font)
+    api.nvim_buf_set_lines(0, root.row - 1, root.row, false, { (H.lines()[root.row]:gsub("font = Cambria", "font = Arial")) })
+    H.reopen()
+    assert.equals("", above("Commented text")) -- (in Arial now, as its style: still nothing to say)
+    local p = vim.iter(H.paragraph_xml(path)):find(function(x) return x:find("Commented", 1, true) end)
+    assert.is_nil(p:find("Cambria", 1, true), p)
   end)
 end)

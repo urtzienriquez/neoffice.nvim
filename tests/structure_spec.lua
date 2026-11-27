@@ -1,4 +1,4 @@
--- Titles (% ), bullet and numbered lists (- , 1. ) and numbered headings.
+-- Titles (% ), bullet and numbered lists (- , #. ) and numbered headings.
 local H = dofile("tests/helpers.lua")
 local neo = require("neoffice")
 local zip = require("neoffice.zip")
@@ -14,8 +14,8 @@ end
 
 describe("paragraph layout", function()
   it("starts a paragraph at each heading, title or list item, even without a blank line", function()
-    local texts = vim.tbl_map(function(p) return p.text end, neo.paragraphs({ "% T", "# H", "text", "- a", "- b", "  - c", "1. d", "more" }))
-    assert.same({ "% T", "# H text", "- a", "- b", "  - c", "1. d more" }, texts)
+    local texts = vim.tbl_map(function(p) return p.text end, neo.paragraphs({ "% T", "# H", "text", "- a", "- b", "  - c", "#. d", "more", "1. e", "2.1. f" }))
+    assert.same({ "% T", "# H text", "- a", "- b", "  - c", "#. d more 1. e 2.1. f" }, texts) -- (numbers in text: text)
   end)
 end)
 
@@ -35,33 +35,31 @@ for _, ext in ipairs({ "docx", "odt" }) do
       assert.equals("not a title any more", H.paras()[1])
     end)
 
-    it("writes bullet and numbered lists, nested, and shows their numbering's patterns (the document counts)", function()
-      new(ext, { "Intro.", "", "- apples", "- pears", "  - green ones", "- plums", "", "1. first", "1. second", "  1. inner", "1. third", "", "The end." })
+    it("writes bullet and numbered lists, nested (the document counts)", function()
+      new(ext, { "Intro.", "", "- apples", "- pears", "  - green ones", "- plums", "", "#. first", "#. second", "  #. inner", "#. third", "", "The end." })
       assert.same({
-        "Intro.", "", "- apples", "- pears", "  - green ones", "- plums", "", "1. first", "1. second", "  1. inner", "1. third", "", "The end.",
+        "Intro.", "", "- apples", "- pears", "  - green ones", "- plums", "", "#. first", "#. second", "  #. inner", "#. third", "", "The end.",
       }, H.lines())
     end)
 
-    it("numbers sub-items as their pattern says (1.1., 1.a.), only in their list", function()
-      new(ext, { "1. first", "1. second", "  1.1. second sub one", "  1.1. second sub two", "", "Between.", "", "1. another list" })
-      assert.same({ "1. first", "1. second", "  1.1. second sub one", "  1.1. second sub two", "", "Between.", "", "1. another list" }, H.lines())
-      local xml = zip.read(H.doc().path, H.MAIN[ext])
-      if ext == "docx" then
-        assert.truthy(zip.read(H.doc().path, "word/numbering.xml"):find('<w:lvlText w:val="%1.%2."/>', 1, true))
-      else
-        assert.truthy(zip.read(H.doc().path, "content.xml"):find('text:display%-levels="2"'), xml:sub(1, 400))
-      end
-      H.replace(3, "1.1.", "1.a.")
-      H.replace(4, "1.1.", "1.a.")
-      H.reopen()
-      assert.same({ "1. first", "1. second", "  1.a. second sub one", "  1.a. second sub two", "", "Between.", "", "1. another list" }, H.lines())
-      H.replace(6, "1.", "a)") -- (the other list: its own numbering, the first's as it was)
-      H.reopen()
-      assert.same({ "1. first", "1. second", "  1.a. second sub one", "  1.a. second sub two", "", "Between.", "", "a) another list" }, H.lines())
+    it("shows text starting with a number as it is, and #. typed as text escaped", function()
+      new(ext, { "1. Introduction", "", "2.1. Methods, as text", "", "49\\. Smith, J. (2020)", "", "\\#. not an item" })
+      assert.same({ "1. Introduction", "", "2.1. Methods, as text", "", "49. Smith, J. (2020)", "", "\\#. not an item" }, H.lines())
+      assert.same({ "1. Introduction", "2.1. Methods, as text", "49. Smith, J. (2020)", "#. not an item" }, vim.tbl_map(function(p)
+        local _, chars = require("neoffice.markup").parse(p)
+        return table.concat(vim.tbl_map(function(c) return c.ch end, chars))
+      end, H.paras()))
+    end)
+
+    it("numbers new lists 1., a., i. by level, each list its own", function()
+      new(ext, { "#. first", "#. second", "  #. second sub one", "  #. second sub two", "    #. deeper", "", "Between.", "", "#. another list" })
+      assert.same({ "#. first", "#. second", "  #. second sub one", "  #. second sub two", "    #. deeper", "", "Between.", "", "#. another list" }, H.lines())
       if H.has_libreoffice then
         local ok, text = H.libreoffice_reads(H.doc().path, "second sub one")
         assert.is_true(ok, text)
-        assert.truthy(text:find("2%.b%.") or text:find("2%.b"), text) -- (the second's second: 2.b.)
+        for _, want in ipairs({ "2%.%s+second", "a%.%s+second sub one", "b%.%s+second sub two", "i%.%s+deeper", "1%.%s+another list" }) do
+          assert.truthy(text:find(want), want .. " in " .. text)
+        end
       end
     end)
 
@@ -74,19 +72,19 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
 
     it("takes an item out of the middle of a list, splitting it", function()
-      new(ext, { "1. one", "1. two", "1. three" })
+      new(ext, { "#. one", "#. two", "#. three" })
       H.set(2, "\ntwo, plain now\n")
       H.reopen()
       -- (Word goes on with the same list after it, LibreOffice starts again: shown as they will be)
-      assert.same({ "1. one", "", "two, plain now", "", "1. three" }, H.lines())
+      assert.same({ "#. one", "", "two, plain now", "", "#. three" }, H.lines())
     end)
 
     it("changes the kind and level of items", function()
       new(ext, { "- one", "- two", "- three" })
       H.set(2, "  - two, deeper")
-      H.set(3, "1. three, numbered")
+      H.set(3, "#. three, numbered")
       H.reopen()
-      assert.same({ "- one", "  - two, deeper", "", "1. three, numbered" }, H.lines())
+      assert.same({ "- one", "  - two, deeper", "", "#. three, numbered" }, H.lines())
     end)
 
     it("keeps lists it didn't change exactly as they were", function()
@@ -127,7 +125,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
 
     if H.has_libreoffice then
       it("writes lists LibreOffice shows as lists", function()
-        local path = new(ext, { "- apples", "  - green", "1. first", "1. second" })
+        local path = new(ext, { "- apples", "  - green", "#. first", "#. second" })
         local ok, text = H.libreoffice_reads(path, "1. first")
         assert.is_true(ok, text)
         assert.truthy(text:find("• apples", 1, true))
@@ -168,28 +166,26 @@ end)
 
 describe("sub-items numbered their own way under different items of one list", function()
   for _, ext in ipairs({ "docx", "odt" }) do
-    it("are counted on as one list: 1., 1.1., 1.2., 2., 2.a., 2.b., 3. (" .. ext .. ")", function()
-      local lines = { "1. First, clean the data", "  1.1. something here", "  1.1. something else.", "1. Then, fit the model",
-        "  1.a. hey there", "  1.a. what is this?", "1. Finally, write it up" }
+    it("are counted on as one list: 1., a., b., 2., a., b., 3. (" .. ext .. ")", function()
+      local lines = { "#. First, clean the data", "  #. something here", "  #. something else.", "#. Then, fit the model",
+        "  #. hey there", "  #. what is this?", "#. Finally, write it up" }
       new(ext, lines)
       assert.same(lines, H.lines())
       if H.has_libreoffice then
         local ok, text = H.libreoffice_reads(H.doc().path, "hey there")
         assert.is_true(ok, text)
-        local labels = {}
-        for label in text:gmatch("(%d[%w.]*%.) ") do
-          labels[#labels + 1] = label
+        for _, want in ipairs({ "1%.%s+First", "a%.%s+something here", "b%.%s+something else", "2%.%s+Then", "a%.%s+hey there", "b%.%s+what is this", "3%.%s+Finally" }) do
+          assert.truthy(text:find(want), want .. " in " .. text)
         end
-        assert.same({ "1.", "1.1.", "1.2.", "2.", "2.a.", "2.b.", "3." }, labels, text)
       end
     end)
 
     it("join the list above them when no blank line is between, and start another after one (" .. ext .. ")", function()
-      new(ext, { "1. one", "", "1. two", "1. three" })
-      assert.same({ "1. one", "", "1. two", "1. three" }, H.lines()) -- (two lists: the blank line says so)
+      new(ext, { "#. one", "", "#. two", "#. three" })
+      assert.same({ "#. one", "", "#. two", "#. three" }, H.lines()) -- (two lists: the blank line says so)
       api.nvim_buf_set_lines(0, 1, 2, false, {}) -- (the blank line deleted: one list)
       H.reopen()
-      assert.same({ "1. one", "1. two", "1. three" }, H.lines())
+      assert.same({ "#. one", "#. two", "#. three" }, H.lines())
       if H.has_libreoffice then
         local ok, text = H.libreoffice_reads(H.doc().path, "three")
         assert.is_true(ok, text)
@@ -199,42 +195,49 @@ describe("sub-items numbered their own way under different items of one list", f
   end
 end)
 
-describe("docx lists that share their numbering's definition (as Word and pandoc write them)", function()
-  it("gives a list its own when its pattern changes: the other keeps its numbering", function()
-    local path = new("docx", { "1. first list", "", "Between.", "", "1. second list" })
-    -- (the second list made to share the first's definition)
-    local numbering, document = zip.read(path, "word/numbering.xml"), zip.read(path, "word/document.xml")
-    local ids = {}
-    for id in document:gmatch('<w:numId w:val="(%d+)"/>') do
-      ids[#ids + 1] = id
-    end
-    assert.equals(2, #ids)
-    assert.are_not.equal(ids[1], ids[2])
-    local first = numbering:match('<w:num w:numId="' .. ids[1] .. '"><w:abstractNumId w:val="(%d+)"/>')
-    numbering = numbering:gsub('(<w:num w:numId="' .. ids[2] .. '"><w:abstractNumId w:val=")(%d+)("/>)', "%1" .. first
-      .. '%3<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride>') -- (a list of its own: numbered again from 1)
-    zip.write(path, { ["word/numbering.xml"] = numbering })
-    H.open(path)
-    assert.same({ "1. first list", "", "Between.", "", "1. second list" }, H.lines())
-    H.replace(3, "1.", "a)")
-    H.reopen()
-    assert.same({ "1. first list", "", "Between.", "", "a) second list" }, H.lines())
-    if H.has_libreoffice then -- (the first as it was: 1.; the second its own way: a))
-      local ok, text = H.libreoffice_reads(path, "second list")
-      assert.is_true(ok, text)
-      assert.truthy(text:find("1%. first list") and text:find("a%) second list"), text)
-    end
-  end)
+describe("a list's numbering as the document has it (roman numerals and \")\", here)", function()
+  for _, ext in ipairs({ "docx", "odt" }) do
+    it("is kept when its items are edited, and one is added (" .. ext .. ")", function()
+      local path = new(ext, { "#. first", "#. second" })
+      if ext == "docx" then
+        local numbering = zip.read(path, "word/numbering.xml")
+        numbering = numbering:gsub('(<w:lvl w:ilvl="0">.-)<w:numFmt w:val="decimal"/><w:lvlText w:val="%%1%."/>', '%1<w:numFmt w:val="upperRoman"/><w:lvlText w:val="%%1)"/>', 1)
+        assert.truthy(numbering:find("upperRoman", 1, true))
+        zip.write(path, { ["word/numbering.xml"] = numbering })
+      else
+        local content = zip.read(path, "content.xml")
+        content = content:gsub('(<text:list%-level%-style%-number text:level="1") style:num%-suffix="%." style:num%-format="1"', '%1 style:num-suffix=")" style:num-format="I"', 1)
+        assert.truthy(content:find('style:num-format="I"', 1, true))
+        zip.write(path, { ["content.xml"] = content })
+      end
+      H.open(path)
+      assert.same({ "#. first", "#. second" }, H.lines())
+      H.replace(1, "first", "first, edited")
+      api.nvim_buf_set_lines(0, 2, 2, false, { "#. third, new" })
+      H.reopen()
+      assert.same({ "#. first, edited", "#. second", "#. third, new" }, H.lines())
+      if ext == "docx" then
+        assert.truthy(zip.read(path, "word/numbering.xml"):find("upperRoman", 1, true))
+      end
+      if H.has_libreoffice then
+        local ok, text = H.libreoffice_reads(path, "third, new")
+        assert.is_true(ok, text)
+        for _, want in ipairs({ "I%)%s+first, edited", "II%)%s+second", "III%)%s+third, new" }) do
+          assert.truthy(text:find(want), want .. " in " .. text)
+        end
+      end
+    end)
+  end
 end)
 
 describe("lists open as they were written, without empty lines between their items", function()
   local SHAPES = {
-    { "1. one", "  1.1. one one", "    1.1.1. deeper", "    1.1.1. deeper again", "  1.1. one two", "1. two" },
-    { "1. First", "  1.1. a", "  1.1. b", "1. Then", "  1.a. c", "  1.a. d", "  1.a. e", "1. Finally" },
-    { "1. numbered", "  - a bullet under it", "  - another", "1. numbered again" },
-    { "- bullets", "- more", "", "1. then numbers", "1. more" },
-    { "1. one list", "", "1. another list", "1. its second" },
-    { "1. an item\\", "with a line break", "1. next" },
+    { "#. one", "  #. one one", "    #. deeper", "    #. deeper again", "  #. one two", "#. two" },
+    { "#. First", "  #. a", "  #. b", "#. Then", "  #. c", "  #. d", "  #. e", "#. Finally" },
+    { "#. numbered", "  - a bullet under it", "  - another", "#. numbered again" },
+    { "- bullets", "- more", "", "#. then numbers", "#. more" },
+    { "#. one list", "", "#. another list", "#. its second" },
+    { "#. an item\\", "with a line break", "#. next" },
   }
   -- (as LibreOffice saves it again: its own way of writing lists)
   local function resaved(path, ext)

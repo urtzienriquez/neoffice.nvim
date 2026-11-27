@@ -161,7 +161,7 @@ for _, ext in ipairs({ "docx", "odt" }) do
       vim.cmd("edit " .. vim.fn.fnameescape(path)) -- (no wait: before the paragraphs' fingerprints are all taken)
       assert.truthy(H.doc().pending)
       local r = H.row(3)
-      api.nvim_buf_set_lines(0, r - 1, r - 1, false, { "{indent-left = 1cm}" })
+      api.nvim_buf_set_lines(0, r - 1, r - 1, false, { "{indent-left = 1cm}+" })
       H.reopen()
       local formatted = {}
       for _, b in ipairs(neo.blocks(0)) do
@@ -198,8 +198,8 @@ describe("docx", function()
     neo.config.styles = true
     local ok, err = pcall(function()
       H.open(path)
-      assert.truthy(row_of("^  Body Text:"), table.concat(H.lines(), "\n"))
-      local r, line = row_of("^  Body Text %(BodyText0%):")
+      assert.truthy(row_of("^%s+Body Text:"), table.concat(H.lines(), "\n"))
+      local r, line = row_of("^%s+Body Text %(BodyText0%):")
       assert.truthy(r, table.concat(H.lines(), "\n"))
       saves_unchanged(path)
       local before = zip.read(path, "word/styles.xml")

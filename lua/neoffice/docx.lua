@@ -799,9 +799,11 @@ function M.raw_para_attrs(ppr)
   end
   local left, right = twips(ind, "left", "start"), twips(ind, "right", "end")
   local first, hanging = twips(ind, "firstLine"), twips(ind, "hanging")
-  out["indent-left"] = left and left ~= 0 and paras.cm(left * 2.54 / 1440) or nil
-  out["indent-right"] = right and right ~= 0 and paras.cm(right * 2.54 / 1440) or nil
-  out.first = hanging and hanging ~= 0 and paras.cm(-hanging * 2.54 / 1440) or first and first ~= 0 and paras.cm(first * 2.54 / 1440) or nil
+  -- (a 0 said is said: over what a style it is based on gives, an indent of its own)
+  out["indent-left"] = left and paras.cm(left * 2.54 / 1440) or nil
+  out["indent-right"] = right and paras.cm(right * 2.54 / 1440) or nil
+  local indent = hanging and hanging ~= 0 and -hanging or first or hanging -- (a hanging indent first, as Word reads them)
+  out.first = indent and paras.cm(indent == 0 and 0 or indent * 2.54 / 1440) or nil
   local spacing = ppr and xml.child(ppr, "w:spacing")
   local before, after, line = twips(spacing, "before"), twips(spacing, "after"), twips(spacing, "line")
   out.before = before and paras.pt(before / 20) or nil
@@ -1492,9 +1494,11 @@ local function new_list(ctx, kind)
       end
       text, indent = table.concat(parts, "."), 432 + 144 * l
     end
+    -- (numbers: 1., a., i., again from 1. below them: Word's way, as "#." items say no other)
+    local fmt = kind == "bullet" and "bullet" or kind == "headings" and "decimal" or ({ "decimal", "lowerLetter", "lowerRoman" })[l % 3 + 1]
     xml.append(abstract, xml.elem("w:lvl", { { "w:ilvl", tostring(l) } }, {
       xml.elem("w:start", { { "w:val", "1" } }),
-      xml.elem("w:numFmt", { { "w:val", kind == "bullet" and "bullet" or "decimal" } }),
+      xml.elem("w:numFmt", { { "w:val", fmt } }),
       xml.elem("w:lvlText", { { "w:val", text } }),
       xml.elem("w:lvlJc", { { "w:val", "left" } }),
       xml.elem("w:pPr", {}, { xml.elem("w:ind", { { "w:left", tostring(indent) }, { "w:hanging", kind == "headings" and tostring(indent) or "360" } }) }),
@@ -2079,6 +2083,84 @@ function M.set_style(ctx, id, changes)
   end
   if any_layout then
     write_layout(xml.child(style, "w:pPr"), layout_have, layout_want)
+  end
+  ctx.dirty[STYLES], ctx.style_attrs, ctx.style_fonts, ctx.style_aligns = true, nil, nil, nil -- (what styles give: read again)
+  styles_changed(ctx)
+end
+
+-- What a style says itself (not what the styles it is based on give, nor the defaults): its own
+-- values, as style_view names them; a 0, "bold = no", automatic colour (black) said are its own too.
+function M.own_view(ctx, id)
+  local style = has(styles_el(ctx), "w:style", "w:styleId", id)
+  if not style then
+    return {}
+  end
+  local ppr, rpr = xml.child(style, "w:pPr"), xml.child(style, "w:rPr")
+  local out = M.raw_para_attrs(ppr)
+  local jc = ppr and xml.child(ppr, "w:jc")
+  if jc then
+    out.align = JC[xml.attr(jc, "w:val") or ""] or "left"
+  end
+  local f = rpr_font(ctx, rpr)
+  out.font, out.size, out.color = f.font, f.size, f.color
+  for key, tag in pairs({ bold = "w:b", italic = "w:i" }) do
+    local el = rpr and xml.child(rpr, tag)
+    if el then
+      out[key] = is_on(el)
+    end
+  end
+  return out
+end
+
+-- The style a style is based on (its id), or nil.
+function M.base_style(ctx, id)
+  return ctx.based_on[id] or nil
+end
+
+-- A style's own values of these keys taken away: it gives what the style it is based on gives
+-- (see the styles at the top, init.lua). Its numbering, its other properties, stay.
+function M.unset_style(ctx, id, keys)
+  local style = assert(has(styles_el(ctx), "w:style", "w:styleId", id), "no style " .. tostring(id))
+  local ppr, rpr = xml.child(style, "w:pPr"), xml.child(style, "w:rPr")
+  local LAYOUT_ATTRS = {
+    ["indent-left"] = { "w:ind", { "w:left", "w:start", "w:leftChars", "w:startChars" } },
+    ["indent-right"] = { "w:ind", { "w:right", "w:end", "w:rightChars", "w:endChars" } },
+    first = { "w:ind", { "w:firstLine", "w:hanging", "w:firstLineChars", "w:hangingChars" } },
+    before = { "w:spacing", { "w:before", "w:beforeLines", "w:beforeAutospacing" } },
+    after = { "w:spacing", { "w:after", "w:afterLines", "w:afterAutospacing" } },
+    line = { "w:spacing", { "w:line", "w:lineRule" } },
+  }
+  for _, key in ipairs(keys) do
+    local where = LAYOUT_ATTRS[key]
+    if where and ppr then
+      local el = xml.child(ppr, where[1])
+      if el then
+        for _, attr in ipairs(where[2]) do
+          xml.set_attr(el, attr, nil)
+        end
+        if #(el.attrs or {}) == 0 then
+          xml.remove(el)
+        end
+      end
+    elseif key == "align" and ppr then
+      local jc = xml.child(ppr, "w:jc")
+      if jc then
+        xml.remove(jc)
+      end
+    elseif rpr then
+      if key == "font" then
+        local fonts = xml.child(rpr, "w:rFonts")
+        if fonts then
+          xml.remove(fonts)
+        end
+      elseif key == "size" then
+        set_flag(rpr, "w:sz", nil)
+      elseif key == "color" then
+        set_flag(rpr, "w:color", nil)
+      elseif key == "bold" or key == "italic" then
+        set_flag(rpr, key == "bold" and "w:b" or "w:i", nil)
+      end
+    end
   end
   ctx.dirty[STYLES], ctx.style_attrs, ctx.style_fonts, ctx.style_aligns = true, nil, nil, nil -- (what styles give: read again)
   styles_changed(ctx)

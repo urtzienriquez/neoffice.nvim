@@ -331,7 +331,7 @@ end)
 
 describe("saving again and again in one session", function()
   local function markup_para_line(line)
-    return line:sub(1, 1) == "{" and require("neoffice.markup").para_line(line) or nil
+    return line:find("^[<%-{]") and require("neoffice.markup").para_line(line) or nil
   end
   -- (at a save, a paragraph as it was since the last one keeps its fingerprint: what changed is
   -- still found, whatever changed it)
@@ -345,7 +345,7 @@ describe("saving again and again in one session", function()
       H.save()
       assert.truthy(main():find("Edited title", 1, true))
       local r = H.row(3)
-      vim.api.nvim_buf_set_lines(0, r - 1, r - 1, false, { "{align = center}" }) -- (a format: rows not of the paragraphs)
+      vim.api.nvim_buf_set_lines(0, r - 1, r - 1, false, { "{align = center}+" }) -- (a format: rows not of the paragraphs)
       H.save()
       -- (also for a paragraph further down, whose rows the new line didn't touch)
       H.reopen()

@@ -162,7 +162,9 @@ function M.render_style(attrs)
     local v = attrs[key]
     if v == true then
       parts[#parts + 1] = key
-    elseif v and v ~= false then
+    elseif v == false then -- (a style's that isn't, though the one it is based on is: "bold = no")
+      parts[#parts + 1] = key .. " = no"
+    elseif v then
       local text = markup.attr_value(v)
       if text:find("#", 1, true) and not text:find('^"') then
         text = '"' .. text .. '"'

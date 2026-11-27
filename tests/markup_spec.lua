@@ -195,7 +195,7 @@ describe("paragraph layout", function()
   it("gives each paragraph the rows whose marks belong to it", function()
     local p = neo.paragraphs({ "a", "b", "", "c", "", "" })
     for _, para in ipairs(p) do -- (their format: see "paragraph formats")
-      para.format = nil
+      para.format, para.run = nil, nil
     end
     assert.same({ first = 1, last = 2, owns = 3, text = "a b" }, p[1]) -- (and the blank line after it)
     assert.same({ first = 4, last = 4, owns = 4, text = "c" }, p[2])
@@ -214,11 +214,12 @@ describe("what is written reads back as it was", function()
     "{a}", "\\", "\\\\", "==x==", "++x++", "~~x~~", "*x*", "x\ny", "x\n- y", "x\n# y", "a ==b=={green} c", "![a](b)",
     "x\\", "[x](y)", "$x$", "^[n]", "⟦f⟧", "C++ and C++", "n = 20", "a_{b}", "x^{2}",
     "J Physiol [B] 173", "[1]", "[1, 2] and [3]", "[a] [b](c)", "a]b[c", "[x]", "![x](y)", "x^[n]", "[[x]](y)", "]",
-    "[", "[x] (y)", "\\[ x \\]",
+    "[", "[x] (y)", "\\[ x \\]", "#. x", "  #. x", "{size = 9pt}+", "<|>+", "{a = 1}+ y", "\\vspace{1cm}", "\\vspace", "1.1. x",
   }
   local BLOCKS = {
     {}, { align = "justify" }, { align = "center" }, { align = "left" }, { align = "justify", para = { first = "1cm" } },
     { heading = 2 }, { title = true }, { quote = true }, { list = { kind = "bullet", level = 1 } }, { caption = "table" },
+    { list = { kind = "number", level = 2 } },
   }
   it("for any text in any kind of paragraph", function()
     for _, block in ipairs(BLOCKS) do

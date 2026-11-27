@@ -248,9 +248,11 @@ local function raw_attrs(props)
     return n and (sign == "-" and -n or n)
   end
   local left, right, first = cm("fo:margin-left"), cm("fo:margin-right"), cm("fo:text-indent")
-  out["indent-left"] = left and left ~= 0 and paras.cm(left) or nil
-  out["indent-right"] = right and right ~= 0 and paras.cm(right) or nil
-  out.first = first and first ~= 0 and paras.cm(first) or nil
+  -- (a 0 said is said: over what a style it is based on gives, an indent of its own)
+  local function zero(n) return n == 0 and 0 or n end -- (not "-0cm")
+  out["indent-left"] = left and paras.cm(zero(left)) or nil
+  out["indent-right"] = right and paras.cm(zero(right)) or nil
+  out.first = first and paras.cm(zero(first)) or nil
   local before, after = cm("fo:margin-top"), cm("fo:margin-bottom")
   out.before = before and paras.pt(before / 2.54 * 72) or nil
   out.after = after and paras.pt(after / 2.54 * 72) or nil
@@ -962,7 +964,8 @@ local function list_style(ctx, kind)
       if kind == "bullet" then
         table.insert(attrs, { "text:bullet-char", ({ "•", "◦", "▪" })[(level - 1) % 3 + 1] })
       else
-        vim.list_extend(attrs, { { "style:num-suffix", "." }, { "style:num-format", "1" } })
+        -- (1., a., i., again from 1. below them: Word's way, as "#." items say no other)
+        vim.list_extend(attrs, { { "style:num-suffix", "." }, { "style:num-format", ({ "1", "a", "i" })[(level - 1) % 3 + 1] } })
       end
       local indent = ("%.2fin"):format(0.25 * (level + 1))
       xml.append(style, xml.elem(kind == "bullet" and "text:list-level-style-bullet" or "text:list-level-style-number", attrs, {
@@ -1701,6 +1704,70 @@ function M.set_style(ctx, name, changes)
           local attr = (suffix == "" and "fo:" or "style:") .. (key == "bold" and "font-weight" or "font-style") .. suffix
           xml.set_attr(props, attr, key == "bold" and (value and "bold" or "normal") or (value and "italic" or "normal"))
         end
+      end
+    end
+  end
+  ctx.dirty[STYLES] = true -- (what styles give: read again)
+  ctx.style_attrs, ctx.font_bases, ctx.font_inherits, ctx.style_aligns = {}, nil, nil, nil
+end
+
+-- What a style says itself (not what the styles it is based on give, nor the default style): its
+-- own values, as style_view names them; a 0, "bold = no", automatic colour (black) said are its own.
+function M.own_view(ctx, name)
+  style_attrs(ctx, nil)
+  local style = name and ctx.para_style_el[name]
+  if not style then
+    return {}
+  end
+  local pp, tp = xml.child(style, "style:paragraph-properties"), xml.child(style, "style:text-properties")
+  local out = raw_attrs(pp)
+  out.align = text_align(pp)
+  if tp then
+    local f = props_font(ctx, tp, {})
+    out.font, out.color = f.font, f.color
+    local size = xml.attr(tp, "fo:font-size")
+    if size then -- (a percentage, of what it is based on: as it comes out)
+      out.size = size:find("%%") and M.style_view(ctx, name).size or f.size
+    end
+    local weight, slant = xml.attr(tp, "fo:font-weight"), xml.attr(tp, "fo:font-style")
+    if weight then
+      out.bold = weight == "bold" or (tonumber(weight) or 0) >= 600
+    end
+    if slant then
+      out.italic = slant ~= "normal"
+    end
+  end
+  return out
+end
+
+-- The style a style is based on (its name), or nil.
+function M.base_style(ctx, name)
+  style_attrs(ctx, nil)
+  return ctx.parent_style[name] or nil
+end
+
+-- A style's own values of these keys taken away: it gives what the style it is based on gives
+-- (see the styles at the top, init.lua). Its other properties stay.
+function M.unset_style(ctx, name, keys)
+  style_attrs(ctx, nil)
+  local style = assert(ctx.para_style_el[name], "no style " .. tostring(name))
+  local para, text = xml.child(style, "style:paragraph-properties"), xml.child(style, "style:text-properties")
+  local ATTRS = {
+    ["indent-left"] = { para, { "fo:margin-left" } }, ["indent-right"] = { para, { "fo:margin-right" } },
+    first = { para, { "fo:text-indent", "style:auto-text-indent" } }, before = { para, { "fo:margin-top" } },
+    after = { para, { "fo:margin-bottom" } }, line = { para, { "fo:line-height", "style:line-height-at-least", "style:line-spacing" } },
+    align = { para, { "fo:text-align", "style:justify-single-word" } },
+    font = { text, { "style:font-name", "fo:font-family", "style:font-family-generic", "style:font-pitch" } },
+    size = { text, { "fo:font-size", "style:font-size-asian", "style:font-size-complex" } },
+    color = { text, { "fo:color", "style:use-window-font-color" } },
+    bold = { text, { "fo:font-weight", "style:font-weight-asian", "style:font-weight-complex" } },
+    italic = { text, { "fo:font-style", "style:font-style-asian", "style:font-style-complex" } },
+  }
+  for _, key in ipairs(keys) do
+    local where = ATTRS[key]
+    if where and where[1] then
+      for _, attr in ipairs(where[2]) do
+        xml.set_attr(where[1], attr, nil)
       end
     end
   end

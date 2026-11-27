@@ -878,6 +878,14 @@ local function apply(buf, m, action, a, b)
       elseif lines[a[1]] == "" then
         from = from - 1
       end
+      -- (and its own format's lines, right above it, no "+": for it only, they'd be for none)
+      local function own_line(l) -- (a format's line without "+")
+        local f = l and l:find("^[<%-{]") and markup.para_line(l)
+        return f and not f.sticky
+      end
+      while from > 0 and own_line(lines[from]) do
+        from = from - 1
+      end
       api.nvim_buf_set_lines(buf, from, to, false, {})
     end
     return not same(a, b)

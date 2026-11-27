@@ -13,21 +13,23 @@ else in the file stays exactly as it was.
   colours: `==highlight=={green}`), `x^{2}`, `W_{food}`, `[links](https://…)`.
 - Captions: `Table: …` and `Figure: …`, real captions numbered by the document (Word's and
   LibreOffice's own numbering, so cross-references work).
-- The document's paragraph styles at its top (`Normal: {font = Times New Roman, size = 11pt}`):
-  edit a line to change the style, and every paragraph of it follows.
+- The document's paragraph styles at its top, each under the style it is based on (`Normal: {font =
+  Times New Roman, size = 11pt}`, and indented under it `Body Text: {after = 6pt}`): each says what it says
+  itself; edit a line to change the style, and every paragraph of it, and the styles under it that
+  say nothing of their own, follow, as in Word.
 - Page settings at its top (`page: {size = A4, margins = 2.5cm}`), and sections where a line
   says what changes (`\newpage {orientation = landscape}`): a landscape page for a wide figure.
-- Paragraph formats set for many paragraphs at once, as in LaTeX: a line `{align = justify, first =
-  0.5cm}` sets what the paragraphs after it have of their own, against their style, until the next;
-  one that differs says how (`<|> A centred one.`, `{before = 12pt} More space.`). A few words in
-  another font or colour: `[words]{font = Arial}`, `[words]{color = red}` (and `{color = darkblue}`
-  for paragraphs, `color = ...` for a style). A code action moves a format into its style.
-- A paragraph's style in its format: `{style = First Paragraph} Its text.`, or a format's line for
-  those after it; shown where a paragraph's style isn't the usual one where it is.
-- Paragraphs: `# ` headings (numbered on demand), `% ` title, `> ` quote, `- ` and numbered lists
-  written as their numbering's pattern (`1.` for every item, `1.1.` or `1.a.` for sub-items: the
-  document counts),
-  and alignment `<|> centered`, `->> right`, `<=> justified`.
+- Paragraph formats on lines of their own, never in the text: `{align = justify, first = 0.5cm}+`
+  sets what the paragraphs after it have of their own, against their style, until the next `+`
+  line (as in LaTeX); without `+` (`{before = 12pt}`, `<|>` for centred) it is for the paragraph
+  right below it only. A few words in another font or colour: `[words]{font = Arial}`,
+  `[words]{color = red}` (and `{color = darkblue}+` for paragraphs, `color = ...` for a style). A
+  code action moves a format into its style.
+- A paragraph's style in its format: `{style = First Paragraph}` above it, or with `+` for those
+  after it too; shown where a paragraph's style isn't the usual one where it is.
+- Paragraphs: `# ` headings (numbered on demand), `% ` title, `> ` quote, `- ` bullets and `#. `
+  numbered items, as in pandoc (the document counts, numbered as its list says; "1. Intro" is just
+  text), and alignment `<|> centered`, `->> right`, `<=> justified` (on a format's line).
 - Line breaks (`\` at the end of a line), page breaks (`\newpage`) and vertical space between
   paragraphs (`\vspace{1cm}`, a line of its own).
 - Tables as pipe tables (`| a | b |`): edit cells, add or remove rows and columns, new tables.

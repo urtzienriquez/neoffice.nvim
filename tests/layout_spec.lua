@@ -3,9 +3,9 @@ local H = dofile("tests/helpers.lua")
 local zip = require("neoffice.zip")
 
 local EXPECTED = {
-  "<|> Centered text.",
-  "->> Right text.",
-  "<=> Justified text.",
+  "Centered text.",
+  "Right text.",
+  "Justified text.",
   "> A quote.",
   "First line\\\nsecond line.",
   "Before the page break.",
@@ -26,6 +26,8 @@ for _, name in ipairs({ "layout.docx", "layout.odt" }) do
 
     it("shows alignment, quotes, breaks, formatting, footnotes and fields", function()
       assert.same(EXPECTED, H.paras())
+      -- (a paragraph's alignment: its mark on a line of its own above it, for it only)
+      assert.same({ "<|>", "->>", "<=>" }, { H.lines()[H.row(1) - 1], H.lines()[H.row(2) - 1], H.lines()[H.row(3) - 1] })
     end)
 
     it("highlights the alignment marks (over Markdown's quote highlighting)", function()
@@ -38,7 +40,7 @@ for _, name in ipairs({ "layout.docx", "layout.odt" }) do
         return false
       end
       assert.equals("NeofficeMark", vim.api.nvim_get_hl(0, { name = "NeofficeAlign" }).link) -- (formatting's gray)
-      for _, row in ipairs({ H.row(1), H.row(2), H.row(3) }) do
+      for _, row in ipairs({ H.row(1) - 1, H.row(2) - 1, H.row(3) - 1 }) do -- (the lines above them)
         assert.same({ true, true, true, false }, { hl(row - 1, 0), hl(row - 1, 1), hl(row - 1, 2), hl(row - 1, 3) })
       end
     end)
@@ -52,13 +54,21 @@ for _, name in ipairs({ "layout.docx", "layout.odt" }) do
 
     it("changes alignment, and only that paragraph", function()
       local before = H.paragraph_xml(path)
-      H.set(1, "Centered text.")
-      H.set(2, "<|> Right text.")
-      H.set(3, "->> Justified text.")
-      H.set(6, "<=> Before the page break.")
+      local api = vim.api
+      local function above(k, line) -- (its own format's line: replaced, deleted (nil), or added)
+        local r = H.row(k) - 1
+        local has = H.lines()[r] ~= ""
+        api.nvim_buf_set_lines(0, has and r - 1 or r, r, false, line and { line } or {})
+      end
+      above(6, "<=>")
+      above(3, "->>")
+      above(2, "<|>")
+      above(1, nil)
       H.reopen()
-      assert.same({ "Centered text.", "<|> Right text.", "->> Justified text." }, vim.list_slice(H.paras(), 1, 3))
-      assert.equals("<=> Before the page break.", H.paras()[6])
+      local function mark(k) return H.lines()[H.row(k) - 1] or "" end
+      assert.same({ "", "<|>", "->>" }, { mark(1), mark(2), mark(3) })
+      assert.equals("<=>", mark(6))
+      assert.same(vim.list_slice(EXPECTED, 1, 3), vim.list_slice(H.paras(), 1, 3)) -- (their text: only text)
       assert.equals(4, H.differing(before, H.paragraph_xml(path)))
     end)
 
@@ -197,12 +207,13 @@ for _, name in ipairs({ "layout.docx", "layout.odt" }) do
 
     it("with tracking on, changes alignment and quotes without a tracked change", function()
       vim.cmd("Neoffice track on")
-      H.replace(2, "->> ", "<=> ")
+      local r = H.row(2) - 1
+      vim.api.nvim_buf_set_lines(0, r - 1, r, false, { "<=>" }) -- (its alignment's line)
       H.replace(4, "> ", "")
       assert.equals(0, #H.changes(require("neoffice").config.author))
-      H.reopen() -- (now two justified paragraphs one after the other: under one line of their format)
+      H.reopen() -- (now justified paragraphs one after the other: under one line of their format)
       assert.same({ "Right text.", "A quote." }, { H.paras()[2], H.paras()[4] })
-      assert.equals("{align = justify}", H.lines()[H.row(2) - 1])
+      assert.equals("<=>+", H.lines()[H.row(2) - 1])
     end)
 
     if H.has_libreoffice then

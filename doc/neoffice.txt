@@ -65,7 +65,7 @@ A paragraph's kind is written at the start of its line:
   `% `                    the title (the document's Title style)
   `> `                    a quote (its Quote style)
   `- `                    a bullet list item
-  `1. `, `1.1. `, `a) `   a numbered list item (|neoffice-lists|)
+  `#. `                   a numbered list item (|neoffice-lists|)
   `Table: `, `Figure: `   a caption (|neoffice-captions|)
 
 List items are indented two spaces per level, and can follow each other with
@@ -74,30 +74,24 @@ whatever its name in your language; a heading of a level the document has no
 style for gets a "heading N" style.
 
                                                               *neoffice-lists*
-A numbered item's marker isn't its number but its numbering's pattern: the
-document counts. Write every item of a level the same, and Word or
-LibreOffice number them: >
+A numbered item is written `#. `, as in pandoc: the document counts. Its
+level is its indentation, two spaces a level: >
 
-  1. first item                 1. first item
-  1. second item                2. second item
-    1.1. second sub one           2.1. second sub one
-    1.1. second sub two           2.2. second sub two
+  #. first item                 1. first item
+  #. second item                2. second item
+    #. second sub one             a. second sub one
+    #. second sub two             b. second sub two
 <
-A pattern has a part for each level it shows, each ending in `.` or `)`:
-`1` numbers, `a` `A` letters, `i` `I` roman numerals: `1.` `1.1.` `1.a.` `1)`
-`a)` `i)`. Its level is its number of parts (`1.1.` is a sub-item), or, with
-one part, its indentation. Letters and numerals alone take `)`: `a)`, not
-`a.` ("A. Smith" and "e.g." are text). A list opens with its patterns, from
-its definition (Word's numbering, LibreOffice's list style). Each item is
-numbered as its own pattern says, so the sub-items under one item can be
-`1.1.` and those under the next `1.a.`: 1.1, 1.2, 2, 2.a, 2.b, 3 (in Word, an
-instance of the list overriding that level; in LibreOffice, the sub-list's own
-list style). One that can't be written so ("(1)", "Step 1:") shows as `1.` and
-is kept as it is unless you change it. Items one after another are one list
-(a sub-item always its item's, bullets under a number too); a blank line (or a
-paragraph) between them starts another, numbered from 1. A list the document
-numbers again partway (as LibreOffice writes one sometimes) opens with a blank
-line there: delete it to number on.
+Its numbers are as its list's definition says (Word's numbering,
+LibreOffice's list style): 1., 1.1., a), (i)..., whatever the document has,
+kept as they are. A new list is numbered 1., a., i. by level (again from 1.
+below those), as Word numbers one. A number at the start of a paragraph's
+text ("1. Introduction", "2.1.", "49. Smith, J.") is just text: never a list
+item, never escaped; `\#. ` is a paragraph starting with "#." as text. Items
+one after another are one list (a sub-item always its item's, bullets under a
+number too); a blank line (or a paragraph) between them starts another,
+numbered from 1. A list the document numbers again partway (as LibreOffice
+writes one sometimes) opens with a blank line there: delete it to number on.
 
                                                               *neoffice-align*
 Its alignment comes after its kind:
@@ -115,26 +109,37 @@ centers its paragraphs (some Title styles) shows no mark.
                                                            *neoffice-styles*
 The styles at the top ~
 A document opens with its paragraph styles at the top: those its paragraphs
-have (its default one first), and what each gives: >
+have and those they are based on, each indented under the one it is based
+on, so how they inherit shows. The first of each tree (the default style)
+says all it gives; each under it says only what it says itself, and has the
+rest from the one above it: >
 
   ---
   styles:
-    Normal:    {font = Times New Roman, size = 11pt, align = justify}
-    Heading 1: {font = Arial, size = 14pt, bold, before = 12pt}
-    Caption:   {size = 10pt, italic}
+    Normal:              {font = Times New Roman, size = 11pt, first = 1cm}
+      Heading 1:         {font = Arial, size = 14pt, bold, first = 0cm}
+      Body Text:         {before = 9pt, after = 9pt}
+        First Paragraph: {first = 0cm}
+      Caption:           {size = 10pt, italic}
   ---
 <
 A line starting with `#` is a comment, as in YAML (`gcc` comments one out):
-inactive, as if it weren't there. The lines at the top are highlighted as YAML
-(as an R Markdown file's), where tree-sitter has a YAML parser.
+inactive, as if it weren't there. The lines at the top are highlighted as an
+R Markdown file's YAML is, where tree-sitter has a YAML parser: each line by
+itself (read together, YAML would take the indented styles as wrong, a key
+with braces having nothing under it in YAML); without one, the names,
+comments, and the rest in gray.
 
-Each line is what the style gives (following the styles it is based on, and
-the document's defaults): `font`, `size`, `color`, `align`, `bold`, `italic`, and the
-format's attributes below. Editing a line changes the style itself, so every
-paragraph of it follows (in the whole document: its headers and footnotes
-too), as in Word and LibreOffice; a style based on it keeps what its own line
-shows, and so does one in use that isn't at the top (a header's, a footer's, a
-footnote's): only what you changed changes. A paragraph keeps the format of
+A line says `font`, `size`, `color`, `align`, `bold`, `italic`, and the format's
+attributes below; a value a style says over the one above it is said too
+(`first = 0cm`, `bold = no`). Editing a line changes the style itself, so
+every paragraph of it follows (in the whole document: its headers and
+footnotes too), as in Word and LibreOffice; and, as in Word, the styles under
+it follow it where they say nothing themselves (a header's, a footnote's too,
+that aren't at the top). A value taken off a style's line under another, it
+has from the one above it again; taken off the first's, its default. The
+indentation shows the document's inheritance: changing it changes nothing.
+A paragraph keeps the format of
 its own (an empty one too, which shows as a blank line and has none to say). Deleting a line, or the whole header, changes nothing; a line naming
 a style the document hasn't, or an attribute that isn't one, makes the write
 fail, saying so. The language server completes the styles' names (those the
@@ -146,8 +151,7 @@ allows it) show apart, the second with its id: `Body Text (BodyText0):`.
 `:Neoffice styles reset` makes the styles a new document's: those a new
 document has (Normal, Heading 1-9, Title, Caption, ...) as it has them, the
 document's defaults (font, size) too; a style it hasn't, nothing of its own,
-so it follows the style it is based on. What changing a style kept in the ones
-based on it goes too. The paragraphs' own formatting (words in another font, a
+so it follows the style it is based on. The paragraphs' own formatting (words in another font, a
 paragraph's format line) isn't a style's: it stays, as do the heading numbers
 (|:Neoffice| numbers) and table styles. The lines at the top show the styles
 as they now are; |:w| writes them (the text isn't written again).
@@ -204,25 +208,27 @@ some is copied for those. A page break followed by text in braces is written
                                                        *neoffice-para-format*
 The format of plain paragraphs (not headings, titles, quotes, list items,
 captions, table cells or boxes) is what they have of their own, against
-their style above. It is set for many at once, as in LaTeX: a line with only
-attributes in braces changes the format of the paragraphs after it, until
-the next such line, and says only what changes: what it doesn't say goes on
-from the line before. `name = none` takes one back to the style, and `none`
-alone all of them: >
+their style above. It goes on a line of its own, with only attributes in
+braces, right above the paragraph: never in the paragraph's text, which
+stays only text. With a `+` at its end, the line is for that paragraph and
+all after it, until the next `+` line (as in LaTeX), and says only what
+changes: what it doesn't say goes on from the `+` line before. Without the
+`+`, it is for the paragraph right below it only (no blank line between),
+over what the `+` lines give. `name = none` takes one back to the style,
+and `none` alone all of them: >
 
-  {align = justify, first = 0.5cm}
+  {align = justify, first = 0.5cm}+
   Small mammals budget their energy...
 
   {before = 6pt}
-  Justified still, indented still, and more space above.
+  Justified still, indented still, and this one more space above.
 
-  {first = none, before = none}
-  Justified still; as the style for the rest.
+  Justified still; no more space above.
 
-  {none, indent-left = 0.76cm, first = -0.76cm}
+  {none, indent-left = 0.76cm, first = -0.76cm}+
   Alexander, R. M. (1999). Energy for animal life...
 
-  {none}
+  {none}+
   From here on, as their style says.
 <
   `style`                         its paragraph style, by name (see below)
@@ -236,25 +242,28 @@ alone all of them: >
   `color`                         the colour of its text (`red`, `#1f4e79`)
 
 A format is what differs from the style: `none` is the style's (`align =
-none`: the style's alignment). Opened, each line says only what changes
-from the one before it (or starts from the style, with `none`, when that is
-much shorter). A paragraph that
-differs from the paragraphs around it says how, at its start: `{before =
-12pt} One with more space above.` (only braces with `name = value` in them
-are attributes: `{this} text` is text). The marks are short for alignment:
-`<|> A centered one.`, `->> {before = 6pt} Right, and more space.` (a line
-with only a mark is a format's line too: `<=>` is `{align = justify}`).
+none`: the style's alignment). Opened, paragraphs one after the other with
+the same format get a `+` line above the first, which says only what
+changes from the `+` line before it (or starts from the style, with `none`,
+when that is much shorter); a paragraph that differs from those around it
+gets a line of its own, without `+`. The marks are short for alignment, on
+such a line: `<|>` (centred), `->>` (right), `<=>` (justified), `<<-`
+(left); `<=> {before = 6pt}+`. A line without `+` with no paragraph right
+below it stops the save, and says where. Attributes in braces at the start
+of a paragraph's text (`{before = 12pt} Text.`, `<|> Text.`) are read too,
+and shown on a line of their own when the document is opened again (only
+braces with `name = value` in them are attributes: `{this} text` is text).
 
                                                    *neoffice-para-style*
 `style` gives a paragraph another of the document's paragraph styles, by its
-name, whatever its case: `{style = First Paragraph} Its text.` for one, a
-format's line for those after it (until a line says `style = none`, or
-`none`). Plain paragraphs have one of two usual styles, by where they are:
+name, whatever its case: `{style = First Paragraph}` on the line above it
+for one, with `+` for those after it too (until a `+` line says `style =
+none`, or `none`). Plain paragraphs have one of two usual styles, by where they are:
 first ones (the first in the document, and right after a heading, title or
 quote) the one most of those have, the others the one most of them have. In
 a document made by pandoc these are First Paragraph and Body Text; in most
 others both are Normal. Opened, a paragraph whose style isn't the usual one
-where it is says it, at its start; `none` is the usual one where it is. A
+where it is says it, on a line above it; `none` is the usual one where it is. A
 paragraph you type gets the usual one where it is (not the style of the
 paragraph before it, nor a caption's after a table); one whose `{style =
 ...}` you delete too. A style the document doesn't have stops the save, and
@@ -289,7 +298,7 @@ for (<C-Space> in blink.cmp), or a letter typed.
 
 Colour goes the same way, `color` (or `colour`): a few words in a span
 (`[Important]{color = red}`), the paragraphs under a format's line
-(`{color = darkblue}`, `none` for their style's), a table cell's text
+(`{color = darkblue}+`, `none` for their style's), a table cell's text
 (`| {color = red} ... |`), a style at the top (`Normal: {..., color = darkred}`).
 A colour is a name (red, blue, darkblue, darkgreen, darkred, darkgray,
 lightgray, black, white, yellow, green, cyan, magenta, and their dark ones)
@@ -346,8 +355,8 @@ would read as a span of text in another font). Text that
 would read as something else is written escaped, so what you see is always
 what the document has. The backslash shows faint (|hl-NonText|):
 
-  `1\. Quantify...`     a paragraph that starts with "1." typed as text, not
-                      a numbered list (without `\` it would become one)
+  `\#. Quantify...`     a paragraph that starts with "#." typed as text, not
+                      a numbered list item (without `\` it would become one)
   `\<tab>`              a paragraph of only a tab or spaces (without `\` it
                       would look like a blank line, which separates
                       paragraphs); text typed after it needs none
@@ -800,7 +809,7 @@ neoffice, and so is the documents' filetype). It answers:
     `bullets`      a bulleted list
     `quote`        a quotation
     `title`        the title
-    `format`       a format's line for the paragraphs after it
+    `format`       a format's line for the paragraphs after it (`+`)
 
   After a space: `footnote` (right after the word before it), `link`, `span`
   (words in another font or size), `highlight`, `math`.

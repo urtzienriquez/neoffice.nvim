@@ -137,6 +137,7 @@ function M.paragraphs(lines, alone)
   local dashes_seen = {} -- (the tables whose line of dashes was found: see markup.is_dashes)
   local box, box_of_row, cut = nil, {}, false -- (cut: a box's line came just before: no paragraph goes on across it)
   local format, fenced = { attrs = {} }, false -- (the paragraphs' format: see paras.lua; fenced: a format's line came last)
+  local pending -- (format's lines for the paragraph right below them only, no "+": { lines, row, last })
   local function empty_after() -- (how many blank lines after a paragraph, or a format's line, separate)
     if box and #out == box.count then -- (right after a box's line: nothing in it to separate from)
       return 1
@@ -192,11 +193,19 @@ function M.paragraphs(lines, alone)
       cut, fenced, table_start = true, true, nil -- neither text nor a format)
       goto continue
     end
-    if para_line then -- the format of the paragraphs after it: what it changes (see paras.lua)
+    if para_line then -- the format of the paragraphs after it ("+"), or of the next one: what it changes (see paras.lua)
       empty_paragraphs(empty_after())
-      local whole = markup.apply_para_line(format, para_line)
-      whole.bad, whole.text = para_line.bad, para_line.text
-      format, cut, fenced = whole, true, true
+      if para_line.sticky then
+        local whole = markup.apply_para_line(format, para_line)
+        whole.bad, whole.text = para_line.bad, para_line.text
+        format = whole
+        if pending then -- (between a paragraph's own line and it: still right above it)
+          pending.last = row
+        end
+      else -- (two in a row for one paragraph: both, the second over the first)
+        pending = { lines = vim.list_extend(pending and pending.lines or {}, { para_line }), row = pending and pending.row or row, last = row }
+      end
+      cut, fenced = true, true
       table_start = nil
       goto continue
     end
@@ -217,6 +226,9 @@ function M.paragraphs(lines, alone)
     end
     if line:match("^%s*$") then
       blanks[#blanks + 1] = row
+      if pending then -- (a paragraph's own format's line, with no paragraph right below it: for none)
+        out.stray_format, pending = out.stray_format or pending.row, nil
+      end
     elseif cells ~= false and table_start then -- a table row (or the line of dashes under its first row)
       empty_paragraphs(empty_after())
       formats[table_start] = not cells and markup.table_format(line) or formats[table_start]
@@ -253,7 +265,23 @@ function M.paragraphs(lines, alone)
       out[#out + 1] = { first = row, last = row, text = line, alone = alone[row], vspace = (markup.block(line)).vspace and true or nil }
     end
     if out[#out] and out[#out].first == row then
-      out[#out].format = format
+      out[#out].format, out[#out].run = format, format -- (run: the format of the paragraphs around it, from "+" lines)
+      if pending and pending.last ~= row - 1 then -- (not right below it: for none)
+        out.stray_format, pending = out.stray_format or pending.row, nil
+      end
+      if pending then -- (a format's line for it only: over its run's)
+        local own = format
+        for _, f in ipairs(pending.lines) do
+          local whole = markup.apply_para_line(own, f)
+          whole.bad, whole.text = own.bad or f.bad, f.text
+          own = whole
+        end
+        local kind = (markup.block(line))
+        if out[#out].cell or box_of_row[row] or kind.heading or kind.title or kind.quote or kind.list or kind.caption or kind.vspace then
+          own.bad = own.bad or ("line %d: a format's line without \"+\" is for the paragraph right after it, and that is no plain paragraph (a heading, a list item, a table, a box...)"):format(pending.row)
+        end
+        out[#out].format, pending = own, nil
+      end
     end
     if not line:match("^%s*$") then
       cut, fenced = false, false
@@ -261,6 +289,9 @@ function M.paragraphs(lines, alone)
     ::continue::
   end
   empty_paragraphs(1)
+  if pending then
+    out.stray_format = out.stray_format or pending.row
+  end
   if section and #out > section.count then
     out[section.count + 1].section, section = section, nil
   end
@@ -1386,6 +1417,106 @@ function M.first_paragraphs(n, place)
   return out
 end
 
+-- The styles at the top: those of `used` (ids, in the order the document has them) and those they
+-- are based on, each under the one it is based on (depth), saying what it says itself (attrs: what
+-- isn't there it has from the one above it); the first of each tree, all it gives (view).
+-- { { id, name, depth, base, view, attrs } } in order.
+function M.style_entries(doc, used)
+  local ctx, fmt = doc.ctx, doc.fmt
+  local function real(id) -- (a paragraph style the document has)
+    return id and fmt.style_id(ctx, id) == id and pcall(fmt.style_view, ctx, id)
+  end
+  local base_of, seen, order = {}, {}, {}
+  local function add(id, depth)
+    if seen[id] or depth > 10 then
+      return
+    end
+    seen[id] = true
+    local base = fmt.base_style and fmt.base_style(ctx, id)
+    if base and base ~= id and real(base) then
+      base_of[id] = base
+      add(base, depth + 1)
+    end
+    order[#order + 1] = id
+  end
+  for _, id in ipairs(used) do
+    add(id, 0)
+  end
+  local children, rank = {}, {}
+  for k, id in ipairs(order) do
+    rank[id] = k
+    local b = base_of[id]
+    if b then
+      children[b] = children[b] or {}
+      table.insert(children[b], id)
+    end
+  end
+  local out, names, views = {}, {}, {}
+  local function view(id)
+    views[id] = views[id] or fmt.style_view(ctx, id)
+    return views[id]
+  end
+  local function walk(id, depth)
+    if depth > 10 then
+      return
+    end
+    local entry = { id = id, name = fmt.style_name(ctx, id), depth = depth, base = base_of[id], view = view(id) }
+    entry.attrs = base_of[id] and fmt.own_view(ctx, id) or entry.view
+    if names[entry.name:lower()] then -- (two styles of one name, as Word allows: this one with its id)
+      entry.name = ("%s (%s)"):format(entry.name, id)
+    end
+    names[entry.name:lower()] = true
+    out[#out + 1] = entry
+    local list = children[id] or {}
+    table.sort(list, function(a, b) return rank[a] < rank[b] end)
+    for _, c in ipairs(list) do
+      walk(c, depth + 1)
+    end
+  end
+  for _, id in ipairs(order) do
+    if not base_of[id] then
+      walk(id, 0)
+    end
+  end
+  return out
+end
+
+-- The styles' lines at the top, each as its style now is (after a save that changed them, or
+-- :Neoffice styles reset): what they show, and what the next save compares them with.
+function M.refresh_header(buf, doc)
+  local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
+  local header = doc.header and markup.header(lines)
+  if not header then
+    return
+  end
+  local found = {}
+  for _, st in ipairs(header.styles) do
+    local known = st.name and doc.header[st.name:lower()]
+    local id = known and known.id or st.name and (doc.fmt.style_id(doc.ctx, st.name) or doc.fmt.style_id(doc.ctx, st.name:match("%(([^()]+)%)%s*$") or ""))
+    if id then
+      found[#found + 1] = { st = st, id = id }
+    end
+  end
+  local by_id = {}
+  for _, e in ipairs(M.style_entries(doc, vim.tbl_map(function(x) return x.id end, found))) do
+    by_id[e.id] = e
+  end
+  local shown = {}
+  for _, x in ipairs(found) do
+    local e = vim.deepcopy(by_id[x.id])
+    e.name = x.st.name
+    shown[#shown + 1] = { e = e, row = x.st.row }
+  end
+  local width = markup.style_width(vim.tbl_map(function(s) return s.e end, shown))
+  for _, s in ipairs(shown) do
+    doc.header[s.e.name:lower()] = s.e
+    local line = markup.render_style_line(s.e, width)
+    if lines[s.row] ~= line then
+      api.nvim_buf_set_lines(buf, s.row - 1, s.row, false, { line })
+    end
+  end
+end
+
 -- A paragraph style as {style = ...} names it: its name, or "Name (Id)" for one of two of a name.
 function M.style_label(doc, id)
   local name = doc.fmt.style_name(doc.ctx, id)
@@ -1411,28 +1542,10 @@ function M.reset_styles(buf)
     return vim.notify("neoffice: The styles couldn't be reset: " .. tostring(err):gsub("^[^\n]-%.lua:%d+: ", ""), vim.log.levels.ERROR)
   end
   -- (the lines at the top: each style's, as it now is; what the next save compares them with too)
-  local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
-  local header = doc.header and markup.header(lines)
-  if header then
-    local width = 0
-    for _, st in ipairs(header.styles) do
-      width = st.name and math.max(width, vim.fn.strdisplaywidth(st.name)) or width
-    end
-    for _, st in ipairs(header.styles) do
-      local known = st.name and doc.header[st.name:lower()]
-      local id = known and known.id or st.name and doc.fmt.style_id(doc.ctx, st.name)
-      if id then
-        local attrs = doc.fmt.style_view(doc.ctx, id)
-        doc.header[st.name:lower()] = { id = id, name = st.name, attrs = attrs }
-        local line = "  " .. st.name .. ": " .. (" "):rep(width - vim.fn.strdisplaywidth(st.name)) .. "{" .. require("neoffice.paras").render_style(attrs) .. "}"
-        if lines[st.row] ~= line then
-          api.nvim_buf_set_lines(buf, st.row - 1, st.row, false, { line })
-        end
-      end
-    end
-  end
+  M.refresh_header(buf, doc)
   for _, entry in pairs(doc.header or {}) do -- (those not at the top any more: as they now are too)
-    entry.attrs = doc.fmt.style_view(doc.ctx, entry.id)
+    entry.view = doc.fmt.style_view(doc.ctx, entry.id)
+    entry.attrs = entry.base and doc.fmt.own_view(doc.ctx, entry.id) or entry.view
   end
   vim.bo[buf].modified = true -- (to be written, whether the lines changed or not)
   M.decorate(buf)
@@ -1763,7 +1876,7 @@ local function open(buf, path)
   end
   -- Paragraphs' formats (see paras.lua): plain paragraphs one after another with the same one go
   -- under one line of it (before the first of them); one that differs says how, on its own.
-  local format_before = {}
+  local format_before, own_before = {}, {} -- (a format's line before a paragraph: for those from it on, "+"; for it only)
   do
     local function content(spans)
       return vim.iter(spans):any(function(s)
@@ -1859,8 +1972,10 @@ local function open(buf, path)
       elseif shared(1) or shared(2) then -- (it and the next, or the one after an exception, have it)
         format_before[k], run = own, own -- (a run of it starts)
         b.align, b.para = nil, nil
-      else
-        b.align, b.para = pformat.diff(run, own)
+      else -- (it alone: a line of its own above it, for it only; never in its text)
+        local align, attrs = pformat.diff(run, own)
+        own_before[k] = { align = align, attrs = attrs or {} }
+        b.align, b.para = nil, nil
       end
     end
   end
@@ -2066,14 +2181,10 @@ local function open(buf, path)
     end
     local default = doc.fmt.style_of(ctx, xml.elem(doc.fmt.MAIN == "content.xml" and "text:p" or "w:p"))
     table.sort(order, function(a, b) return (a == default and 0 or 1) < (b == default and 0 or 1) end)
-    local shown = {}
+    local shown = M.style_entries(doc, order)
     doc.header = {}
-    for _, id in ipairs(order) do
-      local entry = { id = id, name = doc.fmt.style_name(ctx, id), attrs = doc.fmt.style_view(ctx, id) }
-      if doc.header[entry.name:lower()] then -- (two styles of one name, as Word allows: this one with its id)
-        entry.name = ("%s (%s)"):format(entry.name, id)
-      end
-      shown[#shown + 1], doc.header[entry.name:lower()] = entry, entry
+    for _, entry in ipairs(shown) do
+      doc.header[entry.name:lower()] = entry
     end
     vim.list_extend(lines, markup.render_header(shown, page_line))
     lines[#lines + 1] = ""
@@ -2119,8 +2230,11 @@ local function open(buf, path)
     else
       if format_before[k] then -- (the format of the paragraphs from here on: what changes, see paras.lua)
         local f = format_before[k]
-        lines[#lines + 1] = markup.para_line_for(shown_format, f)
+        lines[#lines + 1] = markup.para_line_for(shown_format, f) .. "+"
         shown_format = f
+      end
+      if own_before[k] then -- (and its own, for it only)
+        lines[#lines + 1] = markup.render_para_line(own_before[k])
       end
       local box = para.box -- (a box's paragraphs: between its lines, "::: {...}" and ":::")
       if box and (not paras[k - 1] or paras[k - 1].box ~= box) then
@@ -2384,6 +2498,42 @@ function M.selection(use_marks)
   return { { s[2] - 1, first_col }, stop, block = block }
 end
 
+-- A line at the top highlighted as tree-sitter shows YAML (an R Markdown file's header): each line
+-- read by itself, without its indentation, as YAML reads the indented styles as wrong (a key with
+-- braces has nothing under it), though each line alone is right. False where there's no YAML parser,
+-- or the line alone isn't YAML (then neoffice's own: names, and the rest in gray).
+local yaml_q
+local function yaml_query()
+  if yaml_q == nil then
+    local ok, q = pcall(vim.treesitter.query.get, "yaml", "highlights")
+    yaml_q = ok and q or false
+  end
+  return yaml_q
+end
+local function yaml_line(buf, r, line)
+  local q = yaml_query()
+  if not q then
+    return false
+  end
+  local lead = #line:match("^%s*")
+  local text = line:sub(lead + 1)
+  local ok, parser = pcall(vim.treesitter.get_string_parser, text, "yaml")
+  local tree = ok and parser:parse()[1]
+  if not tree or tree:root():has_error() then
+    return false
+  end
+  local k = 0 -- (a later capture over an earlier one of the same text, as tree-sitter shows them)
+  for id, node in q:iter_captures(tree:root(), text, 0, 1) do
+    local name = q.captures[id]
+    local _, c1, _, c2 = node:range()
+    if not name:find("^_") and name ~= "spell" and name ~= "nospell" and c2 > c1 then
+      k = k + 1
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, lead + c1, { end_col = lead + c2, hl_group = "@" .. name .. ".yaml", priority = 150 + math.min(k, 40) })
+    end
+  end
+  return true
+end
+
 -- Decorations that follow the text: titles highlighted (NeofficeTitle, above tree-sitter) and,
 -- when the document numbers its headings, their numbers (1, 1.1, ...) shown before them.
 -- (each paragraph's characters, by its text, for each buffer: of the texts decorated last time
@@ -2421,17 +2571,29 @@ local function decorate_rows(buf, doc, lines, s, e, paras, header, number, fresh
       end
     end
   end
-  -- the styles at its top: their names, and the rest as formatting (unless shown as YAML: see M.decorate)
+  -- the styles at its top: each line as tree-sitter shows YAML (see yaml_line); without a YAML
+  -- parser, the names, comments, and the rest in gray
+  local function attributes(r, line, from)
+    api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, from - 1, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
+  end
   for r = s, header and math.min(header.last, e) or 0 do
     local line = lines[r]
     local s_, e_ = line:find("^%s+[^:{}]-%s*:")
-    if line:match("^page:") then -- (the page's settings: its name as a style's)
-      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = 5, hl_group = "NeofficeStyleName", priority = 150 })
-      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 5, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
+    if line == "---" and yaml_query() then -- (as markdown shows them: not here)
+    elseif line ~= "---" and yaml_line(buf, r, line) then -- (as an R Markdown file's YAML: see yaml_line)
+    elseif line:match("^%s*#") then -- (a comment, as in YAML)
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = #line, hl_group = "NeofficeHeaderComment", priority = 150 })
+    elseif line:match("^page:") then -- (the page's settings: its name as a style's)
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = 4, hl_group = "NeofficeStyleName", priority = 150 })
+      attributes(r, line, 5)
+    elseif line:match("^styles:") then
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = 6, hl_group = "NeofficeStyleName", priority = 150 })
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 6, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
     elseif s_ and r > 2 and r < header.last then
       local first = line:find("%S")
-      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, first - 1, { end_col = e_ - 1, hl_group = "NeofficeStyleName", priority = 150 })
-      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, e_ - 1, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
+      local name_end = line:sub(1, e_ - 1):find("%s*$") -- (its name, not the spaces before its ":")
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, first - 1, { end_col = name_end - 1, hl_group = "NeofficeStyleName", priority = 150 })
+      attributes(r, line, name_end)
     else
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
     end
@@ -2516,13 +2678,10 @@ local function counter() -- (the numbers in order: the headings' "1.2 ", the cap
     return table.concat(number, ".") .. " "
   end
 end
--- (the styles at the top, decorated here: not where tree-sitter shows them as YAML)
+-- (the styles at the top, decorated here, also where tree-sitter would show them as YAML: the styles
+-- under others are indented under them, which YAML doesn't read, a key with braces having none)
 local function decorated_header(lines)
-  local header = markup.header(lines)
-  if languages and pcall(vim.treesitter.language.add, "yaml") then
-    return nil
-  end
-  return header
+  return markup.header(lines)
 end
 
 function M.decorate(buf)
@@ -3552,6 +3711,7 @@ function M.save(buf, target)
       blocks = {}
     end
     assert(not blocks.unclosed_box, blocks.unclosed_box and ("line %d: this box is never closed (a line \":::\" after its last paragraph closes it)"):format(blocks.unclosed_box))
+    assert(not blocks.stray_format, blocks.stray_format and ("line %d: a format's line without \"+\" is for the paragraph right below it, and none is (a \"+\" at its end makes it for all the paragraphs after it)"):format(blocks.stray_format))
     for _, block in ipairs(blocks) do -- (a box holds paragraphs: a table in one would be taken apart)
       assert(not (block.cell and block.box), block.cell and block.box and ("line %d: a table can't go in a box (\":::\"), only paragraphs can"):format(block.first))
     end
@@ -3574,7 +3734,10 @@ function M.save(buf, target)
     -- can't be converted), nothing changes.
     -- the header's styles: what changed in each (an error if a line isn't right, or names a style
     -- the document hasn't); the header deleted, or a style's line, changes nothing
-    local restyle = {} -- (style id -> { key = value or false })
+    -- (a style under another says what it says itself: one taken off its line, it has from the one
+    -- above it again; the first of a tree says all it gives: one taken off, its default. See
+    -- M.style_entries. The styles under one that changes, as in Word, follow it where they say nothing)
+    local restyle = {} -- (style id -> { set = { key = value or false }, unset = { keys } })
     local header = doc.header and markup.header(api.nvim_buf_get_lines(buf, 0, -1, false))
     for _, st in ipairs(header and header.styles or {}) do
       assert(not st.bad, ("the styles at the top, line %d: %s"):format(st.row, st.bad or ""))
@@ -3582,15 +3745,26 @@ function M.save(buf, target)
       local id = known and known.id or doc.fmt.style_id(doc.ctx, st.name)
         or doc.fmt.style_id(doc.ctx, st.name:match("%(([^()]+)%)%s*$") or "") -- ("Name (Id)": one of two of a name)
       assert(id, ("not a paragraph style of this document: %s (the styles at the top, line %d)"):format(st.name, st.row))
-      local old = known and known.attrs or doc.fmt.style_view(doc.ctx, id)
-      local changes = {}
+      if not known then -- (a line for a style that wasn't shown: as it would have been)
+        known = M.style_entries(doc, { id })
+        known = vim.iter(known):find(function(e) return e.id == id end)
+      end
+      local old, under = known.attrs, known.base ~= nil
+      local set, unset = {}, {}
       for _, key in ipairs(pformat.STYLE_KEYS) do
-        if not pformat.same_style_value(key, old[key], st.attrs[key]) then
-          changes[key] = st.attrs[key] or false
+        local was, now = old[key], st.attrs[key]
+        if now ~= nil and (was == nil or not pformat.same_style_value(key, was, now)) then
+          set[key] = now
+        elseif now == nil and was ~= nil then
+          if under then
+            unset[#unset + 1] = key
+          else
+            set[key] = false
+          end
         end
       end
-      if next(changes) then
-        restyle[id] = changes
+      if next(set) or #unset > 0 then
+        restyle[id] = { set = set, unset = unset }
       end
       st.id = id
     end
@@ -3755,41 +3929,36 @@ function M.save(buf, target)
     local restore = checkpoint(ctx, notes)
     local integrity_after
     local written, failure = pcall(function()
-    -- (the other styles in use, not at the top, as they look: those based on one that changes
-    -- keep it, as those at the top do; a footer's, a footnote's...)
-    local others = {}
-    if next(restyle) and doc.fmt.styles_in_use then
-      local listed = {}
-      for _, st in ipairs(header.styles) do
-        listed[st.id] = true
-      end
-      for _, id in ipairs(doc.fmt.styles_in_use(ctx)) do
+    -- the styles first (what the paragraphs are written against); those whose look changed (also
+    -- those under one that changed): their paragraphs written again, so what they say of their own
+    -- is against it
+    local restyled_ids = {}
+    if next(restyle) then
+      local looks = {}
+      local ids = vim.list_extend(vim.list_extend({}, doc.fmt.styles_in_use and doc.fmt.styles_in_use(ctx) or {}), vim.tbl_keys(restyle))
+      for _, id in ipairs(ids) do
         local ok, view = pcall(doc.fmt.style_view, ctx, id)
-        if not listed[id] and not restyle[id] and ok and view then
-          others[#others + 1] = { id = id, attrs = view }
+        looks[id] = ok and view or nil
+      end
+      for id, change in pairs(restyle) do
+        if #change.unset > 0 then
+          doc.fmt.unset_style(ctx, id, change.unset)
+        end
+        if next(change.set) then
+          doc.fmt.set_style(ctx, id, change.set)
         end
       end
-    end
-    for id, changes in pairs(restyle) do -- the styles first (what the paragraphs are written against)
-      doc.fmt.set_style(ctx, id, changes)
-    end
-    -- (a style based on one that changed gives what its line says still: said by it, then)
-    for _ = 1, next(restyle) and 3 or 0 do
-      local pinned = false
-      for _, st in ipairs(vim.list_extend(vim.list_slice(header.styles), others)) do
-        local now, pin = doc.fmt.style_view(ctx, st.id), {}
+      for id, was in pairs(looks) do
+        local now = doc.fmt.style_view(ctx, id)
         for _, key in ipairs(pformat.STYLE_KEYS) do
-          if not pformat.same_style_value(key, now[key], st.attrs[key]) then
-            pin[key] = st.attrs[key] or false
+          if not pformat.same_style_value(key, was[key], now[key]) then
+            restyled_ids[id] = true
+            break
           end
         end
-        if next(pin) then -- (it looks as it did: its paragraphs needn't be written again)
-          doc.fmt.set_style(ctx, st.id, pin)
-          pinned = true
-        end
       end
-      if not pinned then
-        break
+      for id in pairs(restyle) do
+        restyled_ids[id] = true
       end
     end
     local layout = require("neoffice.tables").start(doc.fmt, ctx, vim.tbl_map(function(plan)
@@ -3893,7 +4062,7 @@ function M.save(buf, target)
       written_as[k] = plan.old and doc.caption_as[plan.old] or nil
       -- (a paragraph whose style changed: written again, so what it says of its own is against it)
       -- (not an empty one: its format isn't in the buffer, a blank line has none; it keeps its own)
-      local restyled = next(restyle) and node and plan.old and not plan.cell and blocks[k].text ~= "" and restyle[doc.fmt.style_of(ctx, node)]
+      local restyled = next(restyle) and node and plan.old and not plan.cell and blocks[k].text ~= "" and restyled_ids[doc.fmt.style_of(ctx, node)]
       -- (and one whose text isn't the old paragraph's: whatever its fingerprint says)
       if not plan.old or plan.sig ~= doc.sigs[plan.old] or restyled or blocks[k].text ~= doc.texts[plan.old] then
         plan.written = true
@@ -4115,9 +4284,8 @@ function M.save(buf, target)
         end
       end
     end
-    for _, st in ipairs(next(restyle) and header.styles or {}) do -- (the styles as they now are: what the header is compared with next;
-      -- each by its line's name, "Name (Id)" for one of two of a name)
-      doc.header[st.name:lower()] = { id = st.id, name = st.name, attrs = doc.fmt.style_view(ctx, st.id) }
+    if next(restyle) then -- (the styles as they now are: what the header is compared with next, and shows)
+      M.refresh_header(buf, doc)
     end
     for k, block in ipairs(blocks) do -- (those written may have new marks: new images, equations...)
       doc.sigs[k] = plans[k].written and signature(pieces(buf, block)) or plans[k].sig

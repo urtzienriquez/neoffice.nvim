@@ -301,11 +301,11 @@ M.SNIPPETS = {
     { "newpage", "a page break", "\\\\newpage$0" },
     { "vspace", "vertical space between paragraphs: an empty paragraph of exactly that height", "\\\\vspace{${1:1cm}}$0" },
     { "equation", "an equation of its own (LaTeX)", "\\$\\$${1:E = mc^2}\\$\\$\n$0" },
-    { "numbered", "a numbered list, with an item under another (the document counts)", "1. ${1:First}\n1. ${2:Second}\n  1.1. ${3:Under it}\n$0" },
+    { "numbered", "a numbered list, with an item under another (the document counts)", "#. ${1:First}\n#. ${2:Second}\n  #. ${3:Under it}\n$0" },
     { "bullets", "a bulleted list", "- ${1:One}\n- ${2:Two}\n$0" },
     { "quote", "a quotation", "> ${1:Quoted text.}\n$0" },
     { "title", "the title", "% ${1:Title}\n$0" },
-    { "format", "the format of the paragraphs after it", "{align = ${1:justify}, first = ${2:0.5cm}}\n$0" },
+    { "format", "the format of the paragraphs after it", "{align = ${1:justify}, first = ${2:0.5cm}}+\n$0" },
   },
   inline = {
     { "footnote", "a footnote (right after the word before it)", "^[${1:Note.}]$0", attach = true },
@@ -683,17 +683,18 @@ local function into_style(buf, params, out)
   local blocks, styles = neo().block_styles(buf)
   local before = { attrs = {} } -- (the format before it: what the paragraphs under it would go back to)
   for _, b in ipairs(blocks) do
-    if b.first < r and b.format then
-      before = b.format
+    if b.first < r and (b.run or b.format) then
+      before = b.run or b.format -- (its run's: a paragraph's own line is for it only)
     end
   end
-  local run, style -- (its paragraphs' format, and their style)
+  local run, style -- (its paragraphs' format, and their style: a "+" line's run, else the one right below it)
+  local key = f.sticky and "run" or "format"
   for k, b in ipairs(blocks) do
-    if b.first > r and b.format and not run then
-      run = b.format
+    if b.first > r and b[key] and not run then
+      run = b[key]
     end
     local _, _, kind_at = markup.block(b.text)
-    if run and rawequal(b.format, run) and b.text ~= "" and not b.cell and not b.box and not kind_at then
+    if run and rawequal(b[key], run) and b.text ~= "" and not b.cell and not b.box and not kind_at then
       if not styles[k] or (style and styles[k] ~= style) then
         return
       end
@@ -708,7 +709,8 @@ local function into_style(buf, params, out)
   if not entry then
     return
   end
-  local old, new = entry.attrs, vim.deepcopy(entry.attrs)
+  -- (its line: what it says itself, now with these; what it gives as it comes out, to say elsewhere)
+  local old, new = doc.fmt.style_view(doc.ctx, style), vim.deepcopy(entry.attrs)
   for k, v in pairs(moved) do
     new[k] = v
   end
@@ -721,7 +723,7 @@ local function into_style(buf, params, out)
   for k, b in ipairs(blocks) do
     local own, start, kind_at, _, brace_at = markup.block(b.text)
     local plain_para = not kind_at and not own.caption
-    if styles[k] == style and b.text ~= "" and not rawequal(b.format, run) and plain_para then
+    if styles[k] == style and b.text ~= "" and not rawequal(b[key], run) and plain_para then
       local eff = pf.apply(b.format or { attrs = {} }, own.align, own.para)
       local adds = {}
       for key in pairs(moved) do
@@ -747,7 +749,7 @@ local function into_style(buf, params, out)
           replace(row, start - 1, start - 1, braces)
         end
       end
-    elseif styles[k] == style and b.text ~= "" and not rawequal(b.format, run) and (b.cell or b.box) then
+    elseif styles[k] == style and b.text ~= "" and not rawequal(b[key], run) and (b.cell or b.box) then
       return
     end
   end
@@ -759,7 +761,7 @@ local function into_style(buf, params, out)
   local inherited = function(key)
     return not f.reset and (key == "align" and before.align or before.attrs[key]) ~= nil
   end
-  local left = { reset = f.reset, attrs = {} }
+  local left = { reset = f.reset, attrs = {}, sticky = f.sticky }
   for k, v in pairs(f.attrs) do
     if not moved[k] then
       left.attrs[k] = v

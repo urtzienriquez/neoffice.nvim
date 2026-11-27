@@ -77,6 +77,7 @@ local function highlights()
     -- (a link or an image, all of it: "[text](url)", "![alt](path)"; as a colour scheme shows links)
     NeofficeLink = { link = next(api.nvim_get_hl(0, { name = "@markup.link.label.markdown_inline" })) and "@markup.link.label.markdown_inline" or "@markup.link.label" },
     NeofficeStyleName = { link = "@label" }, -- (a style's name, in the styles at the top)
+    NeofficeHeaderComment = { link = "@comment" }, -- (a comment at the top, where there's no YAML parser)
     NeofficeSection = { link = "NeofficeBox" }, -- (where a section starts: "\\newpage {...}")
     NeofficeEscape = { link = "NeofficeMark" }, -- (a backslash that makes the next character plain text)
     NeofficeChangeInfo = { link = "Comment" },

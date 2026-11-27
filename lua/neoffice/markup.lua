@@ -156,7 +156,7 @@ function M.prefix(block)
   elseif block.quote then
     kind = "> "
   elseif list then
-    kind = ("  "):rep(list.level - 1) .. (list.kind == "bullet" and "- " or (list.pattern or "1.") .. " ")
+    kind = ("  "):rep(list.level - 1) .. (list.kind == "bullet" and "- " or "#. ")
   end
   -- its own format's attributes, in braces (after its mark, if it has one: see paras.lua)
   local attrs = block.para and require("neoffice.paras").render(block.para) or ""
@@ -189,6 +189,8 @@ end
 -- { reset, align (or "none"), attrs (with "none"s), bad, text }; nil if the line isn't one.
 -- (A table's options are a line in braces too, but just above the table: the caller tells.)
 function M.para_line(line)
+  local sticky -- (a "+" at its end: for the paragraphs from here on; without: for the next one only)
+  line = line:gsub("%s*%+%s*$", function() sticky = true return "" end)
   local function read(align, inside)
     local reset = inside:match("^%s*$") ~= nil
     local rest = inside:gsub("^%s*none%s*$", function() reset = true return "" end)
@@ -200,7 +202,7 @@ function M.para_line(line)
       end
       align, attrs.align = attrs.align, nil
     end
-    return { reset = reset or nil, align = align, attrs = attrs or {}, bad = bad, text = inside }
+    return { reset = reset or nil, align = align, attrs = attrs or {}, bad = bad, text = inside, sticky = sticky }
   end
   local inside = line:match("^{([^{}]*)}%s*$")
   if inside and (inside:match("^%s*$") or inside:find("=", 1, true) or inside:match("^%s*none%s*$") or inside:match("^%s*none%s*[,;]")) then
@@ -211,7 +213,7 @@ function M.para_line(line)
     if line:sub(1, #marker) == marker then
       local rest = line:sub(#marker + 1)
       if rest:match("^%s*$") then
-        return { align = align, attrs = {} }
+        return { align = align, attrs = {}, sticky = sticky }
       end
       inside = rest:match("^%s*{([^{}]*)}%s*$")
       if inside then
@@ -221,10 +223,14 @@ function M.para_line(line)
   end
 end
 
--- A format's line as written: "{none, align = justify, first = 0.5cm}" (see M.para_line).
+-- A format's line as written: "{none, align = justify, first = 0.5cm}" (see M.para_line), and "+"
+-- after it for one that goes on (f.sticky).
+-- Its alignment as a mark ("<|> {size = 10pt}", "<=>"): shorter, as a paragraph's.
 function M.render_para_line(f)
-  local attrs = require("neoffice.paras").render(vim.tbl_extend("force", {}, f.attrs or {}, { align = f.align }))
-  return "{" .. (f.reset and "none" .. (attrs ~= "" and ", " or "") or "") .. attrs .. "}"
+  local mark = ALIGN[f.align or ""]
+  local attrs = require("neoffice.paras").render(vim.tbl_extend("force", {}, f.attrs or {}, { align = not mark and f.align or nil }))
+  local braces = (f.reset or attrs ~= "" or not mark) and "{" .. (f.reset and "none" .. (attrs ~= "" and ", " or "") or "") .. attrs .. "}" or ""
+  return vim.trim((mark or "") .. braces) .. (f.sticky and "+" or "")
 end
 -- A format (the whole of it: { align, attrs }) after this format's line, on `before`'s.
 function M.apply_para_line(before, f)
@@ -306,11 +312,22 @@ function M.header(lines)
     end
   end
 end
-function M.render_header(styles, page) -- (styles: { { name, attrs } }, in order, or nil; page: its attributes, written)
+-- A style's line at the top: indented two spaces more for each style it is based on (depth), its
+-- braces lined up with the others' (width: the widest's indentation and name). (Not YAML as YAML
+-- reads it: a key with braces has none under it; neoffice highlights the lines itself, see init.lua)
+function M.render_style_line(s, width)
+  local lead = ("  "):rep((s.depth or 0) + 1) .. s.name .. ":"
+  return lead .. (" "):rep(width + 1 - vim.fn.strdisplaywidth(lead)) .. "{" .. require("neoffice.paras").render_style(s.attrs) .. "}"
+end
+function M.style_width(styles)
   local width = 0
   for _, s in ipairs(styles or {}) do
-    width = math.max(width, vim.fn.strdisplaywidth(s.name))
+    width = math.max(width, 2 + 2 * (s.depth or 0) + vim.fn.strdisplaywidth(s.name) + 1)
   end
+  return width
+end
+function M.render_header(styles, page) -- (styles: { { name, attrs, depth } }, in order, or nil; page: its attributes, written)
+  local width = M.style_width(styles)
   local lines = { "---" }
   if page then
     lines[#lines + 1] = "page: {" .. page .. "}"
@@ -320,8 +337,7 @@ function M.render_header(styles, page) -- (styles: { { name, attrs } }, in order
   end
   styles = styles or {}
   for _, s in ipairs(styles) do
-    local pad = (" "):rep(width - vim.fn.strdisplaywidth(s.name))
-    lines[#lines + 1] = "  " .. s.name .. ": " .. pad .. "{" .. require("neoffice.paras").render_style(s.attrs) .. "}"
+    lines[#lines + 1] = M.render_style_line(s, width)
   end
   lines[#lines + 1] = "---"
   return lines
@@ -387,7 +403,9 @@ function M.block(line)
   local block, start, kind_at = {}, 1, nil
   local hashes = line:match("^(#+) ")
   local indent, after = line:match("^( *)%- ()")
-  local pattern, level, sep_at, after_marker = M.list_marker(line)
+  -- (a numbered item: "#. ", as pandoc's; its level by its indentation, two spaces a level; its
+  -- numbers as its list's in the document. "1. ", "2.1. " are text: never escaped)
+  local nindent, nafter = line:match("^( *)#%. ()")
   local word, after_word = line:match("^([^%s:\\]+): ()")
   local caption = word and caption_kind(word)
   local vspace = line:match("^\\vspace%s*{%s*([^{}]-)%s*}%s*$") or line:match("^\\vspace%s*$") and "1cm" -- (alone: 1cm)
@@ -410,8 +428,8 @@ function M.block(line)
     return { row = true }, 1, 1, nil
   elseif indent then
     block, start, kind_at = { list = { kind = "bullet", level = math.floor(#indent / 2) + 1 } }, after, #indent + 1
-  elseif pattern then
-    block, start, kind_at = { list = { kind = "number", level = level, pattern = pattern } }, after_marker, sep_at
+  elseif nindent then
+    block, start, kind_at = { list = { kind = "number", level = math.floor(#nindent / 2) + 1 } }, nafter, #nindent + 1
   end
   local align_at
   for _, align in ipairs({ "center", "justify", "right", "left" }) do

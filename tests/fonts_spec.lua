@@ -26,7 +26,7 @@ local SIZED = {
     return (text:gsub("<office:automatic%-styles>", "%0" .. style, 1):gsub("<office:text>", "%0" .. p .. p:gsub("Sized text", "More of it"), 1))
   end,
 }
-local LINE = "{font = Times New Roman, size = 11pt}"
+local LINE = "{font = Times New Roman, size = 11pt}+"
 
 describe("fonts in the markup", function()
   it("read a span of text in another font, and write it so", function()
@@ -75,9 +75,9 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
 
     it("changes the font and size of the paragraphs under a format's line", function()
-      api.nvim_buf_set_lines(0, H.row(1) - 2, H.row(1) - 1, false, { "{font = Arial, size = 14pt}" })
+      api.nvim_buf_set_lines(0, H.row(1) - 2, H.row(1) - 1, false, { "{font = Arial, size = 14pt}+" })
       H.reopen()
-      assert.equals("{font = Arial, size = 14pt}", H.lines()[H.row(1) - 1])
+      assert.equals("{font = Arial, size = 14pt}+", H.lines()[H.row(1) - 1])
       local xml = main()
       assert.is_true(require("neoffice.xml").check(xml)) -- (a part LibreOffice can read)
       if H.has_libreoffice then
@@ -248,15 +248,15 @@ for _, ext in ipairs({ "docx", "odt" }) do
       local path = H.copy("rich." .. ext, SIZED[ext])
       H.open(path)
       for r = #H.lines(), 1, -1 do -- (a document without lists, as a form)
-        if H.lines()[r]:match("^%s*[-*] ") or H.lines()[r]:match("^%s*%d+[.)] ") then
+        if H.lines()[r]:match("^%s*[-*] ") or H.lines()[r]:match("^%s*#%. ") then
           api.nvim_buf_set_lines(0, r - 1, r, false, {})
         end
       end
       H.reopen()
       local r = H.row(2)
-      api.nvim_buf_set_lines(0, r, r, false, { "", "1. A new item" })
+      api.nvim_buf_set_lines(0, r, r, false, { "", "#. A new item" })
       H.reopen()
-      local k = vim.fn.index(H.paras(), "1. A new item") + 1
+      local k = vim.fn.index(H.paras(), "#. A new item") + 1
       assert.truthy(k > 0, table.concat(H.paras(), "\n"))
       local main = zip.read(path, H.MAIN[ext])
       if ext == "docx" then
