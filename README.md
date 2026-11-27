@@ -28,7 +28,8 @@ else in the file stays exactly as it was.
   written as their numbering's pattern (`1.` for every item, `1.1.` or `1.a.` for sub-items: the
   document counts),
   and alignment `<|> centered`, `->> right`, `<=> justified`.
-- Line breaks (`\` at the end of a line) and page breaks (`\newpage`).
+- Line breaks (`\` at the end of a line), page breaks (`\newpage`) and vertical space between
+  paragraphs (`\vspace{1cm}`, a line of its own).
 - Tables as pipe tables (`| a | b |`): edit cells, add or remove rows and columns, new tables.
   Tables typeset themselves, as in LaTeX: booktabs rules, columns as wide as their content,
   compact rows, numbers aligned right. A line above a table changes its look

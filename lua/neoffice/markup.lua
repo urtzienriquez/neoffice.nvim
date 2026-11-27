@@ -143,6 +143,9 @@ end
 M.caption_kind = caption_kind
 
 function M.prefix(block)
+  if block.vspace then -- (vertical space: an empty paragraph of that height, its line all of it)
+    return "\\vspace{" .. block.vspace .. "}"
+  end
   local list, kind = block.list, ""
   if block.caption then
     kind = M.captions()[block.caption] .. ": "
@@ -164,6 +167,17 @@ function M.prefix(block)
     return kind .. (ALIGN[block.align] or "") .. "{" .. attrs .. "} "
   end
   return kind .. (ALIGN[block.align] or "")
+end
+
+-- A vertical space's length as \vspace shows it, from its length in cm: in cm when it is a whole
+-- number of millimetres (1cm, 0.5cm), else in points (12pt, 7.5pt).
+function M.vspace_shown(cm)
+  local mm = cm * 10
+  if math.abs(mm - math.floor(mm + 0.5)) < 0.02 then
+    return (("%.1f"):format(math.floor(mm + 0.5) / 10):gsub("%.0$", "")) .. "cm"
+  end
+  local pt = cm / 2.54 * 72
+  return (("%.1f"):format(math.floor(pt * 2 + 0.5) / 2):gsub("%.0$", "")) .. "pt"
 end
 
 -- A line with only a mark and its attributes ("<=> {first = 0.5cm}"), which sets the format of
@@ -376,6 +390,12 @@ function M.block(line)
   local pattern, level, sep_at, after_marker = M.list_marker(line)
   local word, after_word = line:match("^([^%s:\\]+): ()")
   local caption = word and caption_kind(word)
+  local vspace = line:match("^\\vspace%s*{%s*([^{}]-)%s*}%s*$") or line:match("^\\vspace%s*$") and "1cm" -- (alone: 1cm)
+  if vspace then -- (vertical space, its line all of it: "\vspace{1cm}", see M.vspace_shown)
+    local cm = tonumber(require("neoffice.paras").measure("before", vspace) or "")
+    return { vspace = vspace, vspace_cm = cm and cm > 0 and cm or nil,
+      vspace_bad = not (cm and cm > 0) and ("\\vspace{%s}: not a length above 0 (1cm, 12pt, 5mm, 0.5in)"):format(vspace) or nil }, #line + 1, 1, nil
+  end
   if M.box_line(line) then -- (a box's line: text that reads as one is escaped, "\:::")
     block, start, kind_at = { fence = true }, #line + 1, 1
   elseif caption then
@@ -435,7 +455,7 @@ function M.block(line)
 end
 
 local function kind(block)
-  return block.heading or block.title or block.quote or block.list or block.row or block.caption or block.fence
+  return block.heading or block.title or block.quote or block.list or block.row or block.caption or block.fence or block.vspace
 end
 
 local math_at, enclosed, link_at -- (below)

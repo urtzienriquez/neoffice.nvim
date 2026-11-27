@@ -2674,6 +2674,29 @@ local function put(parent, el, order) -- (instead of the child with its tag, in 
   return xml.append(parent, el, at)
 end
 
+-- Vertical space (\vspace{1cm}, see markup.lua): an empty paragraph of exactly that height, no space
+-- before or after it. Its height, in cm, or nil if it isn't one (text in it, or another spacing).
+function M.vspace_of(_, p)
+  local ppr = xml.child(p, "w:pPr")
+  local spacing = ppr and xml.child(ppr, "w:spacing")
+  if not spacing or xml.attr(spacing, "w:lineRule") ~= "exact" or xml.attr(spacing, "w:before") ~= "0" or xml.attr(spacing, "w:after") ~= "0"
+    or xml.attr(spacing, "w:beforeAutospacing") == "1" or xml.attr(spacing, "w:afterAutospacing") == "1" then
+    return nil
+  end
+  local line = tonumber(xml.attr(spacing, "w:line") or "")
+  return line and line > 0 and line / 1440 * 2.54 or nil
+end
+function M.set_vspace(_, ppr, cm)
+  local spacing = xml.child(ppr, "w:spacing") or put(ppr, xml.elem("w:spacing"), PPR_ORDER)
+  for _, attr in ipairs({ "w:beforeLines", "w:afterLines", "w:beforeAutospacing", "w:afterAutospacing" }) do
+    xml.set_attr(spacing, attr, nil)
+  end
+  xml.set_attr(spacing, "w:before", "0")
+  xml.set_attr(spacing, "w:after", "0")
+  xml.set_attr(spacing, "w:line", tostring(math.floor(cm / 2.54 * 1440 + 0.5)))
+  xml.set_attr(spacing, "w:lineRule", "exact")
+end
+
 -- A row with cells added (`new`: tc -> { filled }): those not merged as the one they were copied
 -- from; empty ones beyond the table's columns (padding, as a row with merged cells written with
 -- all its cells) removed; one with text taking a column from a merged cell before it. Each cell
@@ -3310,6 +3333,10 @@ function M.fill(ctx, p, block, pieces)
   if block.style_id then -- (a plain paragraph's style: first, what its alignment and format are against)
     ppr = ppr or xml.elem("w:pPr")
     M.set_para_style(ctx, ppr, block.style_id)
+  end
+  if block.vspace then
+    ppr = ppr or xml.elem("w:pPr")
+    M.set_vspace(ctx, ppr, block.vspace_cm or tonumber(require("neoffice.paras").measure("before", block.vspace)))
   end
   if block.align or (ppr and xml.child(ppr, "w:jc")) then
     ppr = ppr or xml.elem("w:pPr")

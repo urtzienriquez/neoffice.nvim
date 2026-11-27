@@ -299,6 +299,7 @@ M.SNIPPETS = {
     { "landscape", "landscape pages (a section), and portrait again after them", "\\\\newpage {orientation = landscape}\n\n${1:A wide table or figure.}\n\n\\\\newpage {orientation = portrait}\n\n$0" },
     { "section", "a section: a new page with its own settings", "\\\\newpage {${1:orientation = landscape}}\n\n$0" },
     { "newpage", "a page break", "\\\\newpage$0" },
+    { "vspace", "vertical space between paragraphs: an empty paragraph of exactly that height", "\\\\vspace{${1:1cm}}$0" },
     { "equation", "an equation of its own (LaTeX)", "\\$\\$${1:E = mc^2}\\$\\$\n$0" },
     { "numbered", "a numbered list, with an item under another (the document counts)", "1. ${1:First}\n1. ${2:Second}\n  1.1. ${3:Under it}\n$0" },
     { "bullets", "a bulleted list", "- ${1:One}\n- ${2:Two}\n$0" },

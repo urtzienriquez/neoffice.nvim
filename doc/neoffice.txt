@@ -317,6 +317,18 @@ paragraph goes on in the next line). `\newpage` is a page break. In .odt files
 a page break comes before a paragraph, so there `\newpage` moves to the start
 of its paragraph.
 
+                                                             *neoffice-vspace*
+`\vspace{1cm}` on a line of its own is vertical space between paragraphs:
+the paragraphs around it stay as they are; `\vspace` alone is 1cm. It is an empty paragraph of
+exactly that height, with no space before or after it (its height in cm, mm,
+in or pt). An empty paragraph like that, in any document, opens as
+`\vspace{...}` too: in cm when it is a whole number of millimetres, else in
+points. Change its length to change it; delete the line to take it away. A
+blank line around it isn't needed. It goes between paragraphs of the text,
+not in a table cell or a box; a length that isn't one stops the save. As
+text, starting a paragraph, it is escaped: `\\vspace{1cm}`. It is highlighted
+as `\newpage` is (NeofficeMark).
+
 Escapes ~
                                                             *neoffice-escapes*
 A `\` makes the next character plain text when it could be read as a mark:
@@ -782,6 +794,7 @@ neoffice, and so is the documents' filetype). It answers:
     `landscape`    landscape pages, and portrait again after them
     `section`      a section: a new page with its own settings
     `newpage`      a page break
+    `vspace`       vertical space between paragraphs (|neoffice-vspace|)
     `equation`     an equation of its own
     `numbered`     a numbered list, with an item under another
     `bullets`      a bulleted list

@@ -1,6 +1,6 @@
 " Tree-sitter (markdown) highlights the other marks (**bold**, ~~strikethrough~~, $equations$...);
 " this adds ++underline++, ==highlight== (and ==highlight=={green}), superscript^{2},
-" subscript_{2}, ^[footnotes], ⟦fields⟧ and line and page breaks. (The alignment marks, highlight
+" subscript_{2}, ^[footnotes], ⟦fields⟧, line and page breaks and vertical space (\vspace). (The alignment marks, highlight
 " colours, table options and caption numbers are drawn by init.lua: M.decorate.)
 " (The marks are hidden only with 'conceallevel' set, i.e. setup({ conceal = true }).)
 syntax region neofficeUnderline matchgroup=neofficeScriptMark start="\\\@<!++" end="\\\@<!++" concealends keepend oneline
@@ -11,6 +11,7 @@ syntax region neofficeFootnote matchgroup=neofficeFootnoteMark start="\\\@<![\^]
 syntax match neofficeField "\\\@<!⟦.\{-}\\\@<!⟧"
 syntax match neofficeBreak "\\\@<!\\newpage"
 syntax match neofficeBreak "\\\@<!\\$"
+syntax match neofficeBreak "^\\vspace\s*\({[^{}]*}\)\?\s*$"
 highlight default link neofficeUnderline Underlined
 highlight default link neofficeHighlight Search
 highlight default link neofficeSuperscript Special

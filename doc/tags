@@ -39,5 +39,6 @@ neoffice-table-format	neoffice.txt	/*neoffice-table-format*
 neoffice-tables	neoffice.txt	/*neoffice-tables*
 neoffice-text	neoffice.txt	/*neoffice-text*
 neoffice-tracking	neoffice.txt	/*neoffice-tracking*
+neoffice-vspace	neoffice.txt	/*neoffice-vspace*
 neoffice.setup()	neoffice.txt	/*neoffice.setup()*
 neoffice.txt	neoffice.txt	/*neoffice.txt*

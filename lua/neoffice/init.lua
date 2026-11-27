@@ -19,7 +19,7 @@ local pformat = require("neoffice.paras") -- (paragraphs' formats)
 -- Whether a paragraph is a plain one (not a heading, title, quote, list item or caption): those
 -- have a format of their own, set by the lines of formats (see paras.lua).
 local function plain(block)
-  return not (block.heading or block.title or block.quote or block.list or block.caption)
+  return not (block.heading or block.title or block.quote or block.list or block.caption or block.vspace)
 end
 local api = vim.api
 local M = {}
@@ -228,7 +228,7 @@ function M.paragraphs(lines, alone)
           }
         end
       end
-    elseif prev and prev.text ~= "" and not prev.cell and not prev.alone and not alone[row] and #blanks == 0 and not cut and not next((markup.block(line)))
+    elseif prev and prev.text ~= "" and not prev.cell and not prev.alone and not prev.vspace and not alone[row] and #blanks == 0 and not cut and not next((markup.block(line)))
       -- (a line of floating images right before a list item, a heading...: that one's, see below)
       and not (markup.floats_only(line) and lines[row + 1] and next((markup.block(lines[row + 1])))) then -- continues it
       local hard = #(prev.text:match("\\*$")) % 2 == 1 -- (after a "\": a line break, else a space)
@@ -240,7 +240,7 @@ function M.paragraphs(lines, alone)
         prev.joins[row - prev.first] = 0
       end
       prev.last, prev.text = row, prev.text .. (hard and "\n" or floating and "" or " ") .. line
-    elseif prev and prev.first == row - 1 and not prev.cell and not prev.alone and not alone[row] and #blanks == 0 and not cut
+    elseif prev and prev.first == row - 1 and not prev.cell and not prev.alone and not prev.vspace and not alone[row] and #blanks == 0 and not cut
       and markup.floats_only(lines[row - 1]) and not next((markup.block(lines[row - 1]))) and next((markup.block(line))) then
       -- a paragraph's floating images on their own line, and its marks ("<=> ") with its text after
       local _, start = markup.block(line)
@@ -250,7 +250,7 @@ function M.paragraphs(lines, alone)
       prev.last, prev.text = row, prefix .. prev.text .. line:sub(start)
     else
       empty_paragraphs(empty_after()) -- (the first blank line after a paragraph separates)
-      out[#out + 1] = { first = row, last = row, text = line, alone = alone[row] }
+      out[#out + 1] = { first = row, last = row, text = line, alone = alone[row], vspace = (markup.block(line)).vspace and true or nil }
     end
     if out[#out] and out[#out].first == row then
       out[#out].format = format
@@ -1143,7 +1143,7 @@ for _, key in ipairs(PIECE_KEYS) do
 end
 local function signature(block, list)
   local l = block.list
-  local out = { table.concat({ tostring(block.heading), tostring(block.title), tostring(block.quote), tostring(block.align), tostring(block.caption),
+  local out = { table.concat({ tostring(block.heading), tostring(block.title), tostring(block.quote), tostring(block.align), tostring(block.caption), tostring(block.vspace),
     block.para and pformat.key({ attrs = block.para }) or "",
     tostring(block.cell), l and table.concat({ l.kind, l.level, tostring(l.pattern), tostring(l.id), tostring(l.continues) }, ",") or "" }, "|") }
   for _, piece in ipairs(list) do
@@ -1965,6 +1965,12 @@ local function open(buf, path)
         s.text, s.raw = "￼", true
       end
     end
+    -- (an empty paragraph of exactly a height, nothing before or after it: vertical space, \vspace)
+    local vspace = not cells[k] and not para.box and para.node and doc.fmt.vspace_of and plain(para.block)
+      and markup.render(para.spans, {}) == "" and doc.fmt.vspace_of(doc.ctx, para.node)
+    if vspace then
+      para.block.vspace, para.block.para, para.block.align = markup.vspace_shown(vspace), nil, nil
+    end
     texts[k], cols[k] = markup.render(para.spans, para.block)
     if cells[k] and texts[k]:find("^%s") or cells[k] and texts[k]:find("%s$") then
       -- (a cell's text as its row reads it: no spaces around it, even before a break or a tab not
@@ -2436,6 +2442,9 @@ local function decorate_rows(buf, doc, lines, s, e, paras, header, number, fresh
       local brace = line:find("{", 1, true)
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = brace - 1, hl_group = "NeofficeSection", priority = 150 })
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, brace - 1, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
+    end
+    if line:find("^\\vspace") and (markup.block(line)).vspace then -- (vertical space: as a page break)
+      api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = #line, hl_group = "neofficeBreak", priority = 150 })
     end
     local fence, attrs = markup.box_line(line)
     if fence then -- (a box's line: its ::: as a table's |, its attributes as formatting)
@@ -3636,7 +3645,9 @@ function M.save(buf, target)
         return "other"
       end
       local kind, start = markup.block(b.text)
-      if kind.fence or kind.row then
+      if kind.vspace then
+        return nil -- (an empty paragraph, as opened)
+      elseif kind.fence or kind.row then
         return "other"
       elseif b.text:sub(start or 1):match("^%s*$") and plain(kind) then
         return nil
@@ -3684,6 +3695,11 @@ function M.save(buf, target)
         if piece.math then
           equations[#equations + 1] = piece.math
         end
+      end
+      assert(not kind.vspace_bad, kind.vspace_bad and ("line %d: %s"):format(block.first, kind.vspace_bad))
+      if kind.vspace then -- (vertical space: an empty paragraph of the usual style, of that height)
+        assert(not block.cell and not block.box, ("line %d: \\vspace goes between paragraphs of the text, not in a table cell or a box"):format(block.first))
+        kind.style_id = doc.plain_style
       end
       if doc.plain_style and plain(kind) and not block.cell and not block.box then -- (a plain paragraph's style: see paras.lua)
         -- (the one it says; else the one it has, if that is one of the two usual ones and it wasn't

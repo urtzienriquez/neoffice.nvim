@@ -1585,6 +1585,56 @@ function M.set_para_style(ctx, p, name)
   xml.set_attr(p, "text:style-name", ctx.made[key])
 end
 
+-- Vertical space (\vspace{1cm}, see markup.lua): an empty paragraph of exactly that height, no space
+-- before or after it (its own automatic style says so). Its height, in cm, or nil if it isn't one.
+function M.vspace_of(ctx, p)
+  local name = xml.attr(p, "text:style-name")
+  local auto = name and ctx.auto_paras[name]
+  local props = auto and xml.child(auto, "style:paragraph-properties")
+  if not props then
+    return nil
+  end
+  local markup = require("neoffice.markup")
+  local line = xml.attr(props, "fo:line-height")
+  local cm = line and not line:find("%%") and markup.cm(line)
+  local top, bottom = markup.cm(xml.attr(props, "fo:margin-top") or ""), markup.cm(xml.attr(props, "fo:margin-bottom") or "")
+  if not (cm and cm > 0 and top == 0 and bottom == 0) then
+    return nil
+  end
+  return cm
+end
+function M.set_vspace(ctx, p, cm)
+  local current = xml.attr(p, "text:style-name")
+  local auto = current and ctx.auto_paras[current]
+  local parent = M.style_of(ctx, p)
+  local key = ("vspace|%s|%s|%.3f"):format(tostring(current), parent, cm)
+  if not ctx.made[key] then
+    local style = auto and xml.copy(auto)
+      or xml.elem("style:style", { { "style:name", "" }, { "style:family", "paragraph" }, { "style:parent-style-name", parent } })
+    local props = xml.child(style, "style:paragraph-properties")
+    if not props then -- (before its text's properties, as the schema has them)
+      local text = xml.child(style, "style:text-properties")
+      props = xml.append(style, xml.elem("style:paragraph-properties"), text and xml.index(text) or nil)
+    end
+    xml.set_attr(props, "style:line-height-at-least", nil)
+    xml.set_attr(props, "style:line-spacing", nil)
+    xml.set_attr(props, "fo:line-height", ("%.3fcm"):format(cm))
+    xml.set_attr(props, "fo:margin-top", "0cm")
+    xml.set_attr(props, "fo:margin-bottom", "0cm")
+    local new, n = nil, 1
+    repeat
+      new, n = "NeoP" .. n, n + 1
+    until ctx.parent_style[new] == nil
+    xml.set_attr(style, "style:name", new)
+    xml.append(automatic(ctx), style)
+    ctx.made[key], ctx.auto_paras[new], ctx.parent_style[new] = new, style, parent
+    if ctx.para_style_el then
+      ctx.para_style_el[new] = style
+    end
+  end
+  xml.set_attr(p, "text:style-name", ctx.made[key])
+end
+
 function M.style_view(ctx, name)
   local paras = require("neoffice.paras")
   local out = vim.deepcopy(style_attrs(ctx, name))
@@ -2921,6 +2971,9 @@ function M.fill(ctx, p, block, pieces)
   set_layout(ctx, p, block.align, page)
   if block.para then -- (its own format's attributes: a plain paragraph's, see paras.lua)
     set_para(ctx, p, block.para)
+  end
+  if block.vspace then
+    M.set_vspace(ctx, p, block.vspace_cm or tonumber(require("neoffice.paras").measure("before", block.vspace)))
   end
   set_list(ctx, p, block.list)
   p.children = {}
