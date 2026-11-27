@@ -1627,6 +1627,108 @@ function M.set_style(ctx, name, changes)
   ctx.style_attrs, ctx.font_bases, ctx.font_inherits, ctx.style_aligns = {}, nil, nil, nil
 end
 
+-- The styles as a fresh document's (:Neoffice styles reset): each paragraph and text style
+-- `template` (an .odt) has too, by its name, as it has it; one it hasn't, nothing of its own (it
+-- follows the style it is based on); the default paragraph style, the template's (with the fonts
+-- they name, declared). What a style is based on, its list and outline level (the headings'
+-- numbers), stay; the paragraphs' own formatting (automatic styles) isn't a style's: it stays.
+function M.reset_styles(ctx, template)
+  local fresh_doc = xml.parse(assert(zip.read(template, STYLES), "the template has no styles"))
+  local fresh, mine = xml.find(fresh_doc, "office:styles"), xml.find(ctx.styles_doc, "office:styles")
+  if not (fresh and mine) then
+    return
+  end
+  local PROPS = { ["style:paragraph-properties"] = true, ["style:text-properties"] = true }
+  local function props_of(el)
+    return vim.tbl_filter(function(c) return PROPS[c.tag] end, el.children)
+  end
+  local by_name, fresh_default = {}, nil
+  for _, st in ipairs(fresh.children) do
+    if st.tag == "style:style" then
+      by_name[(xml.attr(st, "style:family") or "") .. "|" .. (xml.attr(st, "style:name") or "")] = st
+    elseif st.tag == "style:default-style" and xml.attr(st, "style:family") == "paragraph" then
+      fresh_default = st
+    end
+  end
+  local used_fonts = {}
+  local function note_fonts(el)
+    for _, c in ipairs(props_of(el)) do
+      for _, attr in ipairs({ "style:font-name", "style:font-name-asian", "style:font-name-complex" }) do
+        local f = xml.attr(c, attr)
+        if f then
+          used_fonts[f] = true
+        end
+      end
+    end
+  end
+  local function replace(el, model)
+    for _, c in ipairs(props_of(el)) do
+      xml.remove(c)
+    end
+    for k, c in ipairs(model and props_of(model) or {}) do
+      xml.append(el, xml.copy(c), k)
+    end
+    if model then
+      note_fonts(model)
+    end
+  end
+  for _, st in ipairs(vim.list_slice(mine.children)) do
+    local family = st.tag and xml.attr(st, "style:family")
+    if st.tag == "style:default-style" and family == "paragraph" and fresh_default then
+      replace(st, fresh_default)
+    elseif st.tag == "style:style" and (family == "paragraph" or family == "text") then
+      replace(st, by_name[family .. "|" .. (xml.attr(st, "style:name") or "")])
+    end
+  end
+  -- (the fonts the template's styles name: declared, if this document doesn't declare them)
+  local decls = xml.find(ctx.styles_doc, "office:font-face-decls")
+  local fresh_decls = xml.find(fresh_doc, "office:font-face-decls")
+  if fresh_decls and next(used_fonts) then
+    if not decls then
+      local root = xml.find(ctx.styles_doc, "office:document-styles")
+      decls = xml.append(root, xml.elem("office:font-face-decls"), 1)
+    end
+    local have = {}
+    for _, f in ipairs(xml.collect(decls, { ["style:font-face"] = true })) do
+      have[xml.attr(f, "style:name") or ""] = true
+    end
+    for _, f in ipairs(xml.collect(fresh_decls, { ["style:font-face"] = true })) do
+      local name = xml.attr(f, "style:name") or ""
+      if used_fonts[name] and not have[name] then
+        xml.append(decls, xml.copy(f))
+      end
+    end
+  end
+  -- (the namespaces what was copied uses, as the template declares them: "loext:"...)
+  local root = xml.find(ctx.styles_doc, "office:document-styles")
+  local fresh_root = xml.find(fresh_doc, "office:document-styles")
+  if root and fresh_root then
+    local function declare(el)
+      for _, name in ipairs(vim.list_extend({ el.tag }, vim.tbl_map(function(a) return a[1] end, el.attrs or {}))) do
+        local prefix = name and name:match("^([%w_%-]+):")
+        if prefix and prefix ~= "xmlns" and prefix ~= "xml" and not xml.attr(root, "xmlns:" .. prefix) then
+          local uri = xml.attr(fresh_root, "xmlns:" .. prefix)
+          if uri then
+            xml.set_attr(root, "xmlns:" .. prefix, uri)
+          end
+        end
+      end
+      for _, c in ipairs(el.children or {}) do
+        if c.tag then
+          declare(c)
+        end
+      end
+    end
+    declare(mine)
+    if decls then
+      declare(decls)
+    end
+  end
+  ctx.dirty[STYLES] = true
+  ctx.style_attrs, ctx.font_bases, ctx.font_inherits, ctx.style_aligns = {}, nil, nil, nil
+  ctx.para_style_el, ctx.named = nil, nil
+end
+
 -- A paragraph style `name`, added to the document's styles if it hasn't it (a paragraph in a style
 -- the document doesn't define shows as a plain one), and known from then on as the others are.
 local function ensure_para_style(ctx, name, attrs, children)

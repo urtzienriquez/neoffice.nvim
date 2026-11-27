@@ -146,8 +146,14 @@ local SUBCOMMANDS = {
   track = function(arg) changes().track(arg ~= "" and arg or nil) end, -- record your edits: on/off
   numbers = function(arg) require("neoffice").numbers(arg ~= "" and arg or nil) end, -- number headings: on/off
   pdf = function(arg) require("neoffice.pdf").command(arg) end, -- export it as a PDF; auto [on|off]: after each save
+  styles = function(arg) -- reset: the styles as a new document's
+    if arg ~= "reset" then
+      return vim.notify("neoffice: :Neoffice styles reset", vim.log.levels.WARN)
+    end
+    require("neoffice").reset_styles(api.nvim_get_current_buf())
+  end,
 }
-local ARGUMENTS = { accept = { "all" }, reject = { "all" }, track = { "on", "off" }, numbers = { "on", "off" }, comments = { "text" }, pdf = { "auto" } }
+local ARGUMENTS = { accept = { "all" }, reject = { "all" }, track = { "on", "off" }, numbers = { "on", "off" }, comments = { "text" }, pdf = { "auto" }, styles = { "reset" } }
 local NAMES = vim.tbl_keys(SUBCOMMANDS)
 table.sort(NAMES)
 
@@ -180,5 +186,5 @@ end, {
     end
     return vim.tbl_filter(function(item) return vim.startswith(item, lead) end, list)
   end,
-  desc = "neoffice: comments [text [on|off]], comment, reply, edit, resolve, delete, changes [author], accept [all [author]], reject [all [author]], next, prev, track [on|off], numbers [on|off], pdf [auto [on|off]]",
+  desc = "neoffice: comments [text [on|off]], comment, reply, edit, resolve, delete, changes [author], accept [all [author]], reject [all [author]], next, prev, track [on|off], numbers [on|off], pdf [auto [on|off]], styles reset",
 })

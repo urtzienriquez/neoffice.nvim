@@ -52,6 +52,7 @@ One command, `:Neoffice` (alone, it lets you pick):
 - `:Neoffice accept|reject [all [author]]` — the change at the cursor, the selection, or all
 - `:Neoffice next|prev` — jump between changes; `:Neoffice changes [author]` lists them
 - `:Neoffice numbers [on|off]` — number the headings
+- `:Neoffice styles reset` — the styles as a new document's (after changing them, a clean start)
 - `:Neoffice pdf` — the document as a PDF next to it, opened; `pdf auto [on|off]` writes it again after each save
   (one LibreOffice kept running in the background: a fraction of a second each; a viewer that reloads files,
   like zathura, shows each save)

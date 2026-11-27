@@ -33,6 +33,7 @@ neoffice-read	neoffice.txt	/*neoffice-read*
 neoffice-safety	neoffice.txt	/*neoffice-safety*
 neoffice-snippets	neoffice.txt	/*neoffice-snippets*
 neoffice-styles	neoffice.txt	/*neoffice-styles*
+neoffice-styles-reset	neoffice.txt	/*neoffice-styles-reset*
 neoffice-table-format	neoffice.txt	/*neoffice-table-format*
 neoffice-tables	neoffice.txt	/*neoffice-tables*
 neoffice-text	neoffice.txt	/*neoffice-text*

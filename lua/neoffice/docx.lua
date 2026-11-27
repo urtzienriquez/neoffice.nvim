@@ -2072,6 +2072,79 @@ function M.set_style(ctx, id, changes)
   styles_changed(ctx)
 end
 
+-- The styles as a fresh document's (:Neoffice styles reset): each paragraph and character style
+-- `template` (a .docx) has too, by its id or its name, as it has it; one it hasn't, nothing of its
+-- own (it follows the style it is based on); the defaults (fonts, sizes), the template's. What a
+-- style is based on, and its numbering (the heading numbers, in this document's numbering), stay;
+-- table styles too. The paragraphs' own formatting isn't a style's: it stays.
+function M.reset_styles(ctx, template)
+  local fresh = xml.find(xml.parse(assert(zip.read(template, STYLES), "the template has no styles")), "w:styles")
+  local styles = styles_el(ctx)
+  styles = styles and (styles.tag == "w:styles" and styles or xml.find(styles, "w:styles"))
+  if not (fresh and styles) then
+    return
+  end
+  local by_id, by_name = {}, {}
+  for _, st in ipairs(xml.collect(fresh, { ["w:style"] = true })) do
+    by_id[xml.attr(st, "w:styleId") or ""] = st
+    by_name[(xml.attr(xml.child(st, "w:name") or {}, "w:val") or ""):lower()] = st
+  end
+  local defaults, fresh_defaults = xml.child(styles, "w:docDefaults"), xml.child(fresh, "w:docDefaults")
+  if fresh_defaults then
+    local copy = xml.copy(fresh_defaults)
+    if defaults then
+      local at = xml.index(defaults)
+      xml.remove(defaults)
+      xml.append(styles, copy, at)
+    else
+      xml.append(styles, copy, 1)
+    end
+  end
+  for _, st in ipairs(xml.collect(styles, { ["w:style"] = true })) do
+    local kind = xml.attr(st, "w:type")
+    if kind == "paragraph" or kind == "character" then
+      local id, name = xml.attr(st, "w:styleId") or "", (xml.attr(xml.child(st, "w:name") or {}, "w:val") or ""):lower()
+      local model = by_id[id] or by_name[name]
+      model = model and xml.attr(model, "w:type") == kind and model or nil
+      local ppr = xml.child(st, "w:pPr")
+      local numbering = ppr and xml.child(ppr, "w:numPr") -- (this document's numbering: kept)
+      local at -- (where its properties go: where they were, else at the end)
+      for _, tag in ipairs({ "w:pPr", "w:rPr" }) do
+        local el = xml.child(st, tag)
+        if el then
+          at = at or xml.index(el)
+          xml.remove(el)
+        end
+      end
+      local new_ppr = model and xml.child(model, "w:pPr") and xml.copy(xml.child(model, "w:pPr"))
+      if new_ppr then
+        local theirs = xml.child(new_ppr, "w:numPr") -- (the template's numbering isn't this document's)
+        if theirs then
+          xml.remove(theirs)
+        end
+      end
+      if numbering then
+        new_ppr = new_ppr or xml.elem("w:pPr")
+        xml.append(new_ppr, xml.copy(numbering), 1)
+      end
+      local new_rpr = model and xml.child(model, "w:rPr") and xml.copy(xml.child(model, "w:rPr"))
+      if new_rpr then -- (rPr after pPr, both where they were: after the style's other elements)
+        xml.append(st, new_rpr, at)
+      end
+      if new_ppr then
+        xml.append(st, new_ppr, at)
+      end
+      local p_el, r_el = xml.child(st, "w:pPr"), xml.child(st, "w:rPr") -- (pPr, then rPr, as the schema wants)
+      if p_el and r_el and xml.index(p_el) > xml.index(r_el) then
+        xml.remove(p_el)
+        xml.append(st, p_el, xml.index(r_el))
+      end
+    end
+  end
+  ctx.dirty[STYLES], ctx.style_attrs, ctx.style_fonts, ctx.style_aligns = true, nil, nil, nil
+  styles_changed(ctx)
+end
+
 -- The width of the text in cm: the page's, minus its margins (of the last section: the document's
 -- own page). Word's default page (Letter, 1 inch margins) if the document doesn't say.
 -- The page, for placing images: { text = the text's width, left, top = its margins } (cm).

@@ -142,6 +142,16 @@ document has) and their attributes, and folds the header out of the way
 (|zc|). `setup({ styles = false })` doesn't show it. Two styles of one name (Word
 allows it) show apart, the second with its id: `Body Text (BodyText0):`.
 
+                                                     *neoffice-styles-reset*
+`:Neoffice styles reset` makes the styles a new document's: those a new
+document has (Normal, Heading 1-9, Title, Caption, ...) as it has them, the
+document's defaults (font, size) too; a style it hasn't, nothing of its own,
+so it follows the style it is based on. What changing a style kept in the ones
+based on it goes too. The paragraphs' own formatting (words in another font, a
+paragraph's format line) isn't a style's: it stays, as do the heading numbers
+(|:Neoffice| numbers) and table styles. The lines at the top show the styles
+as they now are; |:w| writes them (the text isn't written again).
+
                                                             *neoffice-pages*
 Page settings and sections ~
 The document's page settings are at the top too, on a line of their own: >
@@ -844,6 +854,8 @@ Everything is a subcommand of :Neoffice. Alone, it lets you pick one.
 :Neoffice pdf                   Write the document, as saved, as a PDF next
                                 to it, and open it (|neoffice-pdf|).
 :Neoffice pdf auto [on|off]     Write it again after each save (toggles).
+:Neoffice styles reset          Make the styles a new document's
+                                (|neoffice-styles-reset|).
 
 <Tab> completes the subcommands and the authors' names.
 

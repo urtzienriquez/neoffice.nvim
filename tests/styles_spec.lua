@@ -280,3 +280,92 @@ describe("a colour with # at the top", function()
     assert.truthy(H.lines()[st.row]:find('color = "#c00000"', 1, true), H.lines()[st.row])
   end)
 end)
+
+describe(":Neoffice styles reset", function()
+  before_each(function() neo.config.styles = true end)
+  after_each(function() neo.config.styles = false end)
+  local MAIN = { docx = "word/document.xml", odt = "content.xml" }
+  local function top()
+    local lines = H.lines()
+    return vim.list_slice(lines, 1, header().last)
+  end
+  local function restyle_all()
+    for k, l in ipairs(H.lines()) do
+      if k > 2 and l:match("^  %S") and l:match("{") then
+        api.nvim_buf_set_lines(0, k - 1, k, false, { (l:gsub("{.*}", "{font = Courier New, size = 20pt, align = center, italic, after = 30pt}")) })
+      end
+      if l == "---" and k > 1 then
+        break
+      end
+    end
+  end
+
+  for _, ext in ipairs({ "docx", "odt" }) do
+    it("makes the styles a new document's, after they were changed and saved (" .. ext .. ")", function()
+      local path = H.copy("rich." .. ext) -- (made from the same empty document as neoffice's)
+      H.open(path)
+      local original = top()
+      restyle_all()
+      H.save()
+      H.reopen()
+      assert.are_not.same(original, top())
+      local text = zip.read(path, MAIN[ext])
+      vim.cmd("Neoffice styles reset")
+      assert.same(original, top())
+      assert.is_true(vim.bo.modified)
+      H.save()
+      assert.equals(text, zip.read(path, MAIN[ext]), "the text written again")
+      H.open(path)
+      assert.same(original, top())
+    end)
+  end
+
+  it("leaves a style the new document hasn't nothing of its own: it follows its base (docx)", function()
+    local path = H.copy("rich.docx", function(name, text)
+      if name == "word/document.xml" then -- (a paragraph in a style of its own, based on Body Text)
+        return (text:gsub('<w:pStyle w:val="BodyText" />', '<w:pStyle w:val="MyOwn" />', 1))
+      end
+      return text
+    end)
+    local styles = zip.read(path, "word/styles.xml")
+    styles = styles:gsub("</w:styles>", '<w:style w:type="paragraph" w:customStyle="1" w:styleId="MyOwn"><w:name w:val="My Own" /><w:basedOn w:val="BodyText" />'
+      .. '<w:pPr><w:jc w:val="center" /></w:pPr><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" /><w:sz w:val="40" /></w:rPr></w:style></w:styles>')
+    zip.write(path, { ["word/styles.xml"] = styles })
+    H.open(path)
+    assert.truthy(line_of("My Own").text:find("Courier New", 1, true), line_of("My Own").text)
+    local body = line_of("Body Text").text
+    vim.cmd("Neoffice styles reset")
+    assert.equals(body, line_of("My Own").text) -- (as Body Text, what it is based on)
+    H.save()
+    local written = zip.read(path, "word/styles.xml"):match('<w:style [^>]*w:styleId="MyOwn".-</w:style>')
+    assert.truthy(written:find('w:basedOn w:val="BodyText"', 1, true), written)
+    assert.is_nil(written:find("Courier", 1, true), written)
+  end)
+
+  it("keeps the headings numbered (docx)", function()
+    local path = H.copy("rich.docx")
+    H.open(path)
+    vim.cmd("Neoffice numbers on")
+    H.save()
+    H.reopen()
+    vim.cmd("Neoffice styles reset")
+    H.save()
+    local heading = zip.read(path, "word/styles.xml"):match('<w:style [^>]*w:styleId="Heading1".-</w:style>')
+    assert.truthy(heading:find("<w:numPr>", 1, true), heading)
+  end)
+
+  it("writes a valid file where the document doesn't declare the namespaces the new styles use (odt)", function()
+    local path = H.copy("rich.odt")
+    local styles = zip.read(path, "styles.xml")
+    styles = styles:gsub(' xmlns:loext="[^"]*"', ""):gsub(' loext:[%w%-]+="[^"]*"', ""):gsub("<loext:[^>]*/>", "")
+    zip.write(path, { ["styles.xml"] = styles })
+    H.open(path)
+    vim.cmd("Neoffice styles reset")
+    local said, notify = {}, vim.notify
+    vim.notify = function(msg) said[#said + 1] = msg end
+    H.save()
+    vim.notify = notify
+    assert.is_nil(table.concat(said, "\n"):find("failed", 1, true), table.concat(said, "\n"))
+    assert.truthy(zip.read(path, "styles.xml"):find('xmlns:loext="', 1, true))
+  end)
+end)

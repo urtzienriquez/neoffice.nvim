@@ -1369,6 +1369,50 @@ local function template(ext)
   return copy
 end
 
+-- :Neoffice styles reset: the document's styles as a fresh document's (the plugin's empty one, see
+-- fmt.reset_styles), and the styles at the top as they now are. Written with the next :w.
+function M.reset_styles(buf)
+  local doc = M.docs[buf]
+  if not doc then
+    return vim.notify("neoffice: Not a document buffer", vim.log.levels.WARN)
+  elseif not doc.fmt.reset_styles then
+    return vim.notify("neoffice: This document's styles can't be reset", vim.log.levels.WARN)
+  end
+  local ext = doc.fmt.MAIN == "content.xml" and "odt" or "docx"
+  local here = vim.fs.dirname(debug.getinfo(1, "S").source:sub(2)) -- (lua/neoffice)
+  local ok, err = pcall(doc.fmt.reset_styles, doc.ctx, vim.fs.joinpath(here, "..", "..", "templates", "empty." .. ext))
+  if not ok then
+    return vim.notify("neoffice: The styles couldn't be reset: " .. tostring(err):gsub("^[^\n]-%.lua:%d+: ", ""), vim.log.levels.ERROR)
+  end
+  -- (the lines at the top: each style's, as it now is; what the next save compares them with too)
+  local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
+  local header = doc.header and markup.header(lines)
+  if header then
+    local width = 0
+    for _, st in ipairs(header.styles) do
+      width = st.name and math.max(width, vim.fn.strdisplaywidth(st.name)) or width
+    end
+    for _, st in ipairs(header.styles) do
+      local known = st.name and doc.header[st.name:lower()]
+      local id = known and known.id or st.name and doc.fmt.style_id(doc.ctx, st.name)
+      if id then
+        local attrs = doc.fmt.style_view(doc.ctx, id)
+        doc.header[st.name:lower()] = { id = id, name = st.name, attrs = attrs }
+        local line = "  " .. st.name .. ": " .. (" "):rep(width - vim.fn.strdisplaywidth(st.name)) .. "{" .. require("neoffice.paras").render_style(attrs) .. "}"
+        if lines[st.row] ~= line then
+          api.nvim_buf_set_lines(buf, st.row - 1, st.row, false, { line })
+        end
+      end
+    end
+  end
+  for _, entry in pairs(doc.header or {}) do -- (those not at the top any more: as they now are too)
+    entry.attrs = doc.fmt.style_view(doc.ctx, entry.id)
+  end
+  vim.bo[buf].modified = true -- (to be written, whether the lines changed or not)
+  M.decorate(buf)
+  vim.notify("neoffice: Styles reset, as a new document's: :w writes them")
+end
+
 -- The table cell a paragraph is in: { tc, tr, tbl } (cell, row and table elements), or nil.
 local CELL = { ["w:tc"] = true, ["table:table-cell"] = true }
 local ROW = { ["w:tr"] = true, ["table:table-row"] = true }
