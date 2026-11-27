@@ -112,7 +112,35 @@ local function render()
       end
     end
   end
-  if #all == 0 then
+  -- comments the text here doesn't show (on deleted text, in a text box, a header...): kept in the
+  -- document as they are, listed to be read
+  local doc, shown, hidden = neo().docs[panel.doc], {}, {}
+  for _, m in ipairs(all) do
+    shown[m.c] = true
+  end
+  for _, c in pairs(doc.ctx and doc.ctx.comments or {}) do
+    if type(c) == "table" and not c.reply_of and not shown[c] and not (doc.ctx.shown_comments or {})[c] then
+      hidden[#hidden + 1] = c
+    end
+  end
+  table.sort(hidden, function(x, y) return (x.date or "") < (y.date or "") end)
+  if #hidden > 0 then
+    add("")
+    add(("Not in the text here (%d): on deleted text, in a text box, a header... (kept as they are)"):format(#hidden))
+    for _, c in ipairs(hidden) do
+      add(("%s, %s"):format(c.author or "?", (c.date or ""):sub(1, 10)))
+      for _, l in ipairs(vim.split(c.text or "", "\n")) do
+        add("    " .. l)
+      end
+      for _, r in ipairs(c.replies or {}) do
+        add(("  %s, %s"):format(r.author or "?", (r.date or ""):sub(1, 10)))
+        for _, l in ipairs(vim.split(r.text or "", "\n")) do
+          add("    " .. l)
+        end
+      end
+    end
+  end
+  if #all == 0 and #hidden == 0 then
     add("")
     add("No comments. :Neoffice comment adds one.")
   end

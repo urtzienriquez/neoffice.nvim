@@ -37,6 +37,9 @@ local VISIBLE = {
 }
 -- Elements dropped from paragraphs you edit, because Word recreates them (or we do).
 local DROP = { ["w:proofErr"] = true, ["w:lastRenderedPageBreak"] = true, ["w:commentReference"] = true }
+local COMMENT_MARKS = { ["w:commentRangeStart"] = true, ["w:commentRangeEnd"] = true, ["w:commentReference"] = true }
+-- What may be in a deletion (as Word writes it) that is read as a mark of its own (see fill)
+local MARKS_IN_DELETIONS = { ["w:commentRangeStart"] = true, ["w:commentRangeEnd"] = true, ["w:bookmarkStart"] = true, ["w:bookmarkEnd"] = true }
 -- Schema order of run properties: Word rejects files where they are out of order.
 local RPR_ORDER = {}
 for i, tag in ipairs(vim.split("rStyle rFonts b bCs i iCs caps smallCaps strike dstrike outline shadow emboss imprint noProof snapToGrid vanish webHidden color spacing w kern position sz szCs highlight u effect bdr shd fitText vertAlign rtl cs em lang eastAsianLayout specVanish oMath", " ")) do
@@ -90,6 +93,160 @@ local function part(ctx, name, empty)
   return ctx.parts[name] or nil
 end
 
+-- The parts with text of their own: the document, its headers and footers, notes and comments.
+local function text_parts(ctx)
+  local out = { ctx.root }
+  for name in pairs(ctx.entries or {}) do
+    if name:match("^word/header%d*%.xml$") or name:match("^word/footer%d*%.xml$") or name == "word/footnotes.xml"
+      or name == "word/endnotes.xml" or name == "word/comments.xml" then
+      out[#out + 1] = part(ctx, name)
+    end
+  end
+  return out
+end
+-- An id for a new drawing: above every drawing's in every part (whatever their prefix: "wp:docPr",
+-- or another tool's "ns1:docPr"), so none is used twice.
+local function drawing_id(ctx)
+  if not ctx.next_picture then
+    local top = 0
+    for _, root in ipairs(text_parts(ctx)) do
+      local stack = { root }
+      while #stack > 0 do
+        local el = table.remove(stack)
+        if el.tag and el.tag:match(":docPr$") then
+          top = math.max(top, tonumber(xml.attr(el, "id")) or 0)
+        end
+        for _, c in ipairs(el.children or {}) do
+          if c.tag then
+            stack[#stack + 1] = c
+          end
+        end
+      end
+    end
+    ctx.next_picture = top + 1
+  end
+  local id = ctx.next_picture
+  ctx.next_picture = id + 1
+  return id
+end
+
+-- An id for a new tracked change: above every id the document has (the ids of changes, comments
+-- and bookmarks, which Word counts together), so none is ever used twice, in this session or the next.
+local function new_revision_id(ctx)
+  if not ctx.revision then
+    local top = 900000
+    for _, name in ipairs({ "word/document.xml", "word/footnotes.xml", "word/endnotes.xml", "word/comments.xml" }) do
+      local root = name == "word/document.xml" and ctx.root or part(ctx, name)
+      local stack = { root }
+      while #stack > 0 do
+        local el = table.remove(stack)
+        local id = el.attrs and tonumber(xml.attr(el, "w:id") or "")
+        if id and id > top and id < 2 ^ 31 then
+          top = id
+        end
+        for _, c in ipairs(el.children or {}) do
+          if c.tag then
+            stack[#stack + 1] = c
+          end
+        end
+      end
+    end
+    ctx.revision = top
+  end
+  ctx.revision = ctx.revision + 1
+  return tostring(ctx.revision)
+end
+
+-- The elements of tracked changes, whose ids are the change's (a range's end shares its start's:
+-- not among them, nor the start then)
+local REVISIONS = {}
+for _, tag in ipairs({ "ins", "del", "moveFrom", "moveTo", "rPrChange", "pPrChange", "sectPrChange", "tblPrChange", "tblPrExChange",
+  "trPrChange", "tcPrChange", "tblGridChange", "numberingChange", "cellIns", "cellDel", "cellMerge" }) do
+  REVISIONS["w:" .. tag] = true
+end
+
+-- Drawings' ids made unique again: one in the document's text used more times than when it was
+-- opened (a copy of a picture, written as the picture was, id and all) gets a new one. Called when
+-- the document is opened (what it had: ids twice in a file as you got it stay so) and before saving.
+function M.unique_drawings(ctx)
+  local counts, mine, refs = {}, {}, {}
+  for _, root in ipairs(text_parts(ctx)) do
+    local stack = { root }
+    while #stack > 0 do
+      local el = table.remove(stack)
+      if el.tag and el.tag:match(":docPr$") then
+        local id = xml.attr(el, "id") or ""
+        counts[id] = (counts[id] or 0) + 1
+        if root == ctx.root then
+          mine[#mine + 1] = el
+        end
+      elseif REVISIONS[el.tag] and xml.attr(el, "w:id") then -- (and the changes': a copy of a paragraph marked inserted...)
+        local key = el.tag .. " " .. xml.attr(el, "w:id")
+        counts[key] = (counts[key] or 0) + 1
+        if root == ctx.root then
+          mine[#mine + 1] = el
+        end
+      elseif el.tag == "w:commentReference" then -- (and comments' references: one written from its mark, and
+        local key = "ref " .. (xml.attr(el, "w:id") or "") -- one in a deletion written back as it was)
+        counts[key] = (counts[key] or 0) + 1
+        if root == ctx.root then
+          refs[key] = refs[key] or {}
+          table.insert(refs[key], el)
+        end
+      end
+      for k = #(el.children or {}), 1, -1 do -- (in document order)
+        if el.children[k].tag then
+          stack[#stack + 1] = el.children[k]
+        end
+      end
+    end
+  end
+  if not ctx.drawings_at_open then
+    ctx.drawings_at_open = counts
+    return
+  end
+  for key, list in pairs(refs) do -- (a reference more: the one in a deletion goes first, then the last)
+    local extra = counts[key] - math.max(ctx.drawings_at_open[key] or 0, 1)
+    if extra > 0 then
+      local function deleted(el)
+        local up = el.parent
+        while up and up.tag ~= "w:p" do
+          if up.tag == "w:del" then
+            return true
+          end
+          up = up.parent
+        end
+        return false
+      end
+      local order = {}
+      for k = #list, 1, -1 do
+        table.insert(order, deleted(list[k]) and 1 or #order + 1, list[k])
+      end
+      for k = 1, extra do
+        local el = order[k]
+        local run = el.parent
+        xml.remove(el)
+        if run and run.tag == "w:r" and not vim.iter(run.children):any(function(c) return c.tag and c.tag ~= "w:rPr" end) then
+          xml.remove(run) -- (its run, with nothing else in it)
+        end
+      end
+    end
+  end
+  for k = #mine, 1, -1 do -- (the last ones: the copies, mostly)
+    local el = mine[k]
+    local revision = REVISIONS[el.tag]
+    local key = revision and el.tag .. " " .. xml.attr(el, "w:id") or xml.attr(el, "id") or ""
+    if counts[key] > math.max(ctx.drawings_at_open[key] or 0, 1) then
+      counts[key] = counts[key] - 1
+      if revision then
+        xml.set_attr(el, "w:id", new_revision_id(ctx))
+      else
+        xml.set_attr(el, "id", tostring(drawing_id(ctx)))
+      end
+    end
+  end
+end
+
 -- (the styles changed, or one was added: what is kept from them read again)
 local function styles_changed(ctx)
   ctx.default_style, ctx.font_default = nil, nil
@@ -97,6 +254,114 @@ end
 
 -- A style of the document for comments ("CommentText", "CommentReference"), by its id or its
 -- name, if it has one.
+-- What would make Word repair (or refuse) a document, counted: ids twice, cells without a
+-- paragraph at their end... (see init.lua: a save that would make any more stops). { [what] = n }
+function M.integrity(ctx)
+  local out, seen = {}, {}
+  local function count(kind, key)
+    seen[kind] = seen[kind] or {}
+    if key then
+      if seen[kind][key] then
+        out[kind] = (out[kind] or 0) + 1
+      end
+      seen[kind][key] = true
+    end
+  end
+  for _, root in ipairs(text_parts(ctx)) do
+    local stack = root and { root } or {}
+    while #stack > 0 do
+      local el = table.remove(stack)
+      local tag = el.tag
+      if tag == "w:bookmarkStart" then
+        count("a bookmark's id used twice", xml.attr(el, "w:id"))
+        count("a bookmark's name used twice", xml.attr(el, "w:name"))
+      elseif tag == "w:commentRangeStart" then
+        count("a comment started twice", xml.attr(el, "w:id"))
+      elseif tag == "w:commentRangeEnd" then
+        count("a comment ended twice", xml.attr(el, "w:id"))
+      elseif tag == "w:commentReference" then
+        count("a comment referenced twice", xml.attr(el, "w:id"))
+      elseif tag == "w:moveFromRangeStart" or tag == "w:moveToRangeStart" then
+        count("a tracked move's range started twice", tag .. (xml.attr(el, "w:id") or ""))
+      elseif tag == "w:moveFromRangeEnd" or tag == "w:moveToRangeEnd" then
+        count("a tracked move's range ended twice", tag .. (xml.attr(el, "w:id") or ""))
+      elseif tag and tag:match(":docPr$") then
+        count("a drawing's id used twice", xml.attr(el, "id"))
+      elseif tag == "w:tc" then
+        local last
+        for _, c in ipairs(el.children) do
+          if c.tag == "w:p" or c.tag == "w:tbl" or c.tag == "w:sdt" or c.tag == "w:customXml" then
+            last = c.tag
+          end
+        end
+        if last ~= "w:p" and last ~= "w:sdt" and last ~= "w:customXml" then
+          out["a table cell that doesn't end with a paragraph"] = (out["a table cell that doesn't end with a paragraph"] or 0) + 1
+        end
+      elseif tag == "w:tbl" and not xml.child(el, "w:tr") then
+        out["a table without rows"] = (out["a table without rows"] or 0) + 1
+      elseif tag == "w:body" then
+        local last
+        for _, c in ipairs(el.children) do
+          if c.tag == "w:p" or c.tag == "w:tbl" or c.tag == "w:sdt" or c.tag == "w:customXml" then
+            last = c
+          end
+        end
+        if last and last.tag == "w:tbl" then
+          out["a document that ends with a table"] = 1
+        end
+      end
+      for _, c in ipairs(el.children or {}) do
+        if c.tag then
+          stack[#stack + 1] = c
+        end
+      end
+    end
+  end
+  -- (in the order they are in: a comment's end before its start; a comment's mark with no comment)
+  local known = {}
+  local comments = part(ctx, COMMENTS)
+  for _, c in ipairs(comments and xml.collect(comments, { ["w:comment"] = true }) or {}) do
+    known[xml.attr(c, "w:id") or ""] = true
+  end
+  for _, root in ipairs(text_parts(ctx)) do
+    local started = {}
+    for _, el in ipairs(root and xml.collect(root, COMMENT_MARKS) or {}) do
+      local id = xml.attr(el, "w:id") or ""
+      if el.tag == "w:commentRangeStart" then
+        started[id] = true
+      elseif el.tag == "w:commentRangeEnd" and not started[id] then
+        out["a comment that ends before it starts"] = (out["a comment that ends before it starts"] or 0) + 1
+      elseif el.tag == "w:commentRangeEnd" then
+        started[id] = "ended"
+      end
+      if not known[id] then
+        out["a comment's mark with no comment"] = (out["a comment's mark with no comment"] or 0) + 1
+      end
+    end
+    for _, state in pairs(started) do
+      if state == true then
+        out["a comment that starts and never ends"] = (out["a comment that starts and never ends"] or 0) + 1
+      end
+    end
+  end
+  return out
+end
+
+-- Whether a comment of the buffer is in the document's text (its start or its reference), as saved.
+function M.comment_kept(ctx, c)
+  if not c.id then
+    return false
+  end
+  for _, root in ipairs(text_parts(ctx)) do
+    for _, el in ipairs(root and xml.collect(root, COMMENT_MARKS) or {}) do
+      if el.tag ~= "w:commentRangeEnd" and xml.attr(el, "w:id") == c.id then
+        return true
+      end
+    end
+  end
+  return false
+end
+
 local function comment_style(ctx, id, kind)
   local styles = part(ctx, STYLES)
   for _, st in ipairs(styles and xml.collect(styles, { ["w:style"] = true }) or {}) do
@@ -585,7 +850,8 @@ end
 local function field_end(children, k)
   local depth = 0
   for j = k, #children do
-    for _, char in ipairs(xml.collect(children[j], { ["w:fldChar"] = true })) do
+    -- (a run's own: not one in a text box the run holds, whose fields are its paragraphs')
+    for _, char in ipairs(vim.tbl_filter(function(c) return c.tag == "w:fldChar" end, children[j].children or {})) do
       local kind = xml.attr(char, "w:fldCharType")
       depth = depth + (kind == "begin" and 1 or kind == "end" and -1 or 0)
       if depth == 0 then
@@ -666,8 +932,26 @@ local function read_para(ctx, p)
     if change then
       add({ insert_start = change })
     end
-    for _, el in ipairs(r.children) do
+    for k, el in ipairs(r.children) do
       local br = (el.tag == "w:br" or el.tag == "w:cr") and (xml.attr(el, "w:type") or "textWrapping")
+      local box = (el.tag == "mc:AlternateContent" or el.tag == "w:drawing") and M.box_content(el)
+      if box and r.parent then
+        -- (a box in a run with more in it, as Word may write it: a picture, text... The box gets a run of
+        -- its own, and what follows it another, so that it is moved and written alone; the paragraph's
+        -- walk reads them next, see walk)
+        local after = vim.list_slice(r.children, k + 1)
+        if #after > 0 then
+          for _, c in ipairs(after) do
+            xml.remove(c)
+          end
+          xml.append(r.parent, xml.elem("w:r", vim.deepcopy(r.attrs), { rpr and xml.copy(rpr), unpack(after) }), xml.index(r) + 1)
+        end
+        if vim.iter(vim.list_slice(r.children, 1, k - 1)):any(function(c) return c.tag and c.tag ~= "w:rPr" end) then
+          xml.remove(el)
+          xml.append(r.parent, xml.elem("w:r", vim.deepcopy(r.attrs), { rpr and xml.copy(rpr), el }), xml.index(r) + 1)
+          break
+        end
+      end
       if el.tag == "w:t" or el.tag == "w:delText" or el.tag == "w:tab" then -- (deleted text too: see w:del)
         local text = el.tag ~= "w:tab" and xml.text(el) or "\t"
         if el.tag ~= "w:tab" and xml.attr(el, "xml:space") ~= "preserve" then -- (as Word reads it)
@@ -712,7 +996,8 @@ local function read_para(ctx, p)
       k = k + 1
       local el = parent.children[k]
       local tag = el.tag
-      local field = tag == "w:r" and xml.find(el, "w:fldChar") and xml.attr(xml.find(el, "w:fldChar"), "w:fldCharType") == "begin"
+      local char = tag == "w:r" and xml.child(el, "w:fldChar") -- (the run's own, not one in a box it holds)
+      local field = char and xml.attr(char, "w:fldCharType") == "begin"
       local stop = field and field_end(parent.children, k)
       if stop then -- a field (citation, page number, reference...): one thing, showing its result
         local group = { children = {} }
@@ -999,13 +1284,17 @@ function M.load(path)
       group = nil -- (a paragraph between: what follows is another)
     end
   end
+  ctx.rows_at_open = setmetatable({}, { __mode = "k" }) -- (rows as the document had them: see track_rows)
+  for _, tr in ipairs(xml.collect(ctx.root, { ["w:tr"] = true })) do
+    ctx.rows_at_open[tr] = true
+  end
   return ctx, paras
 end
 
 -- ── Writing paragraphs ──────────────────────────────────────────────────────
 
-function M.new_para(template)
-  local ppr = xml.child(template, "w:pPr")
+function M.new_para(template) -- (template nil: a plain one, as in a document with no paragraph yet)
+  local ppr = template and xml.child(template, "w:pPr")
   ppr = ppr and xml.copy(ppr)
   -- (not what belongs to the paragraph it comes after: a section break, a page break before it,
   -- a tracked change of its properties or of its paragraph mark)
@@ -1301,6 +1590,16 @@ end
 local function find_style(ctx, id)
   return has(part(ctx, STYLES) or {}, "w:style", "w:styleId", id)
 end
+-- An id no style has yet: `id`, else `id`2, `id`3... (a style of the document may have it under
+-- another name: two styles with one id and Word may not open the file)
+local function free_style_id(ctx, id)
+  local n, try = 1, id
+  while find_style(ctx, try) do
+    n = n + 1
+    try = id .. n
+  end
+  return try
+end
 
 -- :Neoffice numbers: number the headings (through their styles, as Word does), or stop (also
 -- numbering given to the headings themselves).
@@ -1332,7 +1631,8 @@ local function title_style(ctx)
   local styles = xml.find(part(ctx, STYLES) or {}, "w:styles")
   if not ctx.title_style and styles then
     styles_changed(ctx)
-    xml.append(styles, xml.elem("w:style", { { "w:type", "paragraph" }, { "w:styleId", "Title" } }, {
+    local id = free_style_id(ctx, "Title")
+    xml.append(styles, xml.elem("w:style", { { "w:type", "paragraph" }, { "w:styleId", id } }, {
       xml.elem("w:name", { { "w:val", "Title" } }),
       xml.elem("w:basedOn", { { "w:val", "Normal" } }),
       xml.elem("w:next", { { "w:val", "Normal" } }),
@@ -1340,7 +1640,7 @@ local function title_style(ctx)
       xml.elem("w:pPr", {}, { xml.elem("w:spacing", { { "w:after", "240" } }) }),
       xml.elem("w:rPr", {}, { xml.elem("w:sz", { { "w:val", "56" } }) }),
     }))
-    ctx.title_style, ctx.title_styles.Title, ctx.dirty[STYLES] = "Title", true, true
+    ctx.title_style, ctx.title_styles[id], ctx.dirty[STYLES] = id, true, true
   end
   return ctx.title_style or "Title"
 end
@@ -1349,7 +1649,7 @@ end
 local function heading_style(ctx, level)
   local styles = xml.find(part(ctx, STYLES) or {}, "w:styles")
   if not ctx.style_of[level] and styles then
-    local id = "Heading" .. level
+    local id = free_style_id(ctx, "Heading" .. level)
     styles_changed(ctx)
     xml.append(styles, xml.elem("w:style", { { "w:type", "paragraph" }, { "w:styleId", id } }, {
       xml.elem("w:name", { { "w:val", "heading " .. level } }),
@@ -1450,7 +1750,8 @@ local function quote_style(ctx)
   local styles = xml.find(part(ctx, STYLES) or {}, "w:styles")
   if not ctx.quote_style and styles then
     styles_changed(ctx)
-    xml.append(styles, xml.elem("w:style", { { "w:type", "paragraph" }, { "w:styleId", "Quote" } }, {
+    local id = free_style_id(ctx, "Quote")
+    xml.append(styles, xml.elem("w:style", { { "w:type", "paragraph" }, { "w:styleId", id } }, {
       xml.elem("w:name", { { "w:val", "Quote" } }),
       xml.elem("w:basedOn", { { "w:val", "Normal" } }),
       xml.elem("w:next", { { "w:val", "Normal" } }),
@@ -1458,7 +1759,7 @@ local function quote_style(ctx)
       xml.elem("w:pPr", {}, { xml.elem("w:ind", { { "w:left", "720" }, { "w:right", "720" } }) }),
       xml.elem("w:rPr", {}, { xml.elem("w:i") }),
     }))
-    ctx.quote_style, ctx.quote_styles.Quote, ctx.dirty[STYLES] = "Quote", true, true
+    ctx.quote_style, ctx.quote_styles[id], ctx.dirty[STYLES] = id, true, true
   end
   return ctx.quote_style or "Quote"
 end
@@ -1900,11 +2201,7 @@ function M.new_box(ctx, attrs)
   for _, prefix in ipairs({ "mc", "wps", "wp", "a" }) do
     ensure_ns(document, prefix)
   end
-  ctx.next_picture = ctx.next_picture or vim.iter(xml.collect(ctx.root, { ["wp:docPr"] = true }, {})):fold(0, function(acc, el)
-    return math.max(acc, tonumber(xml.attr(el, "id")) or 0)
-  end) + 1
-  local id = ctx.next_picture
-  ctx.next_picture = id + 1
+  local id = drawing_id(ctx)
   local cx = math.floor((markup.cm(attrs.width or "", M.text_width(ctx)) or M.text_width(ctx) / 2) * EMU)
   local cy = EMU -- (made to fit its content: see M.fit_box)
   local content = xml.elem("w:txbxContent")
@@ -2739,9 +3036,14 @@ local function footnote_node(ctx, piece)
 end
 
 -- <w:ins>/<w:del> for a change made in Neovim
+-- A tracked change's element, with an id of its own: above every id the document has (the ids of
+-- changes, comments and bookmarks, which Word counts together), so none is ever used twice, in this
+-- session or the next.
 local function revision(ctx, tag, ch)
-  ctx.revision = (ctx.revision or 900000) + 1
-  return xml.elem(tag, { { "w:id", tostring(ctx.revision) }, { "w:author", ch.author }, { "w:date", ch.date } })
+  local el = xml.elem(tag, { { "w:id", new_revision_id(ctx) }, { "w:author", ch.author }, { "w:date", ch.date } })
+  ctx.made_here = ctx.made_here or {} -- (the ids of changes made in neoffice: see track_rows)
+  ctx.made_here[xml.attr(el, "w:id")] = true
+  return el
 end
 
 local function comment_id(ctx, c)
@@ -2792,11 +3094,8 @@ local function image_node(ctx, img)
     else
       cx = wanted or math.min(cx, MAX_WIDTH)
       cy = math.floor(cx * height / width)
-      ctx.next_picture = ctx.next_picture or vim.iter(xml.collect(ctx.root, { ["wp:docPr"] = true }, {})):fold(0, function(acc, el)
-        return math.max(acc, tonumber(xml.attr(el, "id")) or 0)
-      end) + 1
-      node = xml.parse(DRAWING:format(cx, cy, ctx.next_picture, ctx.next_picture, xml.escape(vim.fs.basename(file), true), cx, cy)).children[1]
-      ctx.next_picture = ctx.next_picture + 1
+      local id = drawing_id(ctx)
+      node = xml.parse(DRAWING:format(cx, cy, id, id, xml.escape(vim.fs.basename(file), true), cx, cy)).children[1]
       local document = xml.find(ctx.root, "w:document")
       ensure_ns(document, "wp")
       ensure_ns(document, "r")
@@ -2848,6 +3147,8 @@ local function image_node(ctx, img)
 end
 
 function M.fill(ctx, p, block, pieces)
+  ctx.filled = ctx.filled or setmetatable({}, { __mode = "k" }) -- (written in this save: see track_rows)
+  ctx.filled[p] = true
   local ppr = xml.child(p, "w:pPr")
   local was_caption = false -- (it had a caption's number: its caption style goes if it no longer is one)
   for _, f in ipairs(xml.collect(p, { ["w:fldSimple"] = true, ["w:instrText"] = true })) do
@@ -2891,9 +3192,11 @@ function M.fill(ctx, p, block, pieces)
   -- whether this paragraph's break is a tracked insertion or deletion (in its mark's properties)
   local mark = vim.iter(pieces):find(function(piece) return piece.paragraph_mark end)
   local mark_rpr = ppr and xml.child(ppr, "w:rPr")
+  local own_id = {} -- (the id the paragraph's mark had, for each kind)
   for _, tag in ipairs({ "w:ins", "w:del" }) do
     local old_mark = mark_rpr and xml.child(mark_rpr, tag)
     if old_mark then
+      own_id[tag] = xml.attr(old_mark, "w:id")
       xml.remove(old_mark)
     end
   end
@@ -2906,7 +3209,18 @@ function M.fill(ctx, p, block, pieces)
       local after = xml.child(ppr, "w:sectPr") or xml.child(ppr, "w:pPrChange")
       mark_rpr = xml.append(ppr, xml.elem("w:rPr"), after and xml.index(after) or nil)
     end
-    xml.append(mark_rpr, xml.elem(tag, vim.deepcopy(ch.mark.attrs)), 1) -- (first, as the schema wants)
+    -- (one change may mark several paragraphs, a deletion across them: each mark an id of its own,
+    -- the one it had, else a new one)
+    local attrs = vim.deepcopy(ch.mark.attrs)
+    ctx.mark_ids = ctx.mark_ids or {}
+    local id = own_id[tag] or xml.attr({ attrs = attrs }, "w:id")
+    if not id or ctx.mark_ids[id] then
+      id = xml.attr(revision(ctx, tag, ch), "w:id")
+    end
+    ctx.mark_ids[id] = true
+    local el = xml.elem(tag, attrs)
+    xml.set_attr(el, "w:id", id)
+    xml.append(mark_rpr, el, 1) -- (first, as the schema wants)
   end
   if block.align or (ppr and xml.child(ppr, "w:jc")) then
     ppr = ppr or xml.elem("w:pPr")
@@ -2934,6 +3248,13 @@ function M.fill(ctx, p, block, pieces)
         if ins then
           ins.node = ins.node or revision(ctx, "w:ins", ins)
           cur.ins = xml.append(cur.el, xml.elem(ins.moved and "w:moveTo" or "w:ins", vim.deepcopy(ins.node.attrs)))
+          -- (an insertion in several pieces, as around a link: each an id of its own, the first the one it had)
+          ctx.mark_ids = ctx.mark_ids or {}
+          local id = xml.attr(cur.ins, "w:id")
+          if not id or ctx.mark_ids[id] then
+            xml.set_attr(cur.ins, "w:id", xml.attr(revision(ctx, "w:ins", ins), "w:id"))
+          end
+          ctx.mark_ids[xml.attr(cur.ins, "w:id")] = true
         else
           cur.ins = nil
         end
@@ -2942,6 +3263,18 @@ function M.fill(ctx, p, block, pieces)
     elseif not (piece.insert_start or piece.insert_end) then
       cur = { el = p }
       local del = piece.deletion
+      ctx.mark_ids = ctx.mark_ids or {}
+      if del and del.node and piece.deleted == del.text and ctx.mark_ids[xml.attr(del.node, "w:id") or ""] then
+        del.node = nil -- (written already in this save: a copy, with an id of its own, see below)
+      end
+      -- (a deletion written back as it was: without the comment ranges and bookmarks Word may have put
+      -- in it; those were read as marks of their own, and are written from them, beside it)
+      if del and del.node and piece.deleted == del.text and #xml.collect(del.node, MARKS_IN_DELETIONS) > 0 then
+        del.node = xml.copy(del.node)
+        for _, el in ipairs(xml.collect(del.node, MARKS_IN_DELETIONS)) do
+          xml.remove(el)
+        end
+      end
       if del and (not del.node or piece.deleted ~= del.text) then -- (new, or its text changed: split, edited)
         local attrs = revision(ctx, "w:del", del).attrs -- (a fresh id: a deletion may now be in several paragraphs)
         del.node, del.text = xml.elem(del.moved and "w:moveFrom" or "w:del", attrs), piece.deleted
@@ -2961,7 +3294,24 @@ function M.fill(ctx, p, block, pieces)
           end
         end
       end
-      if piece.object and not piece.object.tag then -- (a field: its runs)
+      if piece.object and piece.insert and piece.object.tag == "w:fldSimple" then
+        -- (a caption's number in a tracked insertion: written as its runs, in a w:ins with them, which
+        -- a w:fldSimple can't be in; rejecting the insertion takes it away too)
+        local ins = piece.insert
+        ins.node = ins.node or revision(ctx, "w:ins", ins)
+        local wrap = xml.append(p, xml.elem(ins.moved and "w:moveTo" or "w:ins", vim.deepcopy(ins.node.attrs)))
+        xml.set_attr(wrap, "w:id", xml.attr(revision(ctx, "w:ins", ins), "w:id"))
+        local function char(kind)
+          return xml.elem("w:r", {}, { xml.elem("w:fldChar", { { "w:fldCharType", kind } }) })
+        end
+        xml.append(wrap, char("begin"))
+        xml.append(wrap, xml.elem("w:r", {}, { xml.elem("w:instrText", { { "xml:space", "preserve" } }, { { text = xml.attr(piece.object, "w:instr") or "" } }) }))
+        xml.append(wrap, char("separate"))
+        for _, el in ipairs(piece.object.children) do
+          xml.append(wrap, xml.copy(el))
+        end
+        xml.append(wrap, char("end"))
+      elseif piece.object and not piece.object.tag then -- (a field: its runs)
         for _, el in ipairs(piece.object.children) do
           xml.append(p, xml.copy(el))
         end
@@ -2976,6 +3326,9 @@ function M.fill(ctx, p, block, pieces)
           ctx.footnote_ids[piece.note.id], ctx.dirty[FOOTNOTES] = true, true
         end
         xml.append(p, piece.object or del.node)
+        if del and not piece.object then
+          ctx.mark_ids[xml.attr(del.node, "w:id") or ""] = true
+        end
       elseif piece.line_break or piece.page_break then
         xml.append(p, xml.elem("w:r", {}, { xml.elem("w:br", piece.page_break and { { "w:type", "page" } } or nil) }))
       elseif piece.footnote then
@@ -3012,7 +3365,24 @@ end
 
 -- A new paragraph id (8 hex digits, below 0x80000000) for comments.xml.
 local function para_id(ctx)
-  ctx.para_ids = ctx.para_ids or {}
+  if not ctx.para_ids then -- (none the document has: its paragraphs' and its comments')
+    ctx.para_ids = {}
+    for _, root in ipairs(text_parts(ctx)) do
+      local stack = { root }
+      while #stack > 0 do
+        local el = table.remove(stack)
+        local v = el.attrs and (xml.attr(el, "w14:paraId") or xml.attr(el, "w14:textId"))
+        if v then
+          ctx.para_ids[v:upper()] = true
+        end
+        for _, c in ipairs(el.children or {}) do
+          if c.tag then
+            stack[#stack + 1] = c
+          end
+        end
+      end
+    end
+  end
   local id
   repeat
     id = ("%08X"):format(math.random(0x10000000, 0x7FFFFFFE))
@@ -3127,9 +3497,36 @@ local function save_comments(ctx, live)
       keep[x] = true
     end
   end
+  -- (gone: one shown in the buffer, or a reply to one, that no longer is. One never shown, its mark
+  -- in what isn't: deleted text, a text box... stays as it is, with its marks in the document)
+  local shown = ctx.shown_comments or {}
+  local gone = {}
   for el, x in pairs(ctx.comment_of) do
-    if not keep[x] and el.parent then
+    if not keep[x] and el.parent and shown[x.reply_of or x] then
+      gone[x.id or ""] = true
       forget(ctx, x)
+    end
+  end
+  -- (and its marks wherever they still are: in a deletion written back as it was...)
+  if next(gone) then
+    local names = { M.MAIN }
+    for name in pairs(ctx.entries or {}) do
+      if name:match("^word/header%d*%.xml$") or name:match("^word/footer%d*%.xml$") or name == "word/footnotes.xml" or name == "word/endnotes.xml" then
+        names[#names + 1] = name
+      end
+    end
+    for _, name in ipairs(names) do
+      local root = name == M.MAIN and ctx.root or part(ctx, name)
+      for _, el in ipairs(root and xml.collect(root, COMMENT_MARKS) or {}) do
+        if gone[xml.attr(el, "w:id") or ""] then
+          local run = el.tag == "w:commentReference" and el.parent
+          xml.remove(el)
+          if run and run.tag == "w:r" and not vim.iter(run.children):any(function(c) return c.tag and c.tag ~= "w:rPr" end) then
+            xml.remove(run) -- (its run, with nothing else in it)
+          end
+          ctx.dirty[name] = true
+        end
+      end
     end
   end
 
@@ -3229,7 +3626,104 @@ local function resolve_marks(ctx, decisions)
   end
 end
 
+-- A table's rows deleted, or inserted, with changes tracked, as Word marks them: a row all of whose
+-- text was deleted in neoffice is marked deleted (accepting it takes the row away, not only its
+-- text), a new row all of whose text was inserted is marked inserted (rejecting it takes it away); a
+-- row so marked whose text no longer is (rejected, accepted, typed in) isn't any more. Only rows a
+-- paragraph of which was written in this save: the others stay as they are.
+local function track_rows(ctx)
+  local rows = {}
+  for p in pairs(ctx.filled or {}) do
+    local up = p.parent
+    while up and up.tag ~= "w:tr" and up.tag ~= "w:body" do
+      up = up.parent
+    end
+    if up and up.tag == "w:tr" and up.parent then
+      rows[up] = true
+    end
+  end
+  for tr in pairs(rows) do
+    if not xml.find(tr, "w:tbl") then -- (a table in it: as it is)
+      local live, deleted, inserted, ours_del, ours_ins = 0, 0, 0, true, true
+      for _, el in ipairs(xml.collect(tr, { ["w:t"] = true, ["w:delText"] = true })) do
+        local del, ins
+        local up = el.parent
+        while up and up ~= tr do
+          del = del or (up.tag == "w:del" and up)
+          ins = ins or (up.tag == "w:ins" and up)
+          up = up.parent
+        end
+        if el.tag == "w:delText" and del then
+          deleted = deleted + 1
+          ours_del = ours_del and (ctx.made_here or {})[xml.attr(del, "w:id") or ""] ~= nil
+        elseif el.tag == "w:t" and ins then
+          inserted = inserted + 1
+          ours_ins = ours_ins and (ctx.made_here or {})[xml.attr(ins, "w:id") or ""] ~= nil
+        elseif el.tag == "w:t" and (xml.text(el) or "") ~= "" then
+          live = live + 1
+        end
+      end
+      local trpr = xml.child(tr, "w:trPr")
+      local mark_del = trpr and xml.child(trpr, "w:del")
+      local mark_ins = trpr and xml.child(trpr, "w:ins")
+      local function mark(tag, from)
+        if not trpr then
+          local ex = xml.child(tr, "w:tblPrEx")
+          trpr = xml.append(tr, xml.elem("w:trPr"), ex and xml.index(ex) + 1 or 1)
+        end
+        local change = xml.child(trpr, "w:trPrChange")
+        local el = xml.elem(tag, { { "w:id", new_revision_id(ctx) }, { "w:author", xml.attr(from, "w:author") or "" }, { "w:date", xml.attr(from, "w:date") or "" } })
+        xml.append(trpr, el, change and xml.index(change) or nil)
+      end
+      local function row_end_deleted() -- (the row's line deleted, its end too: not only its cells' text)
+        local cells = vim.tbl_filter(function(c) return c.tag == "w:tc" end, tr.children)
+        local ps = cells[#cells] and vim.tbl_filter(function(c) return c.tag == "w:p" end, cells[#cells].children) or {}
+        local mark = ps[#ps] and xml.child(xml.child(xml.child(ps[#ps], "w:pPr") or {}, "w:rPr") or {}, "w:del")
+        return mark ~= nil and (ctx.made_here or {})[xml.attr(mark, "w:id") or ""] ~= nil
+      end
+      local function first(tag)
+        return vim.iter(xml.collect(tr, { [tag] = true })):find(function(e) return (ctx.made_here or {})[xml.attr(e, "w:id") or ""] end)
+      end
+      if mark_del and (live > 0 or inserted > 0) then -- (not all deleted any more)
+        xml.remove(mark_del)
+      elseif not mark_del and not mark_ins and deleted > 0 and live == 0 and inserted == 0 and ours_del and row_end_deleted() then
+        mark("w:del", first("w:del"))
+      end
+      if mark_ins and (live > 0 or deleted > 0) then
+        xml.remove(mark_ins)
+      elseif not mark_ins and not mark_del and not ctx.rows_at_open[tr] and inserted > 0 and live == 0 and deleted == 0 and ours_ins then
+        mark("w:ins", first("w:ins"))
+      end
+      if trpr and #trpr.children == 0 and not ctx.rows_at_open[tr] then
+        xml.remove(trpr)
+      end
+    end
+  end
+end
+
+-- The body's last paragraph: there must be one after a table that ends it (Word always has one;
+-- LibreOffice may not open the file without it), as when the paragraphs after it were deleted.
+local function end_with_paragraph(ctx)
+  local body = xml.find(ctx.root, "w:body")
+  local last
+  for _, c in ipairs(body and body.children or {}) do
+    if c.tag == "w:p" or c.tag == "w:tbl" or c.tag == "w:sdt" or c.tag == "w:customXml" then
+      last = c
+    end
+  end
+  if last and last.tag == "w:tbl" then
+    local section = xml.child(body, "w:sectPr")
+    xml.append(body, xml.elem("w:p"), section and xml.index(section) or nil)
+  end
+end
+
 function M.save(ctx, live)
+  if ctx.dirty[M.MAIN] then
+    end_with_paragraph(ctx)
+  end
+  track_rows(ctx)
+  ctx.filled = nil
+  ctx.mark_ids = nil -- (the paragraph marks' ids given in this save: see M.fill)
   resolve_marks(ctx, live.mark_decisions or {})
   save_comments(ctx, live.comments)
   -- footnotes whose reference was deleted go too

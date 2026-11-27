@@ -256,28 +256,97 @@ local function rebuilt(path, entries)
   return table.concat(parts) .. dir .. tail
 end
 
+-- A file put in place of `target` only once it is all there, as it should be: written beside it
+-- (`tmp`), read back and checked (check(path) -> true, or nil and why), then renamed over it.
+-- Through a symbolic link, the file it points to; with the permissions the file had.
+local function real(target)
+  return vim.uv.fs_realpath(target) or target
+end
+local function put(tmp, target, check)
+  local ok, why = check(tmp)
+  if not ok then
+    os.remove(tmp)
+    error(("the file written (%s) isn't right: %s; nothing was changed"):format(tmp, why or "?"))
+  end
+  local was = vim.uv.fs_stat(target)
+  if was then
+    vim.uv.fs_chmod(tmp, bit.band(was.mode, 4095))
+  end
+  local renamed, err = os.rename(tmp, target)
+  if not renamed then
+    os.remove(tmp)
+    error(("could not put %s in place: %s"):format(target, err or "?"))
+  end
+end
+local function bytes_of(path)
+  local f = io.open(path, "rb")
+  if not f then
+    return nil
+  end
+  local data = f:read("*a")
+  f:close()
+  return data
+end
+local function write_file(path, data) -- (all of it, or an error: a full disk shows when closing too)
+  local f, err = io.open(path, "wb")
+  if not f then
+    error(("could not write %s: %s"):format(path, err or "?"))
+  end
+  local ok, werr = f:write(data)
+  local closed, cerr = f:close()
+  if not ok or not closed then
+    os.remove(path)
+    error(("could not write %s: %s"):format(path, werr or cerr or "?"))
+  end
+end
+
+-- Copy a file over another, as put() does: the copy compared with the file, byte for byte.
+function M.copy(path, target)
+  target = real(target)
+  local data = assert(bytes_of(path), "could not read " .. path)
+  local tmp = target .. ".neoffice~"
+  write_file(tmp, data)
+  put(tmp, target, function(file)
+    local back = bytes_of(file)
+    return back == data, "it isn't the same as what was copied"
+  end)
+end
+
+-- (an archive written: it reads, has the entries it should, and those written read back as they were)
+local function readable(file, bytes, entries)
+  local back = bytes_of(file)
+  if back ~= bytes then
+    return nil, "it isn't what was written (a full disk?)"
+  end
+  cache.key = nil -- (read again: not the archive this was made from)
+  local a = archive(file)
+  if not a then
+    return nil, "it can't be read as a zip archive"
+  end
+  for name, content in pairs(entries) do
+    local ok, got = pcall(M.read, file, name)
+    if not ok or (got or "") ~= content then
+      return nil, ("%s doesn't read back as it was written"):format(name)
+    end
+  end
+  return true
+end
+
 -- Replace or add entries ({ [name] = content }) and write the result to `target` (default: `path`).
 -- Works on a copy that is renamed over the target at the end, so a failure never damages the file.
 function M.write(path, entries, target)
-  target = target or path
+  target = real(target or path)
   if next(entries) == nil then -- nothing changed: leave the file alone (or just copy it)
-    if target ~= path then
-      assert(vim.uv.fs_copyfile(path, target .. ".neoffice~"))
-      assert(os.rename(target .. ".neoffice~", target))
+    if target ~= real(path) then
+      M.copy(path, target)
     end
     return
   end
   local tmp = target .. ".neoffice~"
   local ok, bytes = pcall(rebuilt, path, entries)
   if ok and bytes then
-    local f = assert(io.open(tmp, "wb"))
-    local written = f:write(bytes)
-    f:close()
-    if not written then
-      os.remove(tmp)
-      error("could not write " .. tmp)
-    end
-    assert(os.rename(tmp, target))
+    write_file(tmp, bytes)
+    put(tmp, target, function(file) return readable(file, bytes, entries) end)
     return
   end
   local dir, names = vim.fn.tempname(), {}
@@ -296,7 +365,19 @@ function M.write(path, entries, target)
     os.remove(tmp)
     error("zip failed: " .. r.stderr)
   end
-  assert(os.rename(tmp, target))
+  put(tmp, target, function(file) -- (as unzip reads it)
+    local t = vim.system({ "unzip", "-tq", file }):wait()
+    if t.code ~= 0 then
+      return nil, "unzip finds it broken"
+    end
+    for name, content in pairs(entries) do
+      local got = vim.system({ "unzip", "-p", file, (name:gsub("%[", "[[]")) }):wait()
+      if got.code ~= 0 or got.stdout ~= content then
+        return nil, ("%s doesn't read back as it was written"):format(name)
+      end
+    end
+    return true
+  end)
 end
 
 return M

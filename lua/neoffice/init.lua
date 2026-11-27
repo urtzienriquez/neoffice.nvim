@@ -104,6 +104,10 @@ function M.place(buf, kind, data, r1, c1, r2, c2)
   end
   local id = api.nvim_buf_set_extmark(buf, M.ns[kind], r1, c1, opts)
   M.docs[buf][kind][id] = data
+  if kind == "comment" and M.docs[buf].ctx then -- (shown: one deleted from the buffer goes from the document)
+    M.docs[buf].ctx.shown_comments = M.docs[buf].ctx.shown_comments or {}
+    M.docs[buf].ctx.shown_comments[data] = true
+  end
   if kind == "change" then -- (see changes.lua: changed)
     M.docs[buf].change_version = (M.docs[buf].change_version or 0) + 1
   end
@@ -126,6 +130,7 @@ end
 function M.paragraphs(lines, alone)
   alone = alone or {}
   local out, blanks, table_start, formats, options = {}, {}, nil, {}, {}
+  local dashes_seen = {} -- (the tables whose line of dashes was found: see markup.is_dashes)
   local box, box_of_row, cut = nil, {}, false -- (cut: a box's line came just before: no paragraph goes on across it)
   local format, fenced = { attrs = {} }, false -- (the paragraphs' format: see paras.lua; fenced: a format's line came last)
   local function empty_after() -- (how many blank lines after a paragraph, or a format's line, separate)
@@ -136,7 +141,8 @@ function M.paragraphs(lines, alone)
   end
   local function empty_paragraphs(from)
     for k = from, #blanks do
-      out[#out + 1] = { first = blanks[k], last = blanks[k], text = "", format = format }
+      -- (around: the blank lines it is among and the lines on either side, what makes it one: see touched)
+      out[#out + 1] = { first = blanks[k], last = blanks[k], text = "", format = format, around = { blanks[1] - 1, blanks[#blanks] + 1 } }
     end
     blanks = {}
   end
@@ -197,7 +203,11 @@ function M.paragraphs(lines, alone)
       goto continue
     end
     table_start = line:match("^|") and (#blanks == 0 and table_start or row) or nil
-    local cells = table_start and markup.cells(line, row == table_start + 1) -- (dashes: under the first row)
+    local dashes = table_start and markup.is_dashes(lines, table_start, row, dashes_seen[table_start]) -- (see markup.is_dashes)
+    local cells = table_start and not dashes and markup.cells(line) or nil
+    if dashes then
+      dashes_seen[table_start] = true
+    end
     if cells and #cells == 0 then -- (a "|" alone: text)
       cells, table_start = false, nil
     end
@@ -249,6 +259,9 @@ function M.paragraphs(lines, alone)
   empty_paragraphs(1)
   if section and #out > section.count then
     out[section.count + 1].section, section = section, nil
+  end
+  if box then -- (a box never closed: what follows it would all go into it; said when saving)
+    out.unclosed_box = box.start
   end
   if section then -- (nothing after it: said when saving)
     section.bad = "nothing after a section's line: a section needs a paragraph (delete the line to join it to the one before)"
@@ -520,6 +533,61 @@ local function table_fonts(buf, para)
   return out
 end
 
+-- Where each comment starts and ends, as a save writes it: where a paragraph can take it. A start
+-- (or an end) on a table's "|", in the spaces around a cell's text, on its line of dashes or on a
+-- line that is no paragraph's goes to the nearest place that is one's: a start forward, an end
+-- back; one that would then end before it starts is at a point. { [mark id] = { r1, c1, r2, c2 } }
+local function settle_comments(buf, blocks)
+  local slots = {} -- (in order: what each paragraph takes, from a position to a position)
+  for _, b in ipairs(blocks) do
+    if b.cell then
+      slots[#slots + 1] = { b.first - 1, b.col, b.first - 1, b.stop }
+    else
+      local last = api.nvim_buf_get_lines(buf, b.owns - 1, b.owns, false)[1] or ""
+      slots[#slots + 1] = { b.first - 1, 0, b.owns - 1, #last }
+    end
+  end
+  local function before(r1, c1, r2, c2) -- (r1, c1 strictly before r2, c2)
+    return r1 < r2 or r1 == r2 and c1 < c2
+  end
+  local out = {}
+  if #slots == 0 then
+    return out
+  end
+  for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.comment, 0, -1, { details = true })) do
+    local r1, c1, r2, c2 = m[2], m[3], m[4].end_row or m[2], m[4].end_col or m[3]
+    local point = r1 == r2 and c1 == c2
+    local s1, t1 -- (the start: the first slot that ends at or after it)
+    for _, sl in ipairs(slots) do
+      if not before(sl[3], sl[4], r1, c1) then
+        s1, t1 = before(r1, c1, sl[1], sl[2]) and sl[1] or r1, before(r1, c1, sl[1], sl[2]) and sl[2] or c1
+        break
+      end
+    end
+    if not s1 then
+      s1, t1 = slots[#slots][3], slots[#slots][4]
+    end
+    local s2, t2 = s1, t1
+    if not point then -- (the end: the last slot that starts at or before it)
+      s2, t2 = nil, nil
+      for k = #slots, 1, -1 do
+        local sl = slots[k]
+        if not before(r2, c2, sl[1], sl[2]) then
+          s2, t2 = before(sl[3], sl[4], r2, c2) and sl[3] or r2, before(sl[3], sl[4], r2, c2) and sl[4] or c2
+          break
+        end
+      end
+      if not s2 or before(s2, t2, s1, t1) then
+        s2, t2 = s1, t1
+      end
+    end
+    if s1 ~= r1 or t1 ~= c1 or s2 ~= r2 or t2 ~= c2 then
+      out[m[1]] = { s1, t1, s2, t2 }
+    end
+  end
+  return out
+end
+
 -- (new: a paragraph the document hasn't yet, whose text takes the formatting of the one next to it)
 local function pieces(buf, para, new)
   local doc = M.docs[buf]
@@ -604,15 +672,37 @@ local function pieces(buf, para, new)
           lo = mid + 1
         end
       end
+      local before = chars[lo - 1]
+      if piece.comment_start and before and before.len and (before.end_row > r or before.end_row == r and before.end_col > c) then
+        lo = lo - 1 -- (a comment starting inside a footnote's text, an image...: on it, not after it)
+      end
       events[#events + 1] = { lo, rank, #events, piece }
+      return events[#events]
     end
   end
-  for _, m in ipairs(marks("comment")) do
+  local comment_marks, listed = marks("comment"), {}
+  for _, m in ipairs(comment_marks) do
+    listed[m[1]] = true
+  end
+  for id, at in pairs(doc.comment_at or {}) do -- (and those settled here from where no paragraph is: see settle_comments)
+    if not listed[id] and (at[1] <= para.owns - 1 and at[3] >= para.first - 1) then
+      local m = api.nvim_buf_get_extmark_by_id(buf, M.ns.comment, id, { details = true })
+      if m[1] then
+        comment_marks[#comment_marks + 1] = { id, m[1], m[2], m[3] }
+      end
+    end
+  end
+  for _, m in ipairs(comment_marks) do
     local c, d = doc.comment[m[1]], m[4]
-    local point = m[2] == d.end_row and m[3] == d.end_col
-    event(m[2], m[3], 3, { comment_start = c, point = point })
+    local at = doc.comment_at and doc.comment_at[m[1]] or { m[2], m[3], d.end_row, d.end_col } -- (see settle_comments)
+    local point = at[1] == at[3] and at[2] == at[4]
+    local start = event(at[1], at[2], 3, { comment_start = c, point = point })
     if not point then
-      event(d.end_row, d.end_col, 1, { comment_end = c })
+      local stop = event(at[3], at[4], 1, { comment_end = c })
+      if start and stop and stop[1] <= start[1] then -- (nothing between them: at a point, never ended before it starts)
+        start[4].point = true
+        events[#events] = nil
+      end
     end
   end
   -- a deletion is the text it covers (shown struck through; ¶ for a paragraph break)
@@ -650,6 +740,19 @@ local function pieces(buf, para, new)
       event(m[2], m[3], 2, { deletion = m[5], deleted = "", part = 0 })
     elseif m[5].type == "delete" then
       -- (written with the text, below)
+    elseif para.cell then -- (in a table's cell: what of it is in the cell, a row inserted whole too)
+      local row, col, stop = para.first - 1, para.col or 0, para.stop or para.col or 0
+      local sr, sc, er, ec = m[2], m[3], m[4].end_row, m[4].end_col
+      if sr < row or sr == row and sc < col then
+        sr, sc = row, col
+      end
+      if er > row or er == row and ec > stop then
+        er, ec = row, stop
+      end
+      if sr == row and er == row and sc < ec then
+        event(sr, sc, 3, { insert_start = m[5] })
+        event(er, ec, 1, { insert_end = m[5] })
+      end
     else
       event(m[2], m[3], 3, { insert_start = m[5] })
       event(m[4].end_row, m[4].end_col, 1, { insert_end = m[5] })
@@ -756,7 +859,13 @@ local function pieces(buf, para, new)
     if deletion then -- deleted text: the deletion's part here (continuing, unless something came between)
       local last, char = out[#out], ch.ch == "¶" and not ch.esc and "\n" or ch.ch
       if not (last and last.deletion == deletion[5]) then
-        parts[deletion[5]] = (parts[deletion[5]] or (deletion[2] < para.first - 1 and 1 or 0)) + 1
+        -- (the first part, the change itself, only where the deletion starts: in a table, a cell after
+        -- it on its row is another part, as the next row's cells are)
+        local first = doc.change_first and doc.change_first[deletion[5]] -- (and only its first mark's: one deletion
+        -- shown in several places, a cell's text each, has its text written once; see M.save)
+        local starts_before = deletion[2] < para.first - 1 or deletion[2] == para.first - 1 and para.cell ~= nil and deletion[3] < (para.col or 0)
+          or first ~= nil and (first[1] < deletion[2] or first[1] == deletion[2] and first[2] < deletion[3])
+        parts[deletion[5]] = (parts[deletion[5]] or (starts_before and 1 or 0)) + 1
         last = { deletion = deletion[5], deleted = "", part = parts[deletion[5]] - 1, segs = {} }
         out[#out + 1] = last
       end
@@ -909,12 +1018,21 @@ local function pieces(buf, para, new)
       piece.text = table.concat(piece.text)
     end
   end
-  -- an insertion (deletion) running past the end of the paragraph inserted (deleted) its break too
+  -- an insertion (deletion) running past the end of the paragraph inserted (deleted) its break too:
+  -- if it has all of the paragraph, from its start, or runs over the blank line after it (a line
+  -- inserted, or deleted, at the end of a paragraph of several lines, the blank line after it as it
+  -- was, is that line only: the paragraph's break stays)
   local stop = { para.last - 1, para.stop or #lines[#lines] }
+  local start = { para.first - 1, para.col or 0 }
+  local after = api.nvim_buf_get_lines(buf, para.last, para.last + 1, false)[1]
+  local blank_after = not para.cell and after ~= nil and after:match("^%s*$") ~= nil
   for _, m in ipairs(changes) do
     local d = m[4]
     local before_end = m[2] < stop[1] or m[2] == stop[1] and m[3] <= stop[2]
-    if m[5].type ~= "format" and before_end and (d.end_row > stop[1] or d.end_row == stop[1] and d.end_col > stop[2]) then
+    local past_end = d.end_row > stop[1] or d.end_row == stop[1] and d.end_col > stop[2]
+    local whole = m[2] < start[1] or m[2] == start[1] and m[3] <= start[2]
+    local over_blank = not blank_after or d.end_row > para.last or d.end_row == para.last and d.end_col > 0
+    if m[5].type ~= "format" and before_end and past_end and (para.cell or whole or over_blank) then
       out[#out + 1] = { paragraph_mark = m[5] }
     end
   end
@@ -984,7 +1102,11 @@ local function match_key(text, col)
   return col and (text .. "\1" .. col) or text
 end
 local function block_keys(blocks)
-  return vim.tbl_map(function(b) return match_key(b.text, b.cell and b.cell.col) end, blocks)
+  local out = {} -- (the paragraphs only: blocks also say what follows them, an unclosed box...)
+  for k, b in ipairs(blocks) do
+    out[k] = match_key(b.text, b.cell and b.cell.col)
+  end
+  return out
 end
 local function context_key(block)
   return table.concat({ block.format and pformat.key(block.format) or "", block.box and block.box.attrs or "",
@@ -992,8 +1114,14 @@ local function context_key(block)
 end
 -- (whether rows changed since the fingerprints were taken cover a paragraph)
 local function touched(doc, block)
+  -- (an empty paragraph, a blank line: whether it is one, or the line between two paragraphs, depends
+  -- on the lines around it too: an edit next to it touches it)
+  local first, last = block.first - 1, block.owns - 1
+  if block.text == "" then
+    first, last = (block.around and block.around[1] or block.first - 1) - 1, (block.around and block.around[2] or block.last + 1) - 1
+  end
   for _, r in ipairs(doc.touched or {}) do
-    if r[1] <= block.owns - 1 and r[2] >= block.first - 1 then
+    if r[1] <= last and r[2] >= first then
       return true
     end
   end
@@ -1273,13 +1401,37 @@ local function separator(text)
   return ""
 end
 local function find_captions(paras)
+  -- (an insertion's or a comment's start or end among them: stepped over, and kept where it is, as
+  -- when the caption was typed with changes tracked)
+  local function marker(s) -- (where a deletion starts: not, what follows is deleted, no caption's)
+    return s.insert_end or s.insert_start and s.insert_start.type ~= "delete" or s.comment_start or s.comment_end
+  end
+  local function plain(s) -- (text, not deleted)
+    return s.text and not s.deletion and not s.object
+  end
   for _, para in ipairs(paras) do
     local block, spans = para.block, para.spans
     if not (block.heading or block.title or block.quote or block.list) then
+      -- (deleted text before it, a paragraph deleted and joined to it, changes tracked: stepped over,
+      -- kept where it is)
+      local k = 1
+      while spans[k] and (spans[k].deletion or spans[k].insert_start and spans[k].insert_start.type == "delete") do
+        if spans[k].deletion then
+          k = k + 1
+        else
+          local ch = spans[k].insert_start
+          k = k + 1
+          while spans[k] and spans[k].insert_end ~= ch do
+            k = k + 1
+          end
+          k = k + 1
+        end
+      end
+      local skipped = k - 1
       -- the text before the first thing that isn't text, and that thing
-      local lead, k = "", 1
-      while spans[k] and spans[k].text and not spans[k].deletion and not spans[k].object do
-        lead, k = lead .. spans[k].text, k + 1
+      local lead = ""
+      while spans[k] and (marker(spans[k]) or plain(spans[k])) do
+        lead, k = lead .. (spans[k].text or ""), k + 1
       end
       local word, rest = lead:match("^%s*(%S+)%s+(.*)$")
       local kind = word and markup.caption_kind(word)
@@ -1288,14 +1440,16 @@ local function find_captions(paras)
       if kind and rest == "" and field and field.seq and markup.caption_kind(field.seq) == kind then
         -- "Table " + its number + the separator, in the text after
         local after, j = "", k + 1
-        while spans[j] and spans[j].text and not spans[j].object and not spans[j].deletion do
-          after, j = after .. spans[j].text, j + 1
+        while spans[j] and (marker(spans[j]) or plain(spans[j])) do
+          after, j = after .. (spans[j].text or ""), j + 1
         end
         local sep = separator(after)
         block.caption, block.caption_sep = kind, sep ~= "" and sep or nil
         block.caption_label, block.caption_seq = word, field.seq
-        for _ = 1, k do
-          table.remove(spans, 1)
+        for i = k, skipped + 1, -1 do -- (the word and the number; the markers stay)
+          if not marker(spans[i]) then
+            table.remove(spans, i)
+          end
         end
         cut = #sep
       elseif kind and block.caption_style and rest:match("^%d+") then -- "Table 1. ", written
@@ -1307,11 +1461,16 @@ local function find_captions(paras)
           cut = #lead - #rest + #number + #sep
         end
       end
-      while cut and cut > 0 and spans[1] and spans[1].text and not spans[1].object do -- (from the text spans)
-        local n = math.min(cut, #spans[1].text)
-        spans[1].text, cut = spans[1].text:sub(n + 1), cut - n
-        if spans[1].text == "" then
-          table.remove(spans, 1)
+      local i = skipped + 1
+      while cut and cut > 0 and spans[i] and (marker(spans[i]) or spans[i].text and not spans[i].object) do -- (from the text spans)
+        if marker(spans[i]) then
+          i = i + 1
+        else
+          local n = math.min(cut, #spans[i].text)
+          spans[i].text, cut = spans[i].text:sub(n + 1), cut - n
+          if spans[i].text == "" then
+            table.remove(spans, i)
+          end
         end
       end
     end
@@ -1389,6 +1548,49 @@ end
 -- neoffice works on its own copy of the document (the base: a .docx for .doc files, the template
 -- for a new one), and copies it to the file when writing. So saving never depends on the file
 -- staying where it was, and a file deleted meanwhile is simply written again.
+-- Whether the file seems open in Word or LibreOffice: their lock files beside it ("~$name.docx",
+-- with the name's first two letters dropped when long, "~$" before it when short; LibreOffice's
+-- ".~lock.name.docx#"). Their save would undo what is written here, and the other way round.
+local function open_elsewhere(path)
+  local dir, name = vim.fs.dirname(path), vim.fs.basename(path)
+  for _, lock in ipairs({ "~$" .. name:sub(3), "~$" .. name, ".~lock." .. name .. "#" }) do
+    if vim.uv.fs_stat(vim.fs.joinpath(dir, lock)) then
+      return lock
+    end
+  end
+end
+local function warn_elsewhere(path, doing)
+  local lock = open_elsewhere(path)
+  if lock then
+    vim.notify(("neoffice: %s seems open in %s too (%s is beside it): a save there would undo what you %s here, and the other way round"):format(
+      vim.fs.basename(path), lock:find("^%.~lock") and "LibreOffice" or "Word", lock, doing), vim.log.levels.WARN)
+  end
+end
+
+-- What opening should tell, for a document neoffice edits but can't keep as it is in every way: a
+-- signed one (a change saved makes its signature invalid), one protected in Word (neoffice doesn't
+-- keep you to the parts it lets you edit: Word may flag changes elsewhere).
+local function warn_kept(base, path)
+  local entries = zip.list(base) or {}
+  local signed = false
+  for name in pairs(entries) do
+    signed = signed or name:find("^_xmlsignatures/") ~= nil or name == "META-INF/documentsignatures.xml"
+  end
+  local said = {}
+  if signed then
+    said[#said + 1] = "it is digitally signed: a change you save makes its signature invalid"
+  end
+  local settings = entries["word/settings.xml"] and zip.read(base, "word/settings.xml") or ""
+  local protection = settings:match("<w:documentProtection[^>]*>")
+  if protection and protection:find('w:enforcement="[1tTo]') then -- ("1", "true", "on")
+    local kind = protection:match('w:edit="(%w+)"') or "?"
+    said[#said + 1] = ("it is protected in Word (editing restricted: %s), which neoffice doesn't keep you to"):format(kind)
+  end
+  if #said > 0 then
+    vim.notify(("neoffice: %s: %s"):format(vim.fs.basename(path), table.concat(said, "; ")), vim.log.levels.WARN)
+  end
+end
+
 local function open(buf, path)
   local ext = path:match("%.(%w+)$"):lower()
   local new = not vim.uv.fs_stat(path) -- a new document: created on the first :w
@@ -1414,6 +1616,15 @@ local function open(buf, path)
   end
   local fmt = require("neoffice." .. (ext == "doc" and "docx" or ext))
   local ctx, paras = fmt.load(base)
+  ctx.integrity = fmt.integrity and fmt.integrity(ctx) or {} -- (as opened: see M.save)
+  ctx.bookmarks = M.paired_bookmarks(ctx.root) -- (those with both ends: kept so, see pair_bookmarks)
+  if fmt.unique_drawings then
+    fmt.unique_drawings(ctx)
+  end
+  if not new then
+    warn_elsewhere(path, "write")
+    warn_kept(base, path)
+  end
   if (ctx.nested_tables or 0) > 0 then
     vim.notify("neoffice: a table inside a table's cell isn't shown; it is kept as it is", vim.log.levels.WARN)
   end
@@ -1446,6 +1657,20 @@ local function open(buf, path)
         aligns[cell.tbl] = aligns[cell.tbl] or {}
         local have, align = aligns[cell.tbl][column[k]], para.block.align or "left"
         aligns[cell.tbl][column[k]] = (have == nil or have == align) and align or false
+      end
+    end
+    -- (a cell's last paragraph's break inserted or deleted, a row inserted or deleted: not shown as a
+    -- change of the "|" after it, or of its line's end, which accepting or rejecting would cut: a
+    -- cell's end stays where it is)
+    for k, para in ipairs(paras) do
+      local cell, nxt = cells[k], cells[k + 1]
+      local last = para.spans[#para.spans]
+      if cell and not (nxt and nxt.tc == cell.tc) and last and last.insert_start and not last.text then
+        table.remove(para.spans)
+        local first = paras[k + 1] and paras[k + 1].spans[1]
+        if first and first.insert_end == last.insert_start then
+          table.remove(paras[k + 1].spans, 1)
+        end
       end
     end
     for k, para in ipairs(paras) do
@@ -1600,8 +1825,8 @@ local function open(buf, path)
       elseif s.line_break or s.page_break then
         s.object = nil
       end
-      if s.deletion then -- (shown in the text, struck through; a paragraph break as ¶¶)
-        s.text = s.deletion.text:gsub("\n", "¶¶")
+      if s.deletion then -- (shown in the text, struck through; a paragraph break as ¶, see markup.DELETED_BREAK)
+        s.text = s.deletion.text:gsub("\n", markup.DELETED_BREAK)
         s.deletion.no_text = s.text == "" or nil -- (a deleted image, tab...: a point, kept as it is)
       elseif s.text then
         s.text = s.text:gsub("\n", " ")
@@ -1610,6 +1835,17 @@ local function open(buf, path)
       end
     end
     texts[k], cols[k] = markup.render(para.spans, para.block)
+    if cells[k] and texts[k]:find("^%s") or cells[k] and texts[k]:find("%s$") then
+      -- (a cell's text as its row reads it: no spaces around it, even before a break or a tab not
+      -- shown; the paragraph keeps them, written as it was unless it is edited)
+      local lead = #texts[k]:match("^%s*")
+      local trimmed = texts[k]:sub(lead + 1):gsub("%s+$", "")
+      for _, c in pairs(cols[k]) do
+        c[1] = math.max(0, math.min(c[1] - lead, #trimmed))
+        c[2] = math.max(0, math.min(c[2] - lead, #trimmed))
+      end
+      texts[k] = trimmed
+    end
     last_text = (texts[k] ~= "" or cells[k]) and k or last_text
     doc.paras[k] = para.node
     doc.caption_seps[k] = para.block.caption_sep
@@ -1810,7 +2046,9 @@ local function open(buf, path)
         while starts[row] > col or ends and row > 1 and starts[row] == col and joins[row - 1] == 0 do
           row = row - 1
         end
-        return r + row - 1, col - starts[row]
+        -- (never past its line's end: after a line break that ends the paragraph, shown as the "\" that
+        -- ends its line, with no line after it: a tracked one, or a range that ends after it)
+        return r + row - 1, math.min(col - starts[row], #(lines[r + row] or ""))
       end
       local next_list = paras[k + 1] and paras[k + 1].block.list
       local tight = para.block.list and next_list and (next_list.group or next_list.id) == (para.block.list.group or para.block.list.id)
@@ -2721,7 +2959,9 @@ function M.finish_sigs(buf)
   for k, block in ipairs(blocks) do
     local o = old_of[k]
     -- (and its format still as opened: a format's line above it changes it, not its rows)
-    if o and o >= p.next and doc.sigs[o] == nil and not touched(doc, block) and context_key(block) == context_key(p.blocks[o]) then
+    -- (and its text as opened: the lines matched may pair it with another paragraph)
+    if o and o >= p.next and doc.sigs[o] == nil and block.text == p.blocks[o].text and not touched(doc, block)
+      and context_key(block) == context_key(p.blocks[o]) then
       doc.sigs[o], doc.ctx_keys[o] = signature(pieces(buf, block)), context_key(p.blocks[o])
     end
   end
@@ -2762,7 +3002,8 @@ function M.finish_sigs_later(buf, delay) -- (delay: until the next few, if not a
       local block, o = map.blocks[map.next], map.old_of[map.next]
       map.next = map.next + 1
       -- (as in M.finish_sigs)
-      if o and o >= p.next and doc.sigs[o] == nil and not touched(doc, block) and context_key(block) == context_key(p.blocks[o]) then
+      if o and o >= p.next and doc.sigs[o] == nil and block.text == p.blocks[o].text and not touched(doc, block)
+        and context_key(block) == context_key(p.blocks[o]) then
         doc.sigs[o], doc.ctx_keys[o] = signature(pieces(buf, block)), context_key(p.blocks[o])
       end
       if vim.uv.hrtime() > deadline then -- (the next few right after, unless typing goes on)
@@ -2809,9 +3050,89 @@ local function empty(el)
   return not vim.iter(el.children):any(function(c) return CONTENT[c.tag] end)
 end
 
+-- A bookmark's ends (Word's and LibreOffice's): the other end's tag, and what names the bookmark.
+local BOOKMARK_ENDS = {
+  ["w:bookmarkStart"] = { "w:bookmarkEnd", "w:id" }, ["w:bookmarkEnd"] = { "w:bookmarkStart", "w:id" },
+  ["text:bookmark-start"] = { "text:bookmark-end", "text:name" }, ["text:bookmark-end"] = { "text:bookmark-start", "text:name" },
+}
+
+-- The bookmarks with both their ends in the document: { [start tag .. " " .. id] = a copy of its start }.
+local function paired_bookmarks(root)
+  local seen, out = {}, {}
+  for _, el in ipairs(xml.collect(root, BOOKMARK_ENDS)) do
+    local other, key = unpack(BOOKMARK_ENDS[el.tag])
+    local id = xml.attr(el, key) or ""
+    seen[el.tag .. " " .. id] = el
+    local start = el.tag:match("[Ss]tart$") and el or seen[other .. " " .. id]
+    if seen[other .. " " .. id] then
+      out[start.tag .. " " .. id] = xml.copy(start)
+    end
+  end
+  return out, seen
+end
+M.paired_bookmarks = paired_bookmarks -- (at open: see M.open)
+
+-- A bookmark that had both its ends and lost one (its paragraph written again without it): the other
+-- end put back, in the paragraph of the one left (at its end, or at its start), so it has both.
+local function pair_bookmarks(root, paired)
+  local _, seen = paired_bookmarks(root)
+  for key in pairs(paired or {}) do
+    local start = seen[key]
+    local start_tag, id = key:match("^(%S+) (.*)$")
+    local end_tag, name = unpack(BOOKMARK_ENDS[start_tag])
+    local stop = seen[end_tag .. " " .. id]
+    local left = (start == nil) ~= (stop == nil) and (start or stop)
+    local p = left
+    while p and not PARAGRAPHS[p.tag] do
+      p = p.parent
+    end
+    if p then
+      if start then -- (its end, at the end of the start's paragraph)
+        xml.append(p, xml.elem(end_tag, { { name, id } }))
+      else -- (its start as it was, at the start of the end's paragraph: after its properties)
+        local first = 1
+        while p.children[first] and (p.children[first].tag == "w:pPr") do
+          first = first + 1
+        end
+        xml.append(p, xml.copy(paired[key]), first)
+      end
+    end
+  end
+end
+
 -- Remove deleted paragraphs. An empty list item or list goes too; a table cell keeps an empty
 -- paragraph (it needs one), unless every paragraph of its table was deleted: then the table goes.
+-- (A bookmark's end in one, whose other end stays, goes to the nearest paragraph that stays: a
+-- bookmark over several paragraphs keeps both its ends; one over deleted paragraphs only goes.)
 local function remove_paragraphs(fmt, nodes)
+  local going, rescued = {}, {}
+  for _, node in ipairs(nodes) do
+    going[node] = true
+  end
+  for _, node in ipairs(nodes) do
+    local siblings = node.parent and node.parent.children or {}
+    local at = node.parent and xml.index(node)
+    for _, el in ipairs(at and xml.collect(node, BOOKMARK_ENDS) or {}) do
+      local near, after
+      for k = at + 1, #siblings do -- (the next paragraph that stays, else the one before)
+        if PARAGRAPHS[siblings[k].tag] and not going[siblings[k]] then
+          near, after = siblings[k], true
+          break
+        end
+      end
+      for k = at - 1, 1, -1 do
+        if near then
+          break
+        end
+        if PARAGRAPHS[siblings[k].tag] and not going[siblings[k]] then
+          near = siblings[k]
+        end
+      end
+      if near then
+        rescued[#rescued + 1] = { el = el, near = near, after = after }
+      end
+    end
+  end
   local cells = {}
   for _, node in ipairs(nodes) do
     local parent = node.parent
@@ -2844,14 +3165,44 @@ local function remove_paragraphs(fmt, nodes)
       end
     end
   end
+  if #rescued > 0 then
+    local root = rescued[1].near
+    while root.parent do
+      root = root.parent
+    end
+    local present = {} -- (the bookmarks' ends still in the document)
+    for _, el in ipairs(xml.collect(root, BOOKMARK_ENDS)) do
+      present[el.tag .. " " .. (xml.attr(el, BOOKMARK_ENDS[el.tag][2]) or "")] = true
+    end
+    for _, r in ipairs(rescued) do
+      local other, key = unpack(BOOKMARK_ENDS[r.el.tag])
+      local id = xml.attr(r.el, key) or ""
+      -- (its other end there, and itself not: written again already, its mark moved to a paragraph kept)
+      if present[other .. " " .. id] and not present[r.el.tag .. " " .. id] then
+        xml.remove(r.el)
+        if r.after then -- (at the start of the paragraph after it, after its properties)
+          local first = 1
+          while r.near.children[first] and (r.near.children[first].tag == "w:pPr") do
+            first = first + 1
+          end
+          xml.append(r.near, r.el, first)
+        else -- (at the end of the one before it)
+          xml.append(r.near, r.el)
+        end
+        present[r.el.tag .. " " .. id] = true
+      end
+    end
+  end
   for cell, template in pairs(cells) do
     local tbl = cell.parent
     while tbl and tbl.tag ~= "w:tbl" and tbl.tag ~= "table:table" do
       tbl = tbl.parent
     end
+    -- (Word's cell ends with a paragraph: not with a table in it, kept, its paragraphs around it deleted)
+    local last = vim.iter(cell.children):filter(function(c) return CONTENT[c.tag] end):last()
     if tbl and tbl.parent and #xml.collect(tbl, PARAGRAPHS) == 0 then
       xml.remove(tbl)
-    elseif empty(cell) and (not tbl or tbl.parent) then
+    elseif (empty(cell) or cell.tag == "w:tc" and last and last.tag ~= "w:p" and last.tag ~= "w:sdt" and last.tag ~= "w:customXml") and (not tbl or tbl.parent) then
       xml.append(cell, fmt.new_para(template, ctx))
     end
   end
@@ -3038,13 +3389,13 @@ local function align_numbers(buf, blocks, old_of)
 end
 
 function M.save(buf, target)
-  M.finish_sigs(buf)
   local doc = M.docs[buf]
   if not doc then
     return vim.notify("neoffice: This document wasn't opened correctly: not saving it", vim.log.levels.ERROR)
   end
   target = vim.fn.fnamemodify(target or doc.path, ":p")
   local ok, err = pcall(function()
+    M.finish_sigs(buf) -- (in here: whatever goes wrong, the file isn't written, and you are told)
     local ext = function(path) return (path:match("%.(%w+)$") or ""):lower() end
     if ext(target) ~= ext(doc.path) then
       error(("a .%s document can't be written as .%s (another format)"):format(ext(doc.path), ext(target)))
@@ -3060,7 +3411,22 @@ function M.save(buf, target)
     if #doc.paras == 0 and #blocks == 1 and blocks[1].text == "" then -- (still no paragraph)
       blocks = {}
     end
-    local texts = vim.tbl_map(function(p) return p.text end, blocks)
+    assert(not blocks.unclosed_box, blocks.unclosed_box and ("line %d: this box is never closed (a line \":::\" after its last paragraph closes it)"):format(blocks.unclosed_box))
+    for _, block in ipairs(blocks) do -- (a box holds paragraphs: a table in one would be taken apart)
+      assert(not (block.cell and block.box), block.cell and block.box and ("line %d: a table can't go in a box (\":::\"), only paragraphs can"):format(block.first))
+    end
+    doc.comment_at = settle_comments(buf, blocks)
+    doc.change_first = {} -- (where each deletion's first mark is: see pieces)
+    for _, m in ipairs(api.nvim_buf_get_extmarks(buf, M.ns.change, 0, -1, {})) do
+      local ch = doc.change[m[1]]
+      if ch and ch.type == "delete" and not doc.change_first[ch] then
+        doc.change_first[ch] = { m[2], m[3] }
+      end
+    end
+    local texts = {}
+    for k, p in ipairs(blocks) do
+      texts[k] = p.text
+    end
     local old_of, deleted = match_lines(doc.keys or doc.texts, block_keys(blocks))
     align_numbers(buf, blocks, old_of)
 
@@ -3133,13 +3499,31 @@ function M.save(buf, target)
 
     local plans, equations = {}, {}
     local reusable = not doc.all_dirty and not doc.untracked and not doc.tracking and next(restyle) == nil
+    local settled_on = {} -- (paragraphs a comment was moved to, see settle_comments: written again, with it)
+    if next(doc.comment_at or {}) then
+      for k, block in ipairs(blocks) do
+        for _, at in pairs(doc.comment_at) do
+          for _, pos in ipairs({ { at[1], at[2] }, { at[3], at[4] } }) do
+            local here = block.cell and pos[1] == block.first - 1 and pos[2] >= block.col and pos[2] <= block.stop
+              or not block.cell and pos[1] >= block.first - 1 and pos[1] <= block.owns - 1
+            settled_on[k] = settled_on[k] or here
+          end
+        end
+      end
+    end
     for k, block in ipairs(blocks) do
       assert(not (block.format and block.format.bad), block.format and block.format.bad) -- (its format's line: right)
       local o = old_of[k]
       if o and doc.texts[o] ~= block.text then -- (a mark it lost the other one of: see check_marks)
         check_marks(buf, block, doc.texts[o])
       end
-      if reusable and o and doc.texts[o] == block.text and doc.sigs[o] and doc.ctx_keys[o] == context_key(block) and not touched(doc, block) then
+      -- (an empty one too, unless it holds something, a bookmark...: empty lines all look alike, and
+      -- its marks may have gone with another's; its fingerprint, from what its rows hold, tells)
+      local bare = block.text ~= "" or not vim.iter(o and doc.paras[o] and doc.paras[o].children or {}):any(function(c)
+        return c.tag and c.tag ~= "w:pPr"
+      end)
+      if reusable and o and bare and doc.texts[o] == block.text and doc.sigs[o] and doc.ctx_keys[o] == context_key(block) and not touched(doc, block)
+        and not settled_on[k] then
         -- (as it was, its text, rows and format: its fingerprint as it was; its pieces only if needed)
         plans[k] = { old = o, lazy = block, sig = doc.sigs[o], cell = block.cell, box = block.box }
         goto planned
@@ -3195,6 +3579,7 @@ function M.save(buf, target)
       vim.list_extend(notes, c.replies)
     end
     local restore = checkpoint(ctx, notes)
+    local integrity_after
     local written, failure = pcall(function()
     -- (the other styles in use, not at the top, as they look: those based on one that changes
     -- keep it, as those at the top do; a footer's, a footnote's...)
@@ -3237,10 +3622,19 @@ function M.save(buf, target)
       return { cell = plan.cell, node = plan.old and doc.paras[plan.old] }
     end, plans), M.cell_of)
     local function outside(node) -- (the outermost table it is in, or itself; or a block content
-      -- control (a table of contents...) it ends: what comes after it goes after it)
+      -- control (a table of contents...) it ends: what comes after it goes after it; or the paragraph
+      -- its box is in, for one in a box: what goes next to it goes next to that paragraph, not in the box)
       local cell = M.cell_of(node)
       if cell then
         return outside(cell.tbl)
+      end
+      local box = doc.fmt.box_of and doc.fmt.box_of(node)
+      local up = box and box.parent
+      while up and not PARAGRAPHS[up.tag] do
+        up = up.parent
+      end
+      if up then
+        return outside(up)
       end
       local content, last = node.parent, nil
       for k = content and #content.children or 0, 1, -1 do -- (its last element)
@@ -3263,19 +3657,27 @@ function M.save(buf, target)
         boxes[plan.box], claimed[run] = run, true
       end
     end
+    -- (which were in a table's cell, asked before any is placed: the layout takes cells out of their
+    -- tables as it goes, those deleted from the buffer, and a paragraph that was in one may come later)
+    local was_in_cell = {}
+    for k, plan in ipairs(plans) do
+      was_in_cell[k] = plan.old and doc.paras[plan.old] and M.cell_of(doc.paras[plan.old]) ~= nil
+    end
     local outer -- (the last paragraph that isn't in a box)
     for k, plan in ipairs(plans) do
       local node = plan.old and doc.paras[plan.old]
       local prev_box = prev and box_of(prev)
-      local placed = layout:node({ cell = plan.cell, node = node, edited = not plan.old or plan.sig ~= doc.sigs[plan.old], empty = blocks[k].text == "" }, prev_box and outer or prev)
-      if node and (placed and placed ~= node or not placed and M.cell_of(node)) then
+      -- (where a new paragraph goes, after the one before it: asked before the layout takes a cell out)
+      local anchor = prev and outside(prev) or doc.paras[1] and outside(doc.paras[1])
+      local placed = layout:node({ cell = plan.cell, node = node, edited = not plan.old or plan.sig ~= doc.sigs[plan.old] or blocks[k].text ~= doc.texts[plan.old], empty = blocks[k].text == "" }, prev_box and outer or prev)
+      if node and (placed and placed ~= node or not placed and was_in_cell[k]) then
         deleted[#deleted + 1], plan.old, node = plan.old, nil, nil -- (moved into or out of a table cell)
       end
       node = placed or node
-      if node and box_of(node) ~= (plan.box and boxes[plan.box]) then -- (moved into or out of a box)
+      -- (moved into or out of a box; or into one that has no box in the document yet: a new one)
+      if node and (box_of(node) ~= (plan.box and boxes[plan.box]) or plan.box and not boxes[plan.box]) then
         deleted[#deleted + 1], plan.old, node = plan.old, nil, nil
       end
-      local anchor = prev and outside(prev) or doc.paras[1] and outside(doc.paras[1])
       if not node and plan.box then -- a new paragraph in a box (a new box, maybe)
         local run = boxes[plan.box]
         if not run then
@@ -3299,7 +3701,11 @@ function M.save(buf, target)
           xml.append(after.parent, node, xml.index(after) + 1)
         else
           local first = doc.paras[1] and outside(doc.paras[1])
-          xml.append(first.parent, node, xml.index(first))
+          if first then
+            xml.append(first.parent, node, xml.index(first))
+          else -- (the document had no paragraph at all)
+            node = doc.fmt.first_para(ctx)
+          end
         end
       elseif not node and not anchor then -- the document had no paragraph at all
         node = doc.fmt.first_para(ctx)
@@ -3314,7 +3720,8 @@ function M.save(buf, target)
       -- (a paragraph whose style changed: written again, so what it says of its own is against it)
       -- (not an empty one: its format isn't in the buffer, a blank line has none; it keeps its own)
       local restyled = next(restyle) and node and plan.old and not plan.cell and blocks[k].text ~= "" and restyle[doc.fmt.style_of(ctx, node)]
-      if not plan.old or plan.sig ~= doc.sigs[plan.old] or restyled then
+      -- (and one whose text isn't the old paragraph's: whatever its fingerprint says)
+      if not plan.old or plan.sig ~= doc.sigs[plan.old] or restyled or blocks[k].text ~= doc.texts[plan.old] then
         plan.written = true
         if not plan.pieces then -- (one taken as it was, written all the same: moved into a table, a box...)
           plan.block, plan.pieces = pieces(buf, plan.lazy, false)
@@ -3329,8 +3736,28 @@ function M.save(buf, target)
           plainly.insert = first and first.insert -- (a tracked insertion, as its text)
           seps[k] = seps[k] or (M.config.captions or {}).separator or ". "
           local number = as.number and vim.tbl_extend("force", plainly, { text = as.number })
-            or { object = doc.fmt.caption_number(ctx, as.seq or markup.captions()[kind]), visible = true }
-          list = vim.list_extend({ vim.tbl_extend("force", plainly, { text = label .. " " }), number, vim.tbl_extend("force", plainly, { text = seps[k] }) }, plan.pieces)
+            or { object = doc.fmt.caption_number(ctx, as.seq or markup.captions()[kind]), visible = true, insert = plainly.insert }
+          local labels = { vim.tbl_extend("force", plainly, { text = label .. " " }), number, vim.tbl_extend("force", plainly, { text = seps[k] }) }
+          list = vim.list_slice(plan.pieces)
+          local at = 1 -- (after deleted text before it, see find_captions; in its insertion, after where
+          -- it starts: rejecting it takes them away too)
+          while list[at] and (list[at].deletion or plainly.insert and (list[at].insert_start or list[at].comment_start)) do
+            at = at + 1
+          end
+          for n, piece in ipairs(labels) do
+            table.insert(list, at + n - 1, piece)
+          end
+          -- (all of it deleted, changes tracked, its break too: its word, number and separator deleted
+          -- with it, as text, the number it showed; else accepting it would leave them)
+          local mark = vim.iter(plan.pieces):find(function(p) return p.paragraph_mark and p.paragraph_mark.type == "delete" end)
+          local live = vim.iter(plan.pieces):any(function(p) return p.text and p.text ~= "" end)
+          local deleted = vim.iter(plan.pieces):any(function(p) return p.deletion end)
+          if mark and deleted and not live then
+            local shown = as.number or (node and require("neoffice.xml").text(node):match(vim.pesc(label) .. "%s*(%d+)")) or "1"
+            local ch = mark.paragraph_mark
+            local text = label .. " " .. shown .. seps[k]
+            list = vim.list_extend({ { deletion = { type = "delete", author = ch.author, date = ch.date, parent = ch }, deleted = text, part = 0, segs = { vim.tbl_extend("force", plainly, { text = text }) } } }, plan.pieces)
+          end
           written_as[k] = { label = as.label, seq = as.seq, number = as.number }
         end
         doc.fmt.fill(ctx, node, plan.block, list)
@@ -3375,6 +3802,23 @@ function M.save(buf, target)
           j = j + 1
         end
         local at = plans[j] and paras[j] or doc.fmt.first_para(ctx)
+        if plans[k + 1] and plans[k + 1].cell and paras[k + 1] then
+          -- (a table right after it: in a paragraph of its own before the table, not in the one after
+          -- the table, where it would show: the one it is in already, if that is it)
+          local tbl = outside(paras[k + 1])
+          local here = run.parent
+          while here and not PARAGRAPHS[here.tag] do
+            here = here.parent
+          end
+          local mine = here and not vim.tbl_contains(paras, here) and tbl.parent == here.parent
+            and xml.index(here) == xml.index(tbl) - 1
+          if mine then
+            at = here
+          else
+            at = doc.fmt.new_para(plain or doc.paras[1], ctx)
+            xml.append(tbl.parent, at, xml.index(tbl))
+          end
+        end
         doc.fmt.attach_box(ctx, run, at)
         local key = floats.key(plan.box.parsed)
         local written = made[run] or doc.boxes[run] ~= key
@@ -3421,7 +3865,33 @@ function M.save(buf, target)
     for _, ch in pairs(doc.change) do
       live.changes[ch] = true
     end
+    -- (never a document with more of what Word or LibreOffice would repair than it had: a bookmark
+    -- twice, a cell without its paragraph...; then nothing is written)
+    -- (every paragraph of the buffer with something in it in the document: none lost, as one left in
+    -- a table's cell that was taken out would be; then nothing is written. An empty one may go: an
+    -- empty cell beyond the table's columns, padding)
+    for k, node in ipairs(paras) do
+      local top = node
+      while top.parent do
+        top = top.parent
+      end
+      assert(top == ctx.root or blocks[k] and blocks[k].text == "", ("neoffice would have lost the text at line %d (this is a bug in neoffice, please report it)"):format(blocks[k] and blocks[k].first or 0))
+    end
+    pair_bookmarks(ctx.root, ctx.bookmarks)
+    if doc.fmt.unique_drawings then
+      doc.fmt.unique_drawings(ctx)
+    end
     local entries, trees = doc.fmt.save(ctx, live)
+    for _, c in ipairs(doc.fmt.comment_kept and live.comments or {}) do -- (every comment you see: in the document)
+      assert(doc.fmt.comment_kept(ctx, c), ("neoffice would have lost the comment \"%s\" (this is a bug in neoffice, please report it)"):format(vim.fn.strcharpart(c.text or "", 0, 40)))
+    end
+    if doc.fmt.integrity then -- (after the comments, notes... are saved too: all that is written)
+      local now = doc.fmt.integrity(ctx)
+      for what, n in pairs(now) do
+        assert(n <= (ctx.integrity[what] or 0), ("neoffice would have written %s (this is a bug in neoffice, please report it)"):format(what))
+      end
+      integrity_after = now
+    end
     for name, bytes in pairs(entries) do -- (never a part Word or LibreOffice couldn't read: nothing is written then)
       if type(bytes) == "string" and (name:match("%.xml$") or name:match("%.rels$")) then
         local ok, why = xml.check((trees or {})[name] or bytes) -- (the tree it was written from: as good, and quick)
@@ -3429,6 +3899,12 @@ function M.save(buf, target)
       end
     end
     if next(entries) then -- the base gets the changes...
+      if not vim.uv.fs_stat(doc.base) then -- (gone, as when the temporary files are cleaned: the file is the same, if as last written or read)
+        assert(doc.synced and not doc.is_doc and doc.stamp and stamp(doc.path) == doc.stamp,
+          "neoffice's copy of the document is gone, and the file isn't as it was: write to another file (:w other." .. doc.path:match("%w+$") .. ")")
+        vim.fn.mkdir(vim.fs.dirname(doc.base), "p")
+        zip.copy(doc.path, doc.base)
+      end
       zip.write(doc.base, entries)
       doc.synced = false
     end
@@ -3437,6 +3913,7 @@ function M.save(buf, target)
       restore()
       error(failure, 0)
     end
+    ctx.integrity = integrity_after or ctx.integrity -- (as now written: what the next save is held to)
     ctx.dirty, ctx.files, ctx.comments_dirty = {}, {}, false
     -- (the document has them now: what neoffice remembers of it follows)
     for _, p in ipairs(placements) do
@@ -3484,8 +3961,8 @@ function M.save(buf, target)
     end
     if target ~= doc.path or not doc.synced or not vim.uv.fs_stat(target) then -- ...and goes to the file
       local file = doc.is_doc and convert(doc.base, "doc:MS Word 97", vim.fn.tempname()) or doc.base
-      assert(vim.uv.fs_copyfile(file, target .. ".neoffice~"))
-      assert(os.rename(target .. ".neoffice~", target))
+      warn_elsewhere(target, "wrote")
+      zip.copy(file, target) -- (all of it, checked, then in place of the file: see zip.copy)
       if doc.is_doc and doc_cache() then -- (what was written, read back in the background: opened at once next time)
         local key = content_key(file)
         if key and not cached_doc(key) then
@@ -3501,6 +3978,7 @@ function M.save(buf, target)
       end
     end
   end)
+  doc.comment_at, doc.change_first = nil, nil
   if not ok then
     err = tostring(err):gsub("^[^\n]-%.lua:%d+: ", "") -- (where in neoffice it was found: not for you)
     return vim.notify("neoffice: Save failed, the file was not changed: " .. err, vim.log.levels.ERROR)

@@ -109,6 +109,9 @@ local function escape(s, braced, cell, strict)
 end
 
 M.escape = escape
+-- A paragraph break in deleted text, in a span's text (see init.lua): written as a "¶" that isn't
+-- escaped, which reads back as the break (a "¶" in the text itself is escaped, "\¶").
+M.DELETED_BREAK = "\u{E000}"
 
 -- What starts a line of each kind of paragraph. block = { heading = level } |
 -- { title = true } | { quote = true } | { list = { kind = "bullet" | "number", level = 1.., n = its
@@ -473,6 +476,33 @@ function M.table_format(line)
     end
   end
   return format
+end
+
+-- Whether line `row` of a table whose first line is `first` (rows of `lines`) is its line of
+-- dashes (its format), not a row: right under its first row, any such line; else (its first row
+-- deleted, a row put between them, a row deleted with changes tracked, shown above it...) one with
+-- three dashes at least in each cell, if the table has none above it (`seen`) and the next line
+-- isn't one too. (A row of "-", "--" for values missing stays a row.)
+local function three_dashes(line) -- (a line of dashes with three at least in each cell)
+  if not M.table_format(line) then
+    return false
+  end
+  for cell in line:sub(2):gmatch("([^|]*)|?") do
+    cell = vim.trim(cell)
+    if cell ~= "" and not cell:match("^:?%-%-%-+:?$") then
+      return false
+    end
+  end
+  return true
+end
+function M.is_dashes(lines, first, row, seen)
+  local line = lines[row] or ""
+  if seen or not M.table_format(line) then -- (one line of dashes: after it, rows)
+    return false
+  elseif row == first + 1 then
+    return true
+  end
+  return three_dashes(line) and not three_dashes(lines[row + 1] or "")
 end
 
 -- The line of dashes of a table of `columns` columns with this format (see M.table_format); with
@@ -840,7 +870,7 @@ function M.render(spans, block, strict)
     end
     if s.text and s.text ~= "" then
       switch(token and {} or s)
-      local text = s.raw and s.text or escape(s.text, s.sup or s.sub, block.cell, strict)
+      local text = s.raw and s.text or escape(s.text, s.sup or s.sub, block.cell, strict):gsub(M.DELETED_BREAK, "¶")
       cols[k] = { len, len + #text }
       put(text)
     end
@@ -932,6 +962,11 @@ function M.same(line, spans)
   local function reads(ch, fmt) -- (the next character reads as ch, formatted so)
     k = k + 1
     local c = chars[k]
+    if c and ch == M.DELETED_BREAK then -- (a deleted paragraph break: a "¶" not escaped; one in the text is)
+      ch = c.ch == "¶" and not c.esc and "¶" or ch
+    elseif c and ch == "¶" and not c.esc then
+      return false
+    end
     if not c or kind_of(c) or c.ch ~= ch or (c.link or "") ~= (fmt.link or "") or (c.font or "") ~= (fmt.font or "")
       or (c.size or "") ~= (fmt.size or "") or (c.color or "") ~= (fmt.color or "") then
       return false

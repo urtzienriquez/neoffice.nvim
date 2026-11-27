@@ -32,7 +32,14 @@ end
 -- The edits for a table: its lines `first`..`last` (1-based rows of `lines`); `numbers`: its
 -- columns of numbers to align right (see init.lua: number_columns).
 local function format_table(out, lines, first, last, numbers)
-  local format = markup.table_format(lines[first + 1] or "")
+  local at -- (its line of dashes: under its first row, or where markup.is_dashes finds it)
+  for r = first, last do
+    if markup.is_dashes(lines, first, r, false) then
+      at = r
+      break
+    end
+  end
+  local format = at and markup.table_format(lines[at])
   local has_dashes = format ~= nil
   if numbers then -- (as saving it would)
     format = format or { align = {} }
@@ -42,7 +49,7 @@ local function format_table(out, lines, first, last, numbers)
   end
   local rows = {} -- (the rows of cells: line numbers)
   for r = first, last do
-    if not (r == first + 1 and has_dashes) then
+    if r ~= at then
       rows[#rows + 1] = r
     end
   end
@@ -82,7 +89,7 @@ local function format_table(out, lines, first, last, numbers)
     end
   end
   if has_dashes then
-    edit(out, first, 0, lines[first + 1], dashes)
+    edit(out, at - 1, 0, lines[at], dashes)
   end
   -- its options, above it
   local options = first > 1 and markup.table_options(lines[first - 1])

@@ -82,8 +82,19 @@ local function range(m) -- start and end of a mark
   return { m[2], m[3] }, { m[4].end_row, m[4].end_col }
 end
 
-local function text(buf, s, e) -- ("" for a mark left past the end of the buffer)
-  if s[1] >= api.nvim_buf_line_count(buf) then
+local function text(buf, s, e) -- ("" for a mark left past the end of the buffer, or whose end came before its start)
+  local n = api.nvim_buf_line_count(buf)
+  if s[1] >= n then
+    return ""
+  end
+  local function clamp(p) -- (in the buffer)
+    if p[1] >= n then
+      return { n - 1, #api.nvim_buf_get_lines(buf, n - 1, n, true)[1] }
+    end
+    return { p[1], math.min(p[2], #api.nvim_buf_get_lines(buf, p[1], p[1] + 1, true)[1]) }
+  end
+  s, e = clamp(s), clamp(e)
+  if s[1] > e[1] or s[1] == e[1] and s[2] >= e[2] then
     return ""
   end
   return table.concat(api.nvim_buf_get_text(buf, s[1], s[2], e[1], e[2], {}), "\n")
@@ -785,6 +796,34 @@ local function at_cursor(buf)
   return best
 end
 
+-- What [a, b] covers taken out where a table is: a row all of whose line it covers, with its end,
+-- goes; else only what is in its cells (its "|" and its line's end stay, as do the lines that aren't
+-- rows: only the text of those it covers goes, never joining them to a row).
+local function cut_in_table(buf, a, b)
+  local markup = require("neoffice.markup")
+  for r = b[1], a[1], -1 do
+    local line = api.nvim_buf_get_lines(buf, r, r + 1, false)[1]
+    if line then
+      local from = r == a[1] and a[2] or 0
+      local to = r == b[1] and math.min(b[2], #line) or #line
+      local with_end = r < b[1] -- (its line's end in it too)
+      if from == 0 and (with_end or to == #line and r > a[1]) and line ~= "" then
+        api.nvim_buf_set_lines(buf, r, r + 1, false, {})
+      elseif line:match("^|") then
+        local spans = markup.cell_spans(line) or {}
+        for k = #spans, 1, -1 do
+          local s, e = math.max(spans[k].s - 1, from), math.min(spans[k].e, to)
+          if s < e then
+            api.nvim_buf_set_text(buf, r, s, r, e, {})
+          end
+        end
+      elseif from < to then
+        api.nvim_buf_set_text(buf, r, from, r, to, {})
+      end
+    end
+  end
+end
+
 -- Accept or reject part [a, b] of a change (all of it for a formatting change). What is outside
 -- that part stays a change. Returns whether the text changed.
 local function apply(buf, m, action, a, b)
@@ -817,6 +856,18 @@ local function apply(buf, m, action, a, b)
       return true
     end
   elseif (action == "accept") == (ch.type == "delete") then -- an accepted deletion, a rejected insertion
+    local rows = api.nvim_buf_get_lines(buf, a[1], b[1] + 1, false)
+    -- (all of a paragraph's text from right after its mark, and its end: its mark goes with it, "Table: ",
+    -- "# "..., or it would mark the next paragraph)
+    local markup = require("neoffice.markup")
+    local _, text_start = markup.block(rows[1] or "")
+    if not (rows[1] or ""):match("^|") and text_start and text_start > 1 and a[2] == text_start - 1 and b[1] > a[1] then
+      a = { a[1], 0 }
+    end
+    if vim.iter(rows):any(function(l) return l:match("^|") ~= nil end) then -- (in a table: its structure stays)
+      cut_in_table(buf, a, b)
+      return not same(a, b)
+    end
     neo().cut(buf, a, b)
     local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
     if ch.type == "delete" and a[2] == 0 and lines[a[1] + 1] == "" and (b[1] > a[1] or b[2] > 0) then
@@ -834,7 +885,29 @@ local function apply(buf, m, action, a, b)
     local shown = text(buf, a, b)
     local restored = shown:gsub("(\\?)¶", function(escaped) return escaped == "" and "\n" or nil end)
     if restored ~= shown then -- (a ¶ that isn't escaped: a paragraph break)
-      api.nvim_buf_set_text(buf, a[1], a[2], b[1], b[2], vim.split(restored, "\n"))
+      local parts = vim.split(restored, "\n", { plain = true })
+      local first = api.nvim_buf_get_lines(buf, a[1], a[1] + 1, false)[1] or ""
+      if first:match("^|") then -- (in a table's cell: its paragraphs, "<br>" between them)
+        api.nvim_buf_set_text(buf, a[1], a[2], b[1], b[2], { table.concat(parts, " <br> ") })
+        return true
+      end
+      -- the paragraphs as the buffer lays them out: a blank line after one with text that another
+      -- follows, an empty one a blank line of its own (a break at its end: the one it was joined to)
+      local last = api.nvim_buf_get_lines(buf, b[1], b[1] + 1, false)[1] or ""
+      parts[1] = first:sub(1, a[2]) .. parts[1]
+      parts[#parts] = parts[#parts] .. last:sub(b[2] + 1)
+      local ends_line = parts[#parts] == "" and #parts > 1 -- (a break at the end of its line: the
+      if ends_line then -- blank line after it, as it is, is the empty paragraph's)
+        parts[#parts] = nil
+      end
+      local out = {}
+      for k, t in ipairs(parts) do
+        out[#out + 1] = t
+        if t ~= "" and (k < #parts or ends_line) then
+          out[#out + 1] = ""
+        end
+      end
+      api.nvim_buf_set_lines(buf, a[1], b[1] + 1, false, out)
       return true
     end
   end
@@ -901,12 +974,18 @@ function M.resolve(action, all, use_marks, author)
   local changed = false
   -- insertions and deletions first, then formatting (whose marks, written around text about to
   -- go, would move the edges of its change)
-  for _, kinds in ipairs({ { insert = true, delete = true }, { format = true } }) do
+  -- (those of text before those of paragraph breaks alone: a paragraph's text gone first, its break
+  -- then takes its mark with it, see apply)
+  local function breaks_only(s, e)
+    return not text(buf, s, e):find("[^\n]")
+  end
+  for _, kinds in ipairs({ { insert = true, delete = true, text = true }, { insert = true, delete = true, breaks = true }, { format = true } }) do
     for a = #areas, 1, -1 do -- (back to front, so edits don't move what is still to do)
       local list = changes_in(areas[a])
       for k = #list, 1, -1 do
         local ch = neo().docs[buf].change[list[k][1][1]]
-        if ch and kinds[ch.type] then
+        local only = ch and ch.type ~= "format" and breaks_only(list[k][2], list[k][3])
+        if ch and kinds[ch.type] and (ch.type == "format" or (kinds.breaks and only) or (kinds.text and not only)) then
           changed = apply(buf, list[k][1], action, list[k][2], list[k][3]) or changed
         end
       end

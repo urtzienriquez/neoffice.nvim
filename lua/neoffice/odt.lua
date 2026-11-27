@@ -684,6 +684,112 @@ local function read_para(ctx, p)
   return spans, block_of(ctx, p)
 end
 
+-- Ids made unique again (see docx.unique_drawings): a note's (text:id) and a frame's name
+-- (draw:name) used more times than when the document was opened get new ones.
+local UNIQUE = { ["text:note"] = "text:id", ["draw:frame"] = "draw:name" }
+function M.unique_drawings(ctx)
+  local counts, found = {}, {}
+  local stack = { ctx.root }
+  while #stack > 0 do
+    local el = table.remove(stack)
+    local name = UNIQUE[el.tag]
+    local value = name and xml.attr(el, name)
+    if value then
+      local key = el.tag .. " " .. value
+      counts[key] = (counts[key] or 0) + 1
+      found[#found + 1] = { el = el, key = key, name = name, value = value }
+    end
+    for k = #(el.children or {}), 1, -1 do
+      if el.children[k].tag then
+        stack[#stack + 1] = el.children[k]
+      end
+    end
+  end
+  if not ctx.ids_at_open then
+    ctx.ids_at_open = counts
+    return
+  end
+  for k = #found, 1, -1 do
+    local f = found[k]
+    if counts[f.key] > math.max(ctx.ids_at_open[f.key] or 0, 1) then
+      counts[f.key] = counts[f.key] - 1
+      local n, new = 2, nil
+      repeat
+        new, n = f.value .. "_" .. n, n + 1
+      until not counts[f.el.tag .. " " .. new]
+      counts[f.el.tag .. " " .. new] = 1
+      xml.set_attr(f.el, f.name, new)
+    end
+  end
+end
+
+-- What would make LibreOffice repair (or refuse) a document, counted (see docx.integrity).
+function M.integrity(ctx)
+  local out, names = {}, {}
+  local stack = { ctx.root }
+  while #stack > 0 do
+    local el = table.remove(stack)
+    if el.tag == "text:note" then
+      local id = xml.attr(el, "text:id")
+      if id and names["note " .. id] then
+        out["a note's id used twice"] = (out["a note's id used twice"] or 0) + 1
+      end
+      names["note " .. (id or "")] = true
+    elseif el.tag == "text:changed-region" then
+      local id = xml.attr(el, "text:id") or xml.attr(el, "xml:id")
+      if id and names["change " .. id] then
+        out["a tracked change's id used twice"] = (out["a tracked change's id used twice"] or 0) + 1
+      end
+      names["change " .. (id or "")] = true
+    elseif el.tag == "office:annotation" then
+      local name = xml.attr(el, "office:name")
+      if name and names[name] then
+        out["a comment's name used twice"] = (out["a comment's name used twice"] or 0) + 1
+      end
+      names[name or false] = true
+    elseif el.tag == "table:table" and #xml.collect(el, { ["table:table-row"] = true }) == 0 then
+      out["a table without rows"] = (out["a table without rows"] or 0) + 1
+    elseif el.tag == "table:table-cell" and #xml.collect(el, { ["text:p"] = true, ["text:h"] = true, ["text:list"] = true, ["table:table"] = true }) == 0 then
+      out["a table cell without a paragraph"] = (out["a table cell without a paragraph"] or 0) + 1
+    end
+    for _, c in ipairs(el.children or {}) do
+      if c.tag then
+        stack[#stack + 1] = c
+      end
+    end
+  end
+  -- (in the order they are in: a comment's end before it, or with no comment of its name)
+  local started = {}
+  for _, el in ipairs(xml.collect(ctx.root, { ["office:annotation"] = true, ["office:annotation-end"] = true })) do
+    local name = xml.attr(el, "office:name")
+    if el.tag == "office:annotation" then
+      started[name or false] = true
+    elseif not (name and started[name]) then
+      out["a comment that ends before it starts"] = (out["a comment that ends before it starts"] or 0) + 1
+    end
+  end
+  return out
+end
+
+-- Whether a comment of the buffer is in the document, as saved.
+function M.comment_kept(ctx, c)
+  if c.node then
+    local top = c.node
+    while top.parent do
+      top = top.parent
+    end
+    if top == ctx.root then
+      return true
+    end
+  end
+  for _, el in ipairs(c.name and xml.collect(ctx.root, { ["office:annotation"] = true }) or {}) do
+    if xml.attr(el, "office:name") == c.name then
+      return true
+    end
+  end
+  return false
+end
+
 function M.load(path)
   local ctx = {
     path = path,
@@ -1163,6 +1269,36 @@ local function annotation_el(c, parent_name)
   return el
 end
 
+-- A name for a new tracked change or comment that nothing in the document has: two changes of one
+-- id, and each would show the other's text.
+local function new_name(ctx, prefix)
+  if not ctx.names_taken then
+    ctx.names_taken = {}
+    local stack = { ctx.root }
+    while #stack > 0 do
+      local el = table.remove(stack)
+      for _, attr in ipairs({ "text:id", "office:name", "text:change-id" }) do
+        local v = el.attrs and xml.attr(el, attr)
+        if v then
+          ctx.names_taken[v] = true
+        end
+      end
+      for _, c in ipairs(el.children or {}) do
+        if c.tag then
+          stack[#stack + 1] = c
+        end
+      end
+    end
+  end
+  local name
+  repeat
+    ctx.names_made = (ctx.names_made or 0) + 1
+    name = ("%s%d_%d"):format(prefix, os.time(), ctx.names_made)
+  until not ctx.names_taken[name]
+  ctx.names_taken[name] = true
+  return name
+end
+
 local function tracked_changes(ctx)
   local found = xml.find(ctx.root, "text:tracked-changes")
   return found or xml.append(xml.find(ctx.root, "office:text"), xml.elem("text:tracked-changes"), 1)
@@ -1173,7 +1309,7 @@ local function region(ctx, ch)
   if ch.region then
     return
   end
-  ch.id = ch.id or ("ctneo%d%d"):format(os.time(), math.random(1e6))
+  ch.id = ch.id or new_name(ctx, "ctneo")
   local info = xml.elem("office:change-info", {}, {
     xml.elem("dc:creator", {}, { { text = ch.author } }),
     xml.elem("dc:date", {}, { { text = ch.date } }),
@@ -1491,6 +1627,49 @@ function M.set_style(ctx, name, changes)
   ctx.style_attrs, ctx.font_bases, ctx.font_inherits, ctx.style_aligns = {}, nil, nil, nil
 end
 
+-- A paragraph style `name`, added to the document's styles if it hasn't it (a paragraph in a style
+-- the document doesn't define shows as a plain one), and known from then on as the others are.
+local function ensure_para_style(ctx, name, attrs, children)
+  if ctx.parent_style[name] ~= nil then
+    return name
+  end
+  local styles = xml.find(ctx.styles_doc, "office:styles")
+  if not styles then
+    return name
+  end
+  local parent = "Standard"
+  for _, a in ipairs(attrs) do
+    if a[1] == "style:parent-style-name" then
+      parent = a[2]
+    end
+  end
+  if ctx.parent_style[parent] == nil then -- (based on no style the document hasn't either)
+    parent = nil
+  end
+  local all = { { "style:name", name }, { "style:family", "paragraph" } }
+  for _, a in ipairs(attrs) do
+    if a[1] ~= "style:parent-style-name" then
+      all[#all + 1] = a
+    end
+  end
+  if parent then
+    table.insert(all, 3, { "style:parent-style-name", parent })
+  end
+  local el = xml.append(styles, xml.elem("style:style", all, children))
+  ctx.parent_style[name], ctx.dirty[STYLES] = parent or false, true
+  if ctx.para_style_el then
+    ctx.para_style_el[name] = el
+  end
+  ctx.named = nil
+  if ctx.font_bases then
+    ctx.font_bases[name] = nil
+  end
+  if ctx.style_attrs then
+    ctx.style_attrs[name] = nil
+  end
+  return name
+end
+
 -- The style of a caption of this kind ("table", "figure"): LibreOffice's "Table" or "Figure"
 -- (or "Illustration") if the document has it, else its "Caption", else a "Caption" style added.
 caption_style = function(ctx, kind)
@@ -1499,14 +1678,30 @@ caption_style = function(ctx, kind)
       return name
     end
   end
-  local styles = xml.find(ctx.styles_doc, "office:styles")
-  if styles then
-    xml.append(styles, xml.elem("style:style", { { "style:name", "Caption" }, { "style:family", "paragraph" }, { "style:parent-style-name", "Standard" }, { "style:class", "extra" } }, {
-      xml.elem("style:paragraph-properties", { { "fo:margin-top", "0.212cm" }, { "fo:margin-bottom", "0.212cm" } }),
-    }))
-    ctx.parent_style.Caption, ctx.dirty[STYLES] = "Standard", true
+  return ensure_para_style(ctx, "Caption", { { "style:parent-style-name", "Standard" }, { "style:class", "extra" } }, {
+    xml.elem("style:paragraph-properties", { { "fo:margin-top", "0.212cm" }, { "fo:margin-bottom", "0.212cm" } }),
+  })
+end
+
+-- The style of heading `level`: the document's, else "Heading N" (added if it hasn't it).
+local function heading_style(ctx, level)
+  if ctx.headings[level] then
+    return ctx.headings[level]
   end
-  return "Caption"
+  local attrs = {
+    { "style:parent-style-name", ctx.parent_style.Heading ~= nil and "Heading" or "Standard" },
+    { "style:display-name", "Heading " .. level },
+    { "style:default-outline-level", tostring(level) }, { "style:class", "text" },
+  }
+  if ctx.parent_style.Text_20_body ~= nil then
+    attrs[#attrs + 1] = { "style:next-style-name", "Text_20_body" }
+  end
+  local name = ensure_para_style(ctx, "Heading_20_" .. level, attrs, {
+    xml.elem("style:paragraph-properties", { { "fo:margin-top", "0.423cm" }, { "fo:margin-bottom", "0.212cm" }, { "fo:keep-with-next", "always" } }),
+    xml.elem("style:text-properties", { { "fo:font-size", (20 - 2 * math.min(level, 5)) .. "pt" }, { "fo:font-weight", "bold" } }),
+  })
+  ctx.headings[level] = name
+  return name
 end
 
 -- A caption's number: a sequence counting the captions of its word, showing `n` (declared in the
@@ -1560,7 +1755,15 @@ local function footnote_node(ctx, piece)
   end
   local body = xml.child(note, "text:note-body")
   local first = vim.iter(body.children):find(function(c) return PARA[c.tag] end)
-  local para = xml.elem("text:p", first and vim.deepcopy(first.attrs) or { { "text:style-name", "Footnote" } })
+  if not first then -- (a new one: as the document's other notes, else in its "Footnote" style, added if it hasn't it)
+    for _, other in ipairs(xml.collect(ctx.root, { ["text:note-body"] = true })) do
+      first = first or vim.iter(other.children):find(function(c) return PARA[c.tag] and xml.attr(c, "text:style-name") end)
+    end
+  end
+  local para = xml.elem("text:p", first and vim.deepcopy(first.attrs) or { { "text:style-name", ensure_para_style(ctx, "Footnote", { { "style:class", "extra" } }, {
+    xml.elem("style:paragraph-properties", { { "fo:margin-left", "0.6cm" }, { "fo:text-indent", "-0.6cm" } }),
+    xml.elem("style:text-properties", { { "fo:font-size", "10pt" } }),
+  }) } })
   put_text(para, piece.text, true)
   body.children = {}
   xml.append(body, para)
@@ -2549,18 +2752,27 @@ function M.fix_grid(_, tbl)
 end
 
 function M.fill(ctx, p, block, pieces)
+  -- (its break deleted, changes tracked: joined to the next paragraph in the file, see M.save)
+  local mark = vim.iter(pieces):find(function(piece) return piece.paragraph_mark end)
+  ctx.break_deleted = ctx.break_deleted or setmetatable({}, { __mode = "k" })
+  ctx.break_deleted[p] = mark and mark.paragraph_mark.type == "delete" and mark.paragraph_mark or nil
   -- what kind of paragraph it is: heading, title, list item or plain
   local level, old_level = block.heading, p.tag == "text:h" and (tonumber(xml.attr(p, "text:outline-level")) or 1) or nil
   if level ~= old_level then
     p.tag = level and "text:h" or "text:p"
     xml.set_attr(p, "text:outline-level", level and tostring(level))
-    xml.set_attr(p, "text:style-name", level and (ctx.headings[level] or "Heading_20_" .. level))
+    xml.set_attr(p, "text:style-name", level and heading_style(ctx, level))
   end
   if (block.title or false) ~= is_title(ctx, p) and not level then
-    xml.set_attr(p, "text:style-name", block.title and "Title" or nil)
+    xml.set_attr(p, "text:style-name", block.title and ensure_para_style(ctx, "Title", { { "style:class", "chapter" } }, {
+      xml.elem("style:paragraph-properties", { { "fo:text-align", "center" } }),
+      xml.elem("style:text-properties", { { "fo:font-size", "28pt" }, { "fo:font-weight", "bold" } }),
+    }) or nil)
   end
   if not not block.quote ~= based_on(ctx, p, QUOTES) and not (level or block.title) then
-    xml.set_attr(p, "text:style-name", block.quote and (ctx.quote_style or "Quotations") or nil)
+    xml.set_attr(p, "text:style-name", block.quote and (ctx.quote_style or ensure_para_style(ctx, "Quotations", { { "style:class", "html" } }, {
+      xml.elem("style:paragraph-properties", { { "fo:margin-left", "1cm" }, { "fo:margin-right", "1cm" }, { "fo:margin-bottom", "0.283cm" } }),
+    })) or nil)
   end
   -- a caption: in a caption style (and no longer, if it had a caption's number and isn't one now)
   local in_caption = based_on(ctx, p, CAPTIONS)
@@ -2601,6 +2813,18 @@ function M.fill(ctx, p, block, pieces)
         ch.parts[key] = ch.parts[key] or { type = ch.type, author = ch.author, date = ch.date, parent = ch }
         ch = ch.parts[key]
       end
+      -- (an insertion started and ended already, and starting again: in another cell of a row inserted,
+      -- a change of its own there; one start and one end each, or LibreOffice takes only the first)
+      ctx.inserts_written = ctx.inserts_written or {}
+      if piece.insert_start or piece.insert_end then
+        local key = tostring(p) .. ":insert"
+        ch.parts = ch.parts or {}
+        if piece.insert_start and ctx.inserts_written[ch] == "ended" then
+          ch.parts[key] = ch.parts[key] or { type = ch.type, author = ch.author, date = ch.date, parent = ch }
+        end
+        ch = ch.parts[key] or ch
+        ctx.inserts_written[ch] = piece.insert_start and "started" or "ended"
+      end
       if piece.deletion and ch.region and ch.text ~= piece.deleted then -- (its text changed: split, edited)
         local kind = xml.find(ch.region, "text:deletion")
         for _, c in ipairs(vim.tbl_filter(function(c) return PARA[c.tag] end, kind.children)) do
@@ -2631,7 +2855,18 @@ function M.fill(ctx, p, block, pieces)
       elseif piece.image then
         xml.append(p, image_node(ctx, piece.image))
       elseif c then
-        c.name = c.name or ("__Annotation__neo%d_%d"):format(os.time(), math.random(1e6))
+        -- (a name of its own in this file: one given before, in a save that didn't go through, and
+        -- brought back by undo, may be another's by now)
+        ctx.names_written = ctx.names_written or {}
+        if not c.name or ctx.names_written[c.name] and ctx.names_written[c.name] ~= c then
+          repeat
+            c.name = new_name(ctx, "__Annotation__neo")
+          until not ctx.names_written[c.name]
+        end
+        ctx.names_written[c.name] = c
+        if ctx.names_taken then -- (and not given again to another: see new_name)
+          ctx.names_taken[c.name] = true
+        end
         xml.append(p, annotation_el(c))
         for _, reply in ipairs(c.replies) do
           xml.append(p, annotation_el(reply, c.name))
@@ -2655,7 +2890,80 @@ local NAMESPACES = {
   { "xlink", "http://www.w3.org/1999/xlink" },
 }
 
+-- Paragraphs whose break was deleted with changes tracked, as LibreOffice writes them: joined to the
+-- next paragraph (a paragraph that follows them, in the same place), the break a deletion of its own
+-- there, "<text:p/><text:p/>" (accepting it joins them; rejecting it, they are two again). Done in
+-- the file only: what neoffice keeps of the document stays as the buffer shows it. Returns a
+-- function that undoes it, or nil if there were none.
+local function join_deleted_breaks(ctx)
+  if not ctx.break_deleted or not next(ctx.break_deleted) then
+    return nil
+  end
+  local list = {}
+  for _, el in ipairs(xml.collect(xml.find(ctx.root, "office:text") or {}, PARA)) do
+    if ctx.break_deleted[el] and el.parent then
+      list[#list + 1] = el
+    end
+  end
+  local done = {}
+  for _, p in ipairs(list) do
+    local parent, at = p.parent, xml.index(p)
+    local q
+    for k = at + 1, #parent.children do
+      local c = parent.children[k]
+      if c.tag then
+        q = PARA[c.tag] and c or nil
+        break
+      end
+    end
+    if q then
+      local ch = ctx.break_deleted[p]
+      local id = new_name(ctx, "ctneo")
+      local function shell(el) -- (an empty paragraph as it was: its kind and style)
+        return xml.elem(el.tag, vim.tbl_filter(function(a) return a[1] ~= "xml:id" and a[1] ~= "text:id" end, vim.deepcopy(el.attrs)))
+      end
+      local region = xml.append(tracked_changes(ctx), xml.elem("text:changed-region", { { "text:id", id } }, {
+        xml.elem("text:deletion", {}, {
+          xml.elem("office:change-info", {}, {
+            xml.elem("dc:creator", {}, { { text = ch.author or "" } }),
+            xml.elem("dc:date", {}, { { text = ch.date or "" } }),
+          }),
+          shell(p), shell(q),
+        }),
+      }))
+      local moved = vim.list_slice(p.children)
+      local marker = xml.elem("text:change", { { "text:change-id", id } })
+      xml.remove(p)
+      p.children = {}
+      for k = #moved, 1, -1 do
+        moved[k].parent = nil
+        xml.append(q, moved[k], 1)
+      end
+      xml.append(q, marker, #moved + 1)
+      done[#done + 1] = { p = p, parent = parent, at = at, q = q, moved = moved, marker = marker, region = region }
+    end
+  end
+  if #done == 0 then
+    return nil
+  end
+  return function()
+    for k = #done, 1, -1 do
+      local d = done[k]
+      xml.remove(d.marker)
+      xml.remove(d.region)
+      for _, c in ipairs(d.moved) do
+        xml.remove(c)
+      end
+      for _, c in ipairs(d.moved) do
+        xml.append(d.p, c)
+      end
+      xml.append(d.parent, d.p, d.at)
+    end
+  end
+end
+
 function M.save(ctx, live)
+  ctx.inserts_written, ctx.names_written = nil, nil -- (see M.fill: for each save)
   -- tracked changes accepted or rejected (no longer in the buffer) lose their region
   for _, ch in pairs(ctx.changes) do
     if ch.region and ch.region.parent and not live.changes[ch] and not (ch.parent and live.changes[ch.parent]) then
@@ -2695,12 +3003,26 @@ function M.save(ctx, live)
       end
     end
   end
-  if ctx.dirty[M.MAIN] then
+  if ctx.dirty[M.MAIN] then -- (a change's region nothing in the text refers to any more: gone, as an
+    local used = {} -- accepted change's part, written in a paragraph of its own)
+    for _, el in ipairs(xml.collect(ctx.root, { ["text:change"] = true, ["text:change-start"] = true, ["text:change-end"] = true })) do
+      used[xml.attr(el, "text:change-id") or ""] = true
+    end
+    for _, region in ipairs(xml.collect(ctx.root, { ["text:changed-region"] = true })) do
+      local id = xml.attr(region, "text:id") or xml.attr(region, "xml:id")
+      if id and not used[id] then
+        xml.remove(region)
+      end
+    end
     local root = xml.find(ctx.root, "office:document-content")
     for _, ns in ipairs(NAMESPACES) do
       xml.set_attr(root, "xmlns:" .. ns[1], xml.attr(root, "xmlns:" .. ns[1]) or ns[2])
     end
-    entries[M.MAIN], trees[M.MAIN] = xml.serialize(ctx.root), ctx.root
+    local undo = join_deleted_breaks(ctx)
+    entries[M.MAIN], trees[M.MAIN] = xml.serialize(ctx.root), not undo and ctx.root or nil
+    if undo then
+      undo()
+    end
   end
   if ctx.dirty[MANIFEST] then
     entries[MANIFEST], trees[MANIFEST] = xml.serialize(ctx.manifest), ctx.manifest

@@ -377,11 +377,15 @@ for _, ext in ipairs({ "docx", "odt" }) do
         assert.truthy(vim.iter(H.changes()):any(function(c) return c.author == ch end))
       end
       local marks = api.nvim_buf_get_extmarks(0, neo.ns.change, { H.row(12) - 1, 0 }, -1, {})
-      for _ = 1, #marks do
+      for _ = 1, #marks do -- (one at a time, while it is there: its text and its break may go at once)
+        if #H.paras() < 13 then
+          break
+        end
         api.nvim_win_set_cursor(0, { H.row(13), 0 })
         changes.resolve("reject")
       end
       assert.equals(12, #H.paras())
+      assert.equals("Last paragraph.", H.paras()[12])
     end)
 
     it("doesn't record changes in formatting marks, or your review", function()

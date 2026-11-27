@@ -199,8 +199,10 @@ describe("paragraph layout", function()
     end
     assert.same({ first = 1, last = 2, owns = 3, text = "a b" }, p[1]) -- (and the blank line after it)
     assert.same({ first = 4, last = 4, owns = 4, text = "c" }, p[2])
-    assert.same({ first = 5, last = 5, owns = 5, text = "" }, p[3]) -- blank lines at the end: empty paragraphs
-    assert.same({ first = 6, last = 6, owns = 6, text = "" }, p[4])
+    -- blank lines at the end: empty paragraphs (around: the rows that make them one, from the line
+    -- before them to the one after)
+    assert.same({ first = 5, last = 5, owns = 5, text = "", around = { 4, 7 } }, p[3])
+    assert.same({ first = 6, last = 6, owns = 6, text = "", around = { 4, 7 } }, p[4])
   end)
 end)
 
