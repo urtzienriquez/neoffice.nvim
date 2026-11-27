@@ -524,6 +524,7 @@ function M.toggle_panel()
   panel.doc = buf
   if not (panel.buf and api.nvim_buf_is_valid(panel.buf)) then
     panel.buf = api.nvim_create_buf(false, true)
+    panel.keys = nil -- (a new buffer: none of neoffice's keys in it yet)
     vim.bo[panel.buf].filetype = "neoffice-comments"
     -- :w in it saves the document (its comments are the document's): through neoffice's save, called
     -- here (a :write of the document from this autocommand wouldn't run neoffice's own, and Vim would
@@ -540,9 +541,12 @@ function M.toggle_panel()
   end
   do -- keys of the panel only (it is neoffice's own buffer): keymaps.comments (false drops one); set
     -- each time it opens, as they are configured now
-    for _, m in ipairs(api.nvim_buf_get_keymap(panel.buf, "n")) do
-      pcall(vim.keymap.del, "n", m.lhs, { buffer = panel.buf })
+    -- (only neoffice's own, as set when it last opened: yours, from your filetype autocommands
+    -- for neoffice-comments, stay)
+    for _, lhs in ipairs(panel.keys or {}) do
+      pcall(vim.keymap.del, "n", lhs, { buffer = panel.buf })
     end
+    panel.keys = {}
     local actions = {
       go = M.jump, reply = M.reply, edit = M.edit, resolve = M.resolve, delete = M.delete, close = close, undo = M.undo, redo = M.redo,
       next = function() to_comment(1) end, prev = function() to_comment(-1) end,
@@ -553,6 +557,7 @@ function M.toggle_panel()
       for _, key in ipairs(type(keys) == "table" and keys or { keys }) do
         if key and actions[k[1]] then
           vim.keymap.set("n", key, actions[k[1]], { buffer = panel.buf, nowait = true, silent = true, desc = "neoffice: " .. k[2] })
+          table.insert(panel.keys, key)
         end
       end
     end
