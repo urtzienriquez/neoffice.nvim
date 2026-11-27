@@ -1111,7 +1111,7 @@ latex_of = function(ctx, spans)
     local tmp = vim.fn.tempname() .. ".docx"
     vim.uv.fs_copyfile(ctx.path, tmp)
     zip.write(tmp, { [M.MAIN] = ("<w:document%s><w:body>%s</w:body></w:document>"):format(table.concat(attrs), table.concat(body)) })
-    local r = vim.system({ "pandoc", "-f", "docx", "-t", "json", tmp }):wait()
+    local r = vim.system({ "pandoc", "--sandbox", "-f", "docx", "-t", "json", tmp }):wait() -- (--sandbox: reads nothing but it)
     os.remove(tmp)
     local ok, ast = pcall(vim.json.decode, r.code == 0 and r.stdout or "")
     if ok and #ast.blocks == #spans then
@@ -1134,7 +1134,13 @@ function M.equations(ctx, list)
     return eq.display and "\\[" .. eq.tex .. "\\]" or "\\(" .. eq.tex .. "\\)"
   end, list)
   local out = vim.fn.tempname() .. ".docx"
-  local r = vim.system({ "pandoc", "-f", "markdown+tex_math_single_backslash", "-o", out }, { stdin = table.concat(source, "\n\n") }):wait()
+  -- (the text read with --sandbox: no file read, nothing fetched, whatever it says; then, if it
+  -- holds nothing but the equations, no image a .docx would take from a file or the net, written.
+  -- In two steps: pandoc can't write a .docx with --sandbox, its own files kept from it too)
+  local read = vim.system({ "pandoc", "--sandbox", "-f", "markdown+tex_math_single_backslash", "-t", "json" }, { stdin = table.concat(source, "\n\n") }):wait()
+  assert(read.code == 0, "pandoc could not convert the equations: " .. (read.stderr or ""))
+  assert(not read.stdout:find('"t":"Image"', 1, true), "an equation's LaTeX reads as more than an equation (an image): not written")
+  local r = vim.system({ "pandoc", "-f", "json", "-o", out }, { stdin = read.stdout }):wait()
   assert(r.code == 0, "pandoc could not convert the equations: " .. (r.stderr or ""))
   local paras = xml.collect(xml.parse(zip.read(out, M.MAIN)), { ["w:p"] = true })
   os.remove(out)

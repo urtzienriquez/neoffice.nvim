@@ -1317,7 +1317,7 @@ end
 -- way of a conversion waited for; on_done(path or nil) once done)
 local background = {} -- (the conversions waiting: one at a time, as they share a profile)
 local function convert(path, to, dir, on_done)
-  local profile = "-env:UserInstallation=file://" .. vim.fn.stdpath("cache") .. "/neoffice-libreoffice" .. (on_done and "-background" or "")
+  local profile = require("neoffice.office").profile(vim.fn.stdpath("cache") .. "/neoffice-libreoffice" .. (on_done and "-background" or ""))
   local cmd = { "soffice", profile, "--headless", "--norestore", "--convert-to", to, "--outdir", dir, path }
   local out = dir .. "/" .. vim.fn.fnamemodify(path, ":t:r") .. "." .. to:match("^%w+")
   if on_done then

@@ -63,6 +63,7 @@ local function start_server()
     return
   end
   local s = { waiting = {}, partial = "" }
+  require("neoffice.office").profile(cache .. "/neoffice-libreoffice-pdf") -- (its settings: see office.lua)
   s.proc = vim.system({ "python3", "-I", here .. "/pdf_server.py", cache .. "/neoffice-libreoffice-pdf", cache .. "/neoffice-pdf" }, {
     stdin = true,
     stdout = function(_, data)
@@ -103,7 +104,7 @@ local function convert_alone(src, dst, on_done)
     return on_done(false, "couldn't copy " .. src)
   end
   local t0 = vim.uv.hrtime()
-  vim.system({ "soffice", "-env:UserInstallation=file://" .. cache .. "/neoffice-libreoffice-pdf", "--headless", "--norestore",
+  vim.system({ "soffice", require("neoffice.office").profile(cache .. "/neoffice-libreoffice-pdf"), "--headless", "--norestore",
     "--convert-to", "pdf", "--outdir", work, copy }, {}, vim.schedule_wrap(function(r)
     local out = work .. "/document.pdf"
     os.remove(copy)

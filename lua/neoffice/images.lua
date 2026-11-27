@@ -86,19 +86,26 @@ local function has(program)
   end
   return tools[program]
 end
+-- (ImageMagick told what each file is, "PNG:file": never taking it from what the file holds, as a
+-- document's image may be made to look like one thing and be another, a script ImageMagick runs;
+-- only these kinds, PDFs and drawings never through it)
+local CODER = { png = "PNG", jpeg = "JPEG", jpg = "JPEG", gif = "GIF", bmp = "BMP", tif = "TIFF", tiff = "TIFF", webp = "WEBP" }
 local function magick(src, out)
-  return has("magick") and { "magick", "-define", "jpeg:size=" .. 2 * MAX .. "x" .. 2 * MAX, src .. "[0]", "-thumbnail", MAX .. "x" .. MAX .. ">", "png:" .. out } or nil
+  local coder = CODER[(src:match("%.(%w+)$") or ""):lower()]
+  return has("magick") and coder and { "magick", "-define", "jpeg:size=" .. 2 * MAX .. "x" .. 2 * MAX, coder .. ":" .. src .. "[0]", "-thumbnail", MAX .. "x" .. MAX .. ">", "png:" .. out } or nil
 end
 local CONVERT = {
   png = magick, jpeg = magick, jpg = magick, gif = magick, bmp = magick, tif = magick, tiff = magick, webp = magick,
   pdf = function(src, out)
-    return has("pdftoppm") and { "pdftoppm", "-png", "-singlefile", "-f", "1", "-l", "1", "-scale-to", tostring(MAX), src, (out:gsub("%.png$", "")) }
-      or magick(src, out)
+    return has("pdftoppm") and { "pdftoppm", "-png", "-singlefile", "-f", "1", "-l", "1", "-scale-to", tostring(MAX), src, (out:gsub("%.png$", "")) } or nil
   end,
   svg = function(src, out)
-    return has("rsvg-convert") and { "rsvg-convert", "-w", tostring(MAX), "-o", out, src } or magick(src, out)
+    return has("rsvg-convert") and { "rsvg-convert", "-w", tostring(MAX), "-o", out, src } or nil
   end,
 }
+function M.convert_command(ext, src, out) -- (the command a preview of a file runs: see the tests)
+  return CONVERT[ext] and CONVERT[ext](src, out)
+end
 -- (drawings: metafiles and others, through LibreOffice: all those waiting in one call)
 local OFFICE = { emf = true, wmf = true, emz = true, wmz = true, svm = true, eps = true, cgm = true, pct = true, pict = true, met = true }
 
@@ -131,7 +138,7 @@ local function run_office()
   office.queue, office.running = {}, true
   local dir = vim.fn.tempname()
   vim.fn.mkdir(dir, "p")
-  local cmd = { "soffice", "-env:UserInstallation=file://" .. vim.fn.stdpath("cache") .. "/neoffice-libreoffice", "--headless", "--convert-to", "png", "--outdir", dir }
+  local cmd = { "soffice", require("neoffice.office").profile(vim.fn.stdpath("cache") .. "/neoffice-libreoffice"), "--headless", "--convert-to", "png", "--outdir", dir }
   for _, item in ipairs(batch) do
     cmd[#cmd + 1] = item.src
   end
@@ -140,7 +147,7 @@ local function run_office()
       for _, item in ipairs(batch) do
         local out = vim.fs.joinpath(dir, vim.fn.fnamemodify(item.src, ":t:r") .. ".png")
         if has("magick") and vim.uv.fs_stat(out) then -- (drawn on a page: without the page around it)
-          vim.system({ "magick", out, "-trim", "+repage", "-thumbnail", MAX .. "x" .. MAX .. ">", "png:" .. out }, { timeout = 30000 }, function()
+          vim.system({ "magick", "PNG:" .. out, "-trim", "+repage", "-thumbnail", MAX .. "x" .. MAX .. ">", "png:" .. out }, { timeout = 30000 }, function()
             vim.schedule(function() item.finish(read(out)) end)
           end)
         else
@@ -171,7 +178,7 @@ function M.preview(data, ext, finish, crop)
       f:close()
       local t, r, b, l = unpack(crop)
       local function pc(n) return ("%.4f%%"):format(n * 100) end -- (chops in turn: each of what is left)
-      vim.system({ "magick", src, "-gravity", "North", "-chop", "0x" .. pc(t), "-gravity", "South", "-chop", "0x" .. pc(b / math.max(1 - t, 0.01)),
+      vim.system({ "magick", "PNG:" .. src, "-gravity", "North", "-chop", "0x" .. pc(t), "-gravity", "South", "-chop", "0x" .. pc(b / math.max(1 - t, 0.01)),
         "-gravity", "West", "-chop", pc(l) .. "x0", "-gravity", "East", "-chop", pc(r / math.max(1 - l, 0.01)) .. "x0", "+repage", "png:" .. src },
         { timeout = 30000 }, function(res)
           vim.schedule(function() finish(res.code == 0 and read(src) or png) end)

@@ -101,6 +101,27 @@ describe("PDF export", function()
     assert.is_nil(vim.uv.fs_stat((other:gsub("%.docx$", ".pdf"))))
   end)
 
+  it("reaches LibreOffice through a pipe only you can use, not a port anyone on the machine could", function()
+    local path = H.copy("rich.docx")
+    H.open(path)
+    vim.cmd("Neoffice pdf")
+    assert.truthy(changed((path:gsub("%.docx$", ".pdf")), nil))
+    local f = io.open(vim.fn.stdpath("cache") .. "/neoffice-pdf/office.pid")
+    local pid = f and tonumber(f:read("*a"))
+    if f then
+      f:close()
+    end
+    assert.truthy(pid, "LibreOffice's process")
+    local cmdline = table.concat(vim.split(io.open("/proc/" .. pid .. "/cmdline"):read("*a"), "\0", { plain = true }), " ")
+    local name = cmdline:match("%-%-accept=pipe,name=([%w_]+);urp;")
+    assert.truthy(name, cmdline)
+    assert.is_nil(cmdline:find("socket", 1, true))
+    local pipes = vim.fn.glob("/tmp/OSL_PIPE_*" .. name, false, true)
+    for _, pipe in ipairs(pipes) do -- (yours alone: no one else can connect to it)
+      assert.equals("rwx------", vim.fn.getfperm(pipe))
+    end
+  end)
+
   it("says the unsaved changes aren't in it", function()
     local path = H.copy("rich.docx")
     H.open(path)

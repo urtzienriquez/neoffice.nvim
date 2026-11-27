@@ -122,17 +122,24 @@ local function data_start(s, e) -- (where an entry's data begins: after its loca
   return e.offset + 30 + u16(s, e.offset + 26) + u16(s, e.offset + 28)
 end
 
+-- The most an entry may unpack to: what it says it is, read before anything is made of that size
+-- (a file made to say more would take all the memory: a document's parts are a few MiB).
+M.MAX_ENTRY = 512 * 1024 * 1024
+
 local function inflate(src, size)
   local lib = zlib()
+  assert(size <= M.MAX_ENTRY, ("a part of the file says it is %d MiB unpacked: too big for a document's part (the file may be damaged, or made to look so)"):format(math.floor(size / 1048576)))
   local out = ffi.new("unsigned char[?]", math.max(size, 1))
   local strm = ffi.new("neoffice_z_stream[1]")
   assert(lib.inflateInit2_(strm, -15, lib.zlibVersion(), ffi.sizeof("neoffice_z_stream")) == 0, "inflate")
   strm[0].next_in, strm[0].avail_in = ffi.cast("const unsigned char *", src), #src
   strm[0].next_out, strm[0].avail_out = out, size
   local r = lib.inflate(strm, 4) -- (Z_FINISH)
+  local got = tonumber(strm[0].total_out)
   lib.inflateEnd(strm)
   assert(r == 1 or (r == -5 and size == 0), "inflate failed") -- (Z_STREAM_END)
-  return ffi.string(out, size)
+  assert(got == size, "a part of the file isn't as long as it says: the file is damaged")
+  return ffi.string(out, got)
 end
 
 local function deflate(data)
@@ -154,6 +161,7 @@ local function crc32(data)
   local lib = zlib()
   return tonumber(lib.crc32(0, ffi.cast("const unsigned char *", data), #data))
 end
+M.crc32 = function(data) return zlib() and crc32(data) end
 
 function M.read(path, entry)
   local a = zlib() and archive(path)
@@ -162,7 +170,9 @@ function M.read(path, entry)
       if e.name == entry then
         local from = data_start(a.bytes, e)
         local raw = a.bytes:sub(from, from + e.csize - 1)
+        assert(#raw == e.csize, "a part of the file is cut short: the file is damaged")
         local data = e.method == 0 and raw or inflate(raw, e.size)
+        assert(crc32(data) == e.crc, ("a part of the file (%s) isn't what its checksum says: the file is damaged"):format(entry))
         return data ~= "" and data or nil
       end
     end
@@ -335,6 +345,10 @@ end
 -- Replace or add entries ({ [name] = content }) and write the result to `target` (default: `path`).
 -- Works on a copy that is renamed over the target at the end, so a failure never damages the file.
 function M.write(path, entries, target)
+  for name in pairs(entries) do -- (a part's name, inside the archive: never a path out of it)
+    assert(type(name) == "string" and name ~= "" and not name:find("^/") and not name:find("\\", 1, true)
+      and not ("/" .. name .. "/"):find("/%.%.?/"), ("not a name for a part of the file: %q"):format(tostring(name)))
+  end
   target = real(target or path)
   if next(entries) == nil then -- nothing changed: leave the file alone (or just copy it)
     if target ~= real(path) then

@@ -14,7 +14,11 @@ local function decode(s)
     if hash == "" then
       return ENTITIES[v]
     end
-    return vim.fn.nr2char(tonumber(v, hex == "x" and 16 or 10))
+    local n = tonumber(v, hex == "x" and 16 or 10)
+    if not n or n < 1 or n > 0x10FFFF or (n >= 0xD800 and n <= 0xDFFF) then -- (not a character: shown as one that says so)
+      return "\u{FFFD}"
+    end
+    return vim.fn.nr2char(n)
   end))
 end
 

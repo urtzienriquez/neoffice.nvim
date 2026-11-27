@@ -10,9 +10,9 @@
 # reads half of one. When stdin closes (Neovim quit), LibreOffice is stopped.
 import json
 import os
+import secrets
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -37,14 +37,6 @@ def prop(name, value):
     return p
 
 
-def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-
 PIDFILE = os.path.join(WORK, "office.pid")
 
 
@@ -63,13 +55,16 @@ def start():
     global office, desktop
     stop()
     stop_left_over()
-    port = free_port()
+    # (reached through a pipe of a name no one can guess, not a TCP port: a port anyone on the machine
+    # could connect to, and through it run whatever they like as you)
+    pipe = "neoffice_pdf_" + secrets.token_hex(16)
     office = subprocess.Popen(
         ["soffice", "-env:UserInstallation=" + uno.systemPathToFileUrl(PROFILE), "--headless", "--invisible",
          "--norestore", "--nologo", "--nodefault", "--nolockcheck",
-         "--accept=socket,host=127.0.0.1,port=%d;urp;" % port],
+         "--accept=pipe,name=%s;urp;" % pipe],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True)  # (a group of its own: all of it stopped at once, see stop)
+        start_new_session=True,  # (a group of its own: all of it stopped at once, see stop)
+        preexec_fn=lambda: os.umask(0o077))  # (its pipe, and what it writes, yours alone)
     try:
         with open(PIDFILE, "w") as f:
             f.write(str(office.pid))
@@ -77,7 +72,7 @@ def start():
         pass
     local = uno.getComponentContext()
     resolver = local.ServiceManager.createInstanceWithContext("com.sun.star.bridge.UnoUrlResolver", local)
-    url = "uno:socket,host=127.0.0.1,port=%d;urp;StarOffice.ComponentContext" % port
+    url = "uno:pipe,name=%s;urp;StarOffice.ComponentContext" % pipe
     for _ in range(600):  # (up to 30 s: its first start makes its profile)
         try:
             ctx = resolver.resolve(url)
@@ -139,8 +134,10 @@ def convert(src, dst):
     copy = os.path.join(WORK, "document" + os.path.splitext(src)[1].lower())
     shutil.copyfile(src, copy)
     part = os.path.join(os.path.dirname(dst) or ".", "." + os.path.basename(dst) + ".neoffice-part")
+    # (no macros run, no links updated: a document from someone else does nothing but be drawn)
     doc = desktop.loadComponentFromURL(uno.systemPathToFileUrl(copy), "_blank", 0,
-                                       (prop("Hidden", True), prop("ReadOnly", True)))
+                                       (prop("Hidden", True), prop("ReadOnly", True),
+                                        prop("MacroExecutionMode", 0), prop("UpdateDocMode", 0)))
     if doc is None:
         raise RuntimeError("LibreOffice couldn't open the document")
     try:
