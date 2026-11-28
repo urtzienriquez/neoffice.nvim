@@ -1402,6 +1402,88 @@ local function template(ext)
   return copy
 end
 
+-- How plain paragraphs' formats are shown (blocks: { align, para, no_text }, in order): for each,
+-- { run = the format the "+" line above it starts (nil: none), own = what a line for it only says
+-- (nil: none) }. Of the ways to say them, the one with the fewest lines, then the fewest characters:
+-- at each paragraph the run goes on as it is, or becomes its format, or takes from it what the next
+-- paragraph has too (an attribute at a time: a run's alignment isn't said again because the style
+-- changes). (A paragraph of only images has the run's font, size and colour: none of its own.)
+function M.format_lines(blocks)
+  local function own_of(b, run)
+    local attrs = b.para or {}
+    if b.no_text then
+      attrs = vim.tbl_extend("force", attrs, { font = run.attrs.font, size = run.attrs.size, color = run.attrs.color })
+    end
+    return { align = b.align, attrs = attrs }
+  end
+  local function value(f, key)
+    if key == "align" then
+      return pformat.measure("align", f.align or "left")
+    end
+    return pformat.measure(key, (f.attrs or {})[key])
+  end
+  local keys = vim.list_extend({ "align" }, vim.tbl_filter(function(x) return x ~= "align" end, pformat.KEYS))
+  local function shared_with(run, own, nxt) -- (the run, with what of own the next one has too)
+    local out = { align = run.align, attrs = vim.deepcopy(run.attrs or {}) }
+    for _, key in ipairs(keys) do
+      if value(own, key) ~= value(run, key) and nxt and value(nxt, key) == value(own, key) then
+        if key == "align" then
+          out.align = own.align
+        else
+          out.attrs[key] = own.attrs[key]
+        end
+      end
+    end
+    return out
+  end
+  local function cost(prev, run, own) -- (lines first, then characters)
+    local c = 0
+    if not pformat.same(prev, run) then
+      c = c + 1 + (#markup.para_line_for(prev, run) + 1) / 10000 -- (and its "+")
+    end
+    if not pformat.same(run, own) then
+      local align, attrs = pformat.diff(run, own)
+      c = c + 1 + #markup.render_para_line({ align = align, attrs = attrs or {} }) / 10000
+    end
+    return c
+  end
+  local start = { run = { attrs = {} }, cost = 0 }
+  local steps, states = {}, { start }
+  for i, b in ipairs(blocks) do
+    local nb = blocks[i + 1]
+    local nxt = nb and { align = nb.align, attrs = nb.para or {} }
+    local best = {}
+    for _, st in ipairs(states) do
+      local own = own_of(b, st.run)
+      for _, run in ipairs({ st.run, own, shared_with(st.run, own, nxt) }) do
+        local c = st.cost + cost(st.run, run, own)
+        local key = pformat.key(run)
+        if not best[key] or c < best[key].cost - 1e-9 then
+          best[key] = { run = run, cost = c, from = st, own = own }
+        end
+      end
+    end
+    states = vim.tbl_values(best)
+    table.sort(states, function(x, y) return x.cost < y.cost - 1e-9 or math.abs(x.cost - y.cost) <= 1e-9 and pformat.key(x.run) < pformat.key(y.run) end)
+    while #states > 12 do -- (the best few ways so far: enough, as formats change little)
+      table.remove(states)
+    end
+    steps[i] = states
+  end
+  local out, st = {}, states[1]
+  for i = #blocks, 1, -1 do
+    local prev = st.from.run
+    local line = { run = not pformat.same(prev, st.run) and st.run or nil }
+    if not pformat.same(st.run, st.own) then
+      local align, attrs = pformat.diff(st.run, st.own)
+      line.own = { align = align, attrs = attrs or {} }
+    end
+    out[i] = line
+    st = st.from
+  end
+  return out
+end
+
 -- Which of n paragraphs (or blocks) are first ones: the first in the document, or right after a
 -- heading, title or quote, as pandoc's First Paragraph; place(k): "break" (a heading, title, quote),
 -- "other", or nil for one that doesn't count (an empty one).
@@ -1956,27 +2038,12 @@ local function open(buf, path)
         b.para = nil -- (not a plain paragraph's: not neoffice's to change)
       end
     end
-    local run = { attrs = {} }
+    -- which lines show the paragraphs' formats: those with the fewest lines, then the fewest
+    -- characters, of the ways to say them (see M.format_lines)
+    local plan = M.format_lines(vim.tbl_map(function(k) return paras[k].block end, candidates))
     for i, k in ipairs(candidates) do
-      local b = paras[k].block
-      if b.no_text then -- (only images...: the font and size of the run it is in)
-        b.para = vim.tbl_extend("force", b.para or {}, { font = run.attrs.font, size = run.attrs.size, color = run.attrs.color })
-      end
-      local own = { align = b.align, attrs = b.para or {} }
-      local function shared(j) -- (the j-th next one has it too)
-        local other = candidates[i + j] and paras[candidates[i + j]].block
-        return other and pformat.same(own, { align = other.align, attrs = other.para or {} })
-      end
-      if pformat.same(own, run) then
-        b.align, b.para = nil, nil
-      elseif shared(1) or shared(2) then -- (it and the next, or the one after an exception, have it)
-        format_before[k], run = own, own -- (a run of it starts)
-        b.align, b.para = nil, nil
-      else -- (it alone: a line of its own above it, for it only; never in its text)
-        local align, attrs = pformat.diff(run, own)
-        own_before[k] = { align = align, attrs = attrs or {} }
-        b.align, b.para = nil, nil
-      end
+      format_before[k], own_before[k] = plan[i].run, plan[i].own
+      paras[k].block.align, paras[k].block.para = nil, nil
     end
   end
   -- a cell's font and size, when they aren't what most of its table's text has: "{size = 7pt} ..."

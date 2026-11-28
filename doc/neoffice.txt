@@ -242,11 +242,12 @@ and `none` alone all of them: >
   `color`                         the colour of its text (`red`, `#1f4e79`)
 
 A format is what differs from the style: `none` is the style's (`align =
-none`: the style's alignment). Opened, paragraphs one after the other with
-the same format get a `+` line above the first, which says only what
-changes from the `+` line before it (or starts from the style, with `none`,
-when that is much shorter); a paragraph that differs from those around it
-gets a line of its own, without `+`. The marks are short for alignment, on
+none`: the style's alignment). Opened, the formats are shown in as few lines
+as can say them, and of those the shortest, an attribute at a time: one the
+paragraphs after it have too goes on a `+` line (which says only what
+changes from the `+` line before it, or starts from the style with `none`
+when that is shorter), one only it has on a line of its own, without `+`; a
+run's alignment isn't said again because the style changes. The marks are short for alignment, on
 such a line: `<|>` (centred), `->>` (right), `<=>` (justified), `<<-`
 (left); `<=> {before = 6pt}+`. A line without `+` with no paragraph right
 below it stops the save, and says where. Attributes in braces at the start

@@ -134,3 +134,113 @@ for _, ext in ipairs({ "docx", "odt" }) do
     end)
   end)
 end
+
+describe("the lines that show paragraphs' formats", function()
+  local markup = require("neoffice.markup")
+  local function lines_of(blocks) -- (the lines shown, as text)
+    local out = {}
+    local run = { attrs = {} }
+    for i, line in ipairs(neo.format_lines(blocks)) do
+      if line.run then
+        out[#out + 1] = { i, markup.para_line_for(run, line.run) .. "+" }
+        run = line.run
+      end
+      if line.own then
+        out[#out + 1] = { i, markup.render_para_line(line.own) }
+      end
+    end
+    return out
+  end
+
+  it("say an attribute where it changes, not again because another one does (the centred names, then text)", function()
+    -- (two centred lines, a justified abstract, then a paragraph of the usual style and two of Body Text)
+    local shown = lines_of({ { align = "center" }, { align = "center" }, { align = "justify" }, {}, { para = { style = "Body Text" } }, { para = { style = "Body Text" } } })
+    local text = table.concat(vim.tbl_map(function(l) return l[2] end, shown), "\n")
+    assert.equals(4, #shown, text)
+    assert.is_nil(text:find("align = none", 1, true), text)
+    assert.is_nil(vim.iter(shown):find(function(l) return l[1] == 4 end), text) -- (the first after them: nothing to say)
+    assert.truthy(text:find("{style = Body Text}+", 1, true), text)
+  end)
+
+  it("keep a run's alignment once when the fonts change from one paragraph to the next", function()
+    local blocks = {}
+    for k = 1, 6 do
+      blocks[k] = { align = "justify", para = { font = k % 2 == 1 and "Arial" or "Cambria" } }
+    end
+    local shown = lines_of(blocks)
+    local text = table.concat(vim.tbl_map(function(l) return l[2] end, shown), "\n")
+    assert.truthy(#shown <= 4, text)
+    local _, aligned = text:gsub("<=>", "")
+    assert.equals(1, aligned, text)
+  end)
+
+  it("end a run once, and say only what a paragraph has besides (not what it no longer has of the run)", function()
+    -- (indented paragraphs, then one of another style, then plain ones: as in a document with a list)
+    local shown = lines_of({ { align = "justify" }, { para = { first = "0cm" } }, { para = { first = "0cm" } }, { para = { first = "0cm" } },
+      { para = { style = "First Paragraph" } }, {}, {} })
+    local text = table.concat(vim.tbl_map(function(l) return l[2] end, shown), "\n")
+    assert.is_nil(text:find("first = none", 1, true), text)
+    assert.equals(4, #shown, text)
+  end)
+
+  it("are never more than a whole format at a time would make (random paragraphs)", function()
+    local formats = { {}, { align = "center" }, { align = "justify" }, { para = { style = "Body Text" } },
+      { align = "justify", para = { style = "Body Text" } }, { para = { font = "Arial" } }, { align = "center", para = { size = "10pt" } } }
+    local function old_count(blocks) -- (the rule before: a run of a whole format, or the paragraph's own)
+      local pf, run, n = require("neoffice.paras"), { attrs = {} }, 0
+      for i, b in ipairs(blocks) do
+        local own = { align = b.align, attrs = b.para or {} }
+        local function shared(j)
+          local o = blocks[i + j]
+          return o and pf.same(own, { align = o.align, attrs = o.para or {} })
+        end
+        if not pf.same(own, run) then
+          n = n + 1
+          if shared(1) or shared(2) then
+            run = own
+          end
+        end
+      end
+      return n
+    end
+    math.randomseed(7)
+    for _ = 1, 300 do
+      local blocks = {}
+      for i = 1, math.random(1, 9) do
+        blocks[i] = vim.deepcopy(formats[math.random(#formats)])
+      end
+      local shown = lines_of(blocks)
+      assert.truthy(#shown <= old_count(blocks), vim.inspect(blocks))
+      -- (and they say each paragraph's format: what the lines give is what it has)
+      local run, pf = { attrs = {} }, require("neoffice.paras")
+      for i, line in ipairs(neo.format_lines(blocks)) do
+        run = line.run or run
+        local got = line.own and markup.apply_para_line(run, line.own) or run
+        assert.is_true(pf.same(got, { align = blocks[i].align, attrs = blocks[i].para or {} }), vim.inspect({ blocks, i }))
+      end
+    end
+  end)
+end)
+
+for _, ext in ipairs({ "docx", "odt" }) do
+  describe(ext .. " formats shown after a centred run, a heading, and paragraphs of two styles", function()
+    it("say no alignment again where none changes, and the style where it does", function()
+      local path = H.copy("rich." .. ext)
+      H.open(path)
+      local n = api.nvim_buf_line_count(0)
+      api.nvim_buf_set_lines(0, n, n, false, { "", "<|>+", "Someone.", "", "Somewhere.", "", "# A new section", "", "{none, style = First Paragraph}+",
+        "One after the heading.", "", "{style = none}+", "Two.", "", "Three." })
+      H.reopen()
+      local lines = H.lines()
+      local at = vim.fn.index(lines, "# A new section") + 1
+      assert.truthy(at > 0, table.concat(lines, "\n"))
+      local after = vim.tbl_filter(function(l) return l:find("^[{<]") ~= nil end, vim.list_slice(lines, at))
+      assert.is_nil(table.concat(after, "\n"):find("align", 1, true), table.concat(lines, "\n"))
+      assert.truthy(#after <= 1, table.concat(after, "\n"))
+      local before = H.bytes(path)
+      vim.bo.modified = true
+      H.save()
+      assert.equals(before, H.bytes(path))
+    end)
+  end)
+end

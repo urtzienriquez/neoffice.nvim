@@ -211,9 +211,9 @@ for _, name in ipairs({ "layout.docx", "layout.odt" }) do
       vim.api.nvim_buf_set_lines(0, r - 1, r, false, { "<=>" }) -- (its alignment's line)
       H.replace(4, "> ", "")
       assert.equals(0, #H.changes(require("neoffice").config.author))
-      H.reopen() -- (now justified paragraphs one after the other: under one line of their format)
+      H.reopen() -- (now two justified paragraphs one after the other: each its own line, as short as a "+" line and its end)
       assert.same({ "Right text.", "A quote." }, { H.paras()[2], H.paras()[4] })
-      assert.equals("<=>+", H.lines()[H.row(2) - 1])
+      assert.same({ "<=>", "<=>" }, { H.lines()[H.row(2) - 1], H.lines()[H.row(3) - 1] })
     end)
 
     if H.has_libreoffice then
