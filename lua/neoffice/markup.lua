@@ -142,9 +142,13 @@ local function caption_kind(word)
 end
 M.caption_kind = caption_kind
 
+-- A table of contents, a list of figures or of tables: a line of its own, as in LaTeX (see init.lua).
+M.INDEX_LINES = { contents = "\\tableofcontents", figures = "\\listoffigures", tables = "\\listoftables" }
 function M.prefix(block)
   if block.vspace then -- (vertical space: an empty paragraph of that height, its line all of it)
     return "\\vspace{" .. block.vspace .. "}"
+  elseif block.toc then
+    return M.INDEX_LINES[block.toc]
   end
   local list, kind = block.list, ""
   if block.caption then
@@ -409,6 +413,11 @@ function M.block(line)
   local word, after_word = line:match("^([^%s:\\]+): ()")
   local caption = word and caption_kind(word)
   local vspace = line:match("^\\vspace%s*{%s*([^{}]-)%s*}%s*$") or line:match("^\\vspace%s*$") and "1cm" -- (alone: 1cm)
+  for kind, text in pairs(M.INDEX_LINES) do -- (a table of contents..., its line all of it)
+    if line:match("^" .. vim.pesc(text) .. "%s*$") then
+      return { toc = kind }, #line + 1, 1, nil
+    end
+  end
   if vspace then -- (vertical space, its line all of it: "\vspace{1cm}", see M.vspace_shown)
     local cm = tonumber(require("neoffice.paras").measure("before", vspace) or "")
     return { vspace = vspace, vspace_cm = cm and cm > 0 and cm or nil,
@@ -473,7 +482,7 @@ function M.block(line)
 end
 
 local function kind(block)
-  return block.heading or block.title or block.quote or block.list or block.row or block.caption or block.fence or block.vspace
+  return block.heading or block.title or block.quote or block.list or block.row or block.caption or block.fence or block.vspace or block.toc
 end
 
 local math_at, enclosed, link_at -- (below)

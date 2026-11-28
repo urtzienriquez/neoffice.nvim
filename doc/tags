@@ -38,6 +38,7 @@ neoffice-styles-reset	neoffice.txt	/*neoffice-styles-reset*
 neoffice-table-format	neoffice.txt	/*neoffice-table-format*
 neoffice-tables	neoffice.txt	/*neoffice-tables*
 neoffice-text	neoffice.txt	/*neoffice-text*
+neoffice-toc	neoffice.txt	/*neoffice-toc*
 neoffice-tracking	neoffice.txt	/*neoffice-tracking*
 neoffice-vspace	neoffice.txt	/*neoffice-vspace*
 neoffice.setup()	neoffice.txt	/*neoffice.setup()*

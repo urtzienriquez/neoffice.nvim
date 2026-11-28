@@ -19,7 +19,7 @@ local pformat = require("neoffice.paras") -- (paragraphs' formats)
 -- Whether a paragraph is a plain one (not a heading, title, quote, list item or caption): those
 -- have a format of their own, set by the lines of formats (see paras.lua).
 local function plain(block)
-  return not (block.heading or block.title or block.quote or block.list or block.caption or block.vspace)
+  return not (block.heading or block.title or block.quote or block.list or block.caption or block.vspace or block.toc)
 end
 local api = vim.api
 local M = {}
@@ -262,7 +262,8 @@ function M.paragraphs(lines, alone)
       prev.last, prev.text = row, prefix .. prev.text .. line:sub(start)
     else
       empty_paragraphs(empty_after()) -- (the first blank line after a paragraph separates)
-      out[#out + 1] = { first = row, last = row, text = line, alone = alone[row], vspace = (markup.block(line)).vspace and true or nil }
+      local kind = markup.block(line) -- (vertical space, a table of contents: a line of its own, the next not joined to it)
+      out[#out + 1] = { first = row, last = row, text = line, alone = alone[row], vspace = (kind.vspace or kind.toc) and true or nil }
     end
     if out[#out] and out[#out].first == row then
       out[#out].format, out[#out].run = format, format -- (run: the format of the paragraphs around it, from "+" lines)
@@ -1174,7 +1175,7 @@ for _, key in ipairs(PIECE_KEYS) do
 end
 local function signature(block, list)
   local l = block.list
-  local out = { table.concat({ tostring(block.heading), tostring(block.title), tostring(block.quote), tostring(block.align), tostring(block.caption), tostring(block.vspace),
+  local out = { table.concat({ tostring(block.heading), tostring(block.title), tostring(block.quote), tostring(block.align), tostring(block.caption), tostring(block.vspace), tostring(block.toc),
     block.para and pformat.key({ attrs = block.para }) or "",
     tostring(block.cell), l and table.concat({ l.kind, l.level, tostring(l.pattern), tostring(l.id), tostring(l.continues) }, ",") or "" }, "|") }
   for _, piece in ipairs(list) do
@@ -1900,7 +1901,7 @@ local function open(buf, path)
   find_captions(paras)
   hoist_floats(paras, fmt.page and fmt.page(ctx))
   ctx.dirty, ctx.files = {}, {} -- parts to write on save (name -> true, or content for new files)
-  local doc = { path = path, base = base, is_doc = ext == "doc", fmt = fmt, ctx = ctx, paras = {}, run = {}, object = {}, comment = {}, change = {}, caption_seps = {}, caption_as = {}, boxes = {}, link_props = setmetatable({}, { __mode = "k" }) }
+  local doc = { path = path, base = base, is_doc = ext == "doc", fmt = fmt, ctx = ctx, paras = {}, tocs = {}, run = {}, object = {}, comment = {}, change = {}, caption_seps = {}, caption_as = {}, boxes = {}, link_props = setmetatable({}, { __mode = "k" }) }
   doc.stamp, doc.synced = stamp(path), not new -- (synced: the file has the base's content)
   doc.tracking = M.config.track_changes
   if doc.tracking == nil then
@@ -2167,6 +2168,7 @@ local function open(buf, path)
     end
     last_text = (texts[k] ~= "" or cells[k]) and k or last_text
     doc.paras[k] = para.node
+    doc.tocs[k] = para.toc and para.toc.nodes or nil -- (a table of contents...: all it is, kept as it is)
     doc.caption_seps[k] = para.block.caption_sep
     doc.caption_as[k] = para.block.caption and { label = para.block.caption_label, seq = para.block.caption_seq, number = para.block.caption_number } or nil
     if para.box then -- (the document's boxes, and how they are placed: see M.save)
@@ -2174,6 +2176,15 @@ local function open(buf, path)
     end
   end
   doc.texts = texts
+  local heading_key = {} -- (the headings, as a table of contents lists them: see M.save)
+  for k, t in ipairs(texts) do
+    local kind = markup.block(t)
+    if kind.heading and not cells[k] and not paras[k].box then
+      local _, chars = markup.parse(t)
+      heading_key[#heading_key + 1] = kind.heading .. " " .. vim.trim(table.concat(vim.tbl_map(function(c) return c.ch end, chars)))
+    end
+  end
+  doc.heading_key = table.concat(heading_key, "\n")
   doc.keys = {}
   for k, text in ipairs(texts) do
     doc.keys[k] = match_key(text, cells[k] and column[k])
@@ -2240,10 +2251,23 @@ local function open(buf, path)
   end
   if M.config.styles ~= false and doc.fmt.style_of and last_text > 0 then
     local seen, order = {}, {}
-    for _, para in ipairs(paras) do
-      local id = para.node and doc.fmt.style_of(ctx, para.node)
+    local function add(id)
       if id and not seen[id] then
         seen[id], order[#order + 1] = true, id
+      end
+    end
+    for _, para in ipairs(paras) do
+      add(para.node and not para.block.toc and doc.fmt.style_of(ctx, para.node))
+    end
+    -- (and those of the tables of contents' paragraphs: their title's, their entries', to change how
+    -- they look, though they aren't shown)
+    local PARA_TAGS = doc.fmt.MAIN == "content.xml" and { ["text:p"] = true, ["text:h"] = true } or { ["w:p"] = true }
+    for _, para in ipairs(paras) do
+      for _, node in ipairs(para.toc and para.toc.nodes or {}) do
+        local list = PARA_TAGS[node.tag] and { node } or xml.collect(node, PARA_TAGS)
+        for _, p in ipairs(list) do
+          add(doc.fmt.style_of(ctx, p))
+        end
       end
     end
     local default = doc.fmt.style_of(ctx, xml.elem(doc.fmt.MAIN == "content.xml" and "text:p" or "w:p"))
@@ -2672,7 +2696,7 @@ local function decorate_rows(buf, doc, lines, s, e, paras, header, number, fresh
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = brace - 1, hl_group = "NeofficeSection", priority = 150 })
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, brace - 1, { end_col = #line, hl_group = "NeofficeMark", priority = 150 })
     end
-    if line:find("^\\vspace") and (markup.block(line)).vspace then -- (vertical space: as a page break)
+    if line:find("^\\") and ((markup.block(line)).vspace or (markup.block(line)).toc) then -- (vertical space, a table of contents: as a page break)
       api.nvim_buf_set_extmark(buf, NS_DECOR, r - 1, 0, { end_col = #line, hl_group = "neofficeBreak", priority = 150 })
     end
     local fence, attrs = markup.box_line(line)
@@ -3795,6 +3819,18 @@ function M.save(buf, target)
       texts[k] = p.text
     end
     local old_of, deleted = match_lines(doc.keys or doc.texts, block_keys(blocks))
+    -- (a table of contents... is kept as it is, or goes: a line typed over it, or one typed as one over
+    -- a paragraph, is a new paragraph, or a new one, where the other went)
+    for k, block in ipairs(blocks) do
+      local o = old_of[k]
+      if o then
+        local now = (markup.block(block.text)).toc
+        local was = doc.tocs[o] and (markup.block(doc.texts[o] or "")).toc
+        if (now or was) and now ~= was then
+          deleted[#deleted + 1], old_of[k] = o, nil
+        end
+      end
+    end
     align_numbers(buf, blocks, old_of)
 
     -- 1. Work out every paragraph first: if anything is wrong (a missing image, an equation that
@@ -3938,6 +3974,10 @@ function M.save(buf, target)
         end
       end
       assert(not kind.vspace_bad, kind.vspace_bad and ("line %d: %s"):format(block.first, kind.vspace_bad))
+      if kind.toc then -- (a table of contents...: between paragraphs of the text; a new one, a table of contents only)
+        assert(not block.cell and not block.box, ("line %d: %s goes between paragraphs of the text, not in a table cell or a box"):format(block.first, markup.INDEX_LINES[kind.toc]))
+        assert(old_of[k] or kind.toc == "contents", ("line %d: %s is kept where the document has one, but neoffice can't make a new one (\\tableofcontents it can)"):format(block.first, markup.INDEX_LINES[kind.toc]))
+      end
       -- (one that was \vspace and isn't now, typed over: nothing of the space to stay on it)
       kind.was_vspace = old_of[k] and not kind.vspace and (markup.block(doc.texts[old_of[k]] or "")).vspace ~= nil or nil
       if kind.vspace then -- (vertical space: an empty paragraph of the usual style, of that height)
@@ -3997,6 +4037,7 @@ function M.save(buf, target)
     end
     local restore = checkpoint(ctx, notes)
     local integrity_after
+    local tocs_now, new_tocs, heading_key = {}, {}, doc.heading_key -- (tables of contents...: kept, new ones; the headings: see below)
     local written, failure = pcall(function()
     -- the styles first (what the paragraphs are written against); those whose look changed (also
     -- those under one that changed): their paragraphs written again, so what they say of their own
@@ -4076,8 +4117,13 @@ function M.save(buf, target)
       was_in_cell[k] = plan.old and doc.paras[plan.old] and M.cell_of(doc.paras[plan.old]) ~= nil
     end
     local outer -- (the last paragraph that isn't in a box)
+    tocs_now, new_tocs = {}, {} -- (tables of contents...: kept, and new ones, made once the headings are written)
     for k, plan in ipairs(plans) do
       local node = plan.old and doc.paras[plan.old]
+      local toc_line = (markup.block(blocks[k].text)).toc
+      local function fresh(template) -- (a new paragraph; a new table of contents' place, for now)
+        return toc_line and xml.elem(doc.fmt.MAIN == "content.xml" and "text:p" or "w:p") or doc.fmt.new_para(template, ctx)
+      end
       local prev_box = prev and box_of(prev)
       -- (where a new paragraph goes, after the one before it: asked before the layout takes a cell out)
       local anchor = prev and outside(prev) or doc.paras[1] and outside(doc.paras[1])
@@ -4105,7 +4151,7 @@ function M.save(buf, target)
           xml.append(content, node, first and xml.index(first) or nil)
         end
       elseif not node and prev_box then -- a new paragraph after a box: before the paragraph it is in
-        node = doc.fmt.new_para(plain or doc.paras[1], ctx)
+        node = fresh(plain or doc.paras[1])
         if prev_box.parent and xml.index(prev_box) then
           xml.append(prev_box.parent.parent, node, xml.index(prev_box.parent))
         elseif outer then
@@ -4122,11 +4168,17 @@ function M.save(buf, target)
       elseif not node and not anchor then -- the document had no paragraph at all
         node = doc.fmt.first_para(ctx)
       elseif not node then -- a new paragraph, formatted like the one before it
-        node = doc.fmt.new_para(plain or prev or doc.paras[1], ctx)
+        node = fresh(plain or prev or doc.paras[1])
         xml.append(anchor.parent, node, xml.index(anchor) + (prev and 1 or 0))
       end
       -- (what a new paragraph after it is formatted like: not vertical space, which has a height of its own)
-      plain = not plan.cell and not plan.box and not (markup.block(blocks[k].text)).vspace and node or plain
+      plain = not plan.cell and not plan.box and not (markup.block(blocks[k].text)).vspace and not toc_line and node or plain
+      if toc_line then
+        tocs_now[k] = plan.old and doc.tocs[plan.old] or nil
+        if not plan.old then
+          new_tocs[#new_tocs + 1] = { k = k, place = node }
+        end
+      end
       outer = not plan.box and node or outer
       seps[k] = plan.old and doc.caption_seps[plan.old] or nil
       written_as[k] = plan.old and doc.caption_as[plan.old] or nil
@@ -4134,7 +4186,8 @@ function M.save(buf, target)
       -- (not an empty one: its format isn't in the buffer, a blank line has none; it keeps its own)
       local restyled = next(restyle) and node and plan.old and not plan.cell and blocks[k].text ~= "" and restyled_ids[doc.fmt.style_of(ctx, node)]
       -- (and one whose text isn't the old paragraph's: whatever its fingerprint says)
-      if not plan.old or plan.sig ~= doc.sigs[plan.old] or restyled or blocks[k].text ~= doc.texts[plan.old] then
+      -- (a table of contents...: never written; a new one is made below)
+      if not toc_line and (not plan.old or plan.sig ~= doc.sigs[plan.old] or restyled or blocks[k].text ~= doc.texts[plan.old]) then
         plan.written = true
         if not plan.pieces then -- (one taken as it was, written all the same: moved into a table, a box...)
           plan.block, plan.pieces = pieces(buf, plan.lazy, false)
@@ -4198,10 +4251,52 @@ function M.save(buf, target)
         end
       end
       paras[k], prev = node, node
+      if tocs_now[k] then -- (what comes after it goes after all of it: a TOC field's last paragraph)
+        prev = tocs_now[k][#tocs_now[k]]
+      end
     end
     layout:finish()
+    -- the new tables of contents, of the headings as now written; and Word told to fill the fields
+    -- (their page numbers) when it opens the document next, if one was made, or the headings one
+    -- lists changed
+    local headings = {}
+    for k, block in ipairs(blocks) do
+      local kind = markup.block(block.text)
+      if kind.heading and not block.cell and not block.box then
+        local _, chars = markup.parse(block.text)
+        headings[#headings + 1] = { level = kind.heading, text = vim.trim(table.concat(vim.tbl_map(function(c) return c.ch end, chars))), node = paras[k] }
+      end
+    end
+    for _, t in ipairs(new_tocs) do
+      -- (a title right before it, a paragraph in the TOC heading's style: its, not a second one)
+      local k, before = xml.index(t.place), nil
+      local BLOCK = { ["w:p"] = true, ["w:tbl"] = true, ["w:sdt"] = true, ["text:p"] = true, ["text:h"] = true,
+        ["table:table"] = true, ["text:list"] = true, ["text:section"] = true, ["text:table-of-content"] = true }
+      for j = (k or 1) - 1, 1, -1 do -- (the block before it, past bookmarks' ends and the like between them)
+        local c = t.place.parent.children[j]
+        if c.tag and BLOCK[c.tag] then
+          before = c
+          break
+        end
+      end
+      local title = doc.fmt.toc_title and doc.fmt.toc_title(ctx, before) and before or nil
+      local el = doc.fmt.new_toc(ctx, headings, title)
+      local parent, at = t.place.parent, xml.index(t.place)
+      xml.remove(t.place)
+      xml.append(parent, el, at)
+      paras[t.k], tocs_now[t.k] = el, { el }
+      ctx.dirty[doc.fmt.MAIN] = true
+    end
+    heading_key = table.concat(vim.tbl_map(function(h) return h.level .. " " .. h.text end, headings), "\n")
+    if doc.fmt.update_fields_on_open and next(tocs_now) and (#new_tocs > 0 or heading_key ~= doc.heading_key) then
+      doc.fmt.update_fields_on_open(ctx)
+    end
     if #deleted > 0 then
-      remove_paragraphs(doc.fmt, vim.tbl_map(function(old) return doc.paras[old] end, deleted))
+      local nodes = {} -- (a table of contents: all it is)
+      for _, old in ipairs(deleted) do
+        vim.list_extend(nodes, doc.tocs[old] or { doc.paras[old] })
+      end
+      remove_paragraphs(doc.fmt, nodes)
       ctx.dirty[doc.fmt.MAIN] = true
     end
     -- each box in the paragraph after it (the first that isn't in a box or a table), placed as its
@@ -4337,6 +4432,7 @@ function M.save(buf, target)
       M.place(buf, "object", p.data, p.new.row, p.new.col, p.new.end_row, p.new.end_col)
     end
     doc.paras, doc.texts, doc.sigs, doc.caption_seps, doc.boxes, doc.caption_as = paras, texts, {}, seps, box_keys, written_as
+    doc.tocs, doc.heading_key = tocs_now, heading_key
     doc.keys = block_keys(blocks)
     if doc.sections then -- (the sections as they now are, each line marked as its section)
       local pages = require("neoffice.pages")

@@ -32,6 +32,8 @@ else in the file stays exactly as it was.
   text), and alignment `<|> centered`, `->> right`, `<=> justified` (on a format's line).
 - Line breaks (`\` at the end of a line), page breaks (`\newpage`) and vertical space between
   paragraphs (`\vspace{1cm}`, a line of its own).
+- A table of contents as one line, `\tableofcontents`: kept as the document has it (its entries
+  are Word's and LibreOffice's to make), removed with its line, added by typing it.
 - Tables as pipe tables (`| a | b |`): edit cells, add or remove rows and columns, new tables.
   Tables typeset themselves, as in LaTeX: booktabs rules, columns as wide as their content,
   compact rows, numbers aligned right. A line above a table changes its look

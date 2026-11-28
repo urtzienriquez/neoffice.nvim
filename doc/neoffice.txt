@@ -327,6 +327,24 @@ paragraph goes on in the next line). `\newpage` is a page break. In .odt files
 a page break comes before a paragraph, so there `\newpage` moves to the start
 of its paragraph.
 
+                                                                *neoffice-toc*
+A table of contents is one line, `\tableofcontents` (a list of figures
+`\listoffigures`, of tables `\listoftables`): its entries aren't text to
+edit, Word and LibreOffice make them, so it is kept as the document has it.
+Delete the line to remove it. Its title is its too, shown with it: also a
+paragraph in the TOC heading's style right before it ("TOC Heading",
+LibreOffice's "Contents Heading"). Type `\tableofcontents` on a line of its
+own to add one: its entries are the headings (levels 1-3), each a link to its
+heading, as Word makes one; its title "Contents", or the paragraph in the TOC
+heading's style right before it. The styles of its title and entries are at
+the top (|neoffice-styles|), to change how it looks. Its page numbers are filled by Word when it opens
+the document (neoffice asks it to, when it writes one or the headings it lists
+change), by LibreOffice when you update it (Tools > Update), and in the PDF of
+|neoffice-pdf| always. A list of figures or of tables the document has is
+kept; neoffice doesn't make new ones. It goes between paragraphs of the text,
+not in a table cell or a box. As text, starting a paragraph, it is escaped:
+`\\tableofcontents`.
+
                                                              *neoffice-vspace*
 `\vspace{1cm}` on a line of its own is vertical space between paragraphs:
 the paragraphs around it stay as they are; `\vspace` alone is 1cm. It is an empty paragraph of
@@ -805,6 +823,7 @@ neoffice, and so is the documents' filetype). It answers:
     `section`      a section: a new page with its own settings
     `newpage`      a page break
     `vspace`       vertical space between paragraphs (|neoffice-vspace|)
+    `toc`          a table of contents (|neoffice-toc|)
     `equation`     an equation of its own
     `numbered`     a numbered list, with an item under another
     `bullets`      a bulleted list

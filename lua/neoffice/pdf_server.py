@@ -140,6 +140,12 @@ def convert(src, dst):
                                         prop("MacroExecutionMode", 0), prop("UpdateDocMode", 0)))
     if doc is None:
         raise RuntimeError("LibreOffice couldn't open the document")
+    try:  # (its tables of contents... as the document now is: their entries and page numbers)
+        indexes = doc.getDocumentIndexes()
+        for i in range(indexes.getCount()):
+            indexes.getByIndex(i).update()
+    except Exception:
+        pass
     try:
         doc.storeToURL(uno.systemPathToFileUrl(part), (prop("FilterName", "writer_pdf_Export"),))
         os.replace(part, dst)

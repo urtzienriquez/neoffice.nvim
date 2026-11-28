@@ -816,6 +816,89 @@ function M.raw_para_attrs(ppr)
 end
 
 
+-- The tables of contents, lists of figures and of tables (Word's: a TOC field, "TOC \o "1-3"",
+-- "TOC \c "Figure"", over the paragraphs of its entries; in a content control, w:sdt, or not):
+-- paragraph -> { kind ("contents", "figures", "tables"), node (the content control, or the first
+-- paragraph), nodes (all it is: the content control, or its paragraphs) }.
+local function index_kind(instr)
+  local label = instr:match('\\c%s+"([^"]+)"') or instr:match("\\c%s+(%S+)")
+  if not label then
+    return "contents"
+  end
+  for kind, word in pairs(markup.captions()) do
+    if word:lower() == label:lower() then
+      return kind == "figure" and "figures" or kind == "table" and "tables" or "contents"
+    end
+  end
+  return label:lower():match("^tab") and "tables" or "figures"
+end
+function M.indexes(ctx)
+  local body, out = xml.find(ctx.root, "w:body"), {}
+  if not body then
+    return out
+  end
+  for _, sdt in ipairs(xml.collect(body, { ["w:sdt"] = true })) do
+    local gallery = xml.find(xml.child(sdt, "w:sdtPr") or {}, "w:docPartGallery")
+    if gallery and (xml.attr(gallery, "w:val") or ""):find("Table of Contents", 1, true) then
+      local instr = vim.iter(xml.collect(sdt, { ["w:instrText"] = true })):map(xml.text):join("")
+      local rec = { kind = index_kind(instr), node = sdt, nodes = { sdt } }
+      for _, p in ipairs(xml.collect(sdt, { ["w:p"] = true })) do
+        out[p] = rec
+      end
+    end
+  end
+  -- (its title, a paragraph in the TOC heading's style right before it: its, with it)
+  local function title_of(rec)
+    local first = rec.nodes[1]
+    local k = first.parent and xml.index(first)
+    local before = k and k > 1 and first.parent.children[k - 1]
+    local style = before and before.tag == "w:p" and xml.child(xml.child(before, "w:pPr") or {}, "w:pStyle")
+    local name = style and M.style_name(ctx, xml.attr(style, "w:val") or ""):lower()
+    if name == "toc heading" and not out[before] then
+      table.insert(rec.nodes, 1, before)
+      out[before] = rec
+    end
+  end
+  -- (a TOC field not in one: its paragraphs, from the one it begins in to the one it ends in)
+  local active, depth, pending = nil, 0, false
+  for _, p in ipairs(xml.collect(body, { ["w:p"] = true }, { ["w:tbl"] = true, ["w:sdt"] = true })) do
+    if active then
+      out[p] = active
+      table.insert(active.nodes, p)
+    end
+    for _, el in ipairs(xml.collect(p, { ["w:fldChar"] = true, ["w:instrText"] = true })) do
+      local kind = el.tag == "w:fldChar" and xml.attr(el, "w:fldCharType")
+      if active then
+        depth = depth + (kind == "begin" and 1 or kind == "end" and -1 or 0)
+        if depth == 0 then
+          active = nil
+        end
+      elseif kind == "begin" then
+        pending = true
+      elseif el.tag == "w:instrText" and pending then
+        local instr = xml.text(el)
+        if instr:match("^%s*TOC%f[%W]") then
+          active, depth = { kind = index_kind(instr), node = p, nodes = { p } }, 1
+          out[p] = active
+        end
+        pending = false
+      else
+        pending = false
+      end
+    end
+  end
+  local seen, recs = {}, {} -- (each once; their titles after: not while going through them)
+  for _, rec in pairs(out) do
+    if not seen[rec] then
+      seen[rec], recs[#recs + 1] = true, rec
+    end
+  end
+  for _, rec in ipairs(recs) do
+    title_of(rec)
+  end
+  return out
+end
+
 -- The sequence a numbering field counts ("SEQ Table \* ARABIC": Table), if it is one that just
 -- counts (not one that repeats, resets or hides the number).
 function M.seq_name(instr)
@@ -1238,7 +1321,16 @@ function M.load(path)
   end
   local paras = {}
   ctx.nested_tables = 0
+  local toc_of = M.indexes(ctx) -- (a table of contents...: one line, kept as it is; see M.indexes)
   for _, p in ipairs(xml.collect(xml.find(ctx.root, "w:body"), { ["w:p"] = true })) do
+    local toc = toc_of[p]
+    if toc then
+      if not toc.shown then
+        toc.shown = true
+        paras[#paras + 1] = { node = toc.node, block = { toc = toc.kind }, spans = {}, toc = toc }
+      end
+      goto next_para
+    end
     -- (in a table in a table's cell: not shown, kept as it is, as its cell's other paragraphs are written in place)
     local in_cell, tables = false, 0
     local up = p.parent
@@ -2170,6 +2262,134 @@ function M.unset_style(ctx, id, keys)
   end
   ctx.dirty[STYLES], ctx.style_attrs, ctx.style_fonts, ctx.style_aligns = true, nil, nil, nil -- (what styles give: read again)
   styles_changed(ctx)
+end
+
+-- A table of contents (\tableofcontents, see init.lua): a content control as Word makes one, its
+-- entries the headings (levels 1-3: { level, text, node }), each a link to a bookmark on its heading
+-- and its page number a field (PAGEREF: Word fills it, and LibreOffice when it updates the index,
+-- as neoffice's PDF does); inside one field (TOC), as Word writes it.
+local function toc_style(ctx, name, id, based, ppr)
+  local found = M.style_id(ctx, name)
+  local styles = xml.find(part(ctx, STYLES) or {}, "w:styles")
+  if found or not styles then
+    return found
+  end
+  local new = free_style_id(ctx, id)
+  styles_changed(ctx)
+  xml.append(styles, xml.elem("w:style", { { "w:type", "paragraph" }, { "w:styleId", new } }, {
+    xml.elem("w:name", { { "w:val", name } }),
+    xml.elem("w:basedOn", { { "w:val", based } }),
+    xml.elem("w:next", { { "w:val", default_style_id(ctx) or "Normal" } }),
+    xml.elem("w:uiPriority", { { "w:val", "39" } }),
+    xml.elem("w:unhideWhenUsed"),
+    xml.elem("w:pPr", {}, ppr or {}),
+  }))
+  ctx.dirty[STYLES] = true
+  return new
+end
+local function toc_bookmark(ctx, p) -- (its bookmark's name: the one Word or LibreOffice gave it, else a new one)
+  for _, b in ipairs(xml.collect(p, { ["w:bookmarkStart"] = true })) do
+    local name = xml.attr(b, "w:name") or ""
+    if name:match("^_Toc") or name:match("^__RefHeading") then
+      return name
+    end
+  end
+  local id = new_revision_id(ctx)
+  local name = "_TocNeo" .. id
+  local first = 1
+  while p.children[first] and p.children[first].tag == "w:pPr" do
+    first = first + 1
+  end
+  xml.append(p, xml.elem("w:bookmarkStart", { { "w:id", id }, { "w:name", name } }), first)
+  xml.append(p, xml.elem("w:bookmarkEnd", { { "w:id", id } }))
+  return name
+end
+local function toc_field_char(kind)
+  return xml.elem("w:r", {}, { xml.elem("w:fldChar", { { "w:fldCharType", kind } }) })
+end
+local function toc_instr_run(text)
+  return xml.elem("w:r", {}, { xml.elem("w:instrText", { { "xml:space", "preserve" } }, { { text = text } }) })
+end
+local function toc_text_run(text)
+  return xml.elem("w:r", {}, { xml.elem("w:t", { { "xml:space", "preserve" } }, { { text = text } }) })
+end
+-- A paragraph in the TOC heading's style: a table of contents' title (see M.indexes).
+function M.toc_title(ctx, p)
+  local style = p and p.tag == "w:p" and xml.child(xml.child(p, "w:pPr") or {}, "w:pStyle")
+  return style and M.style_name(ctx, xml.attr(style, "w:val") or ""):lower() == "toc heading" or false
+end
+function M.new_toc(ctx, headings, title)
+  local base = default_style_id(ctx) or "Normal"
+  local title_style = toc_style(ctx, "TOC Heading", "TOCHeading", heading_style(ctx, 1))
+  local tab = tostring(math.floor(M.text_width(ctx) / 2.54 * 1440 + 0.5))
+  local content = xml.elem("w:sdtContent")
+  local sdt = xml.elem("w:sdt", {}, {
+    xml.elem("w:sdtPr", {}, { xml.elem("w:docPartObj", {}, {
+      xml.elem("w:docPartGallery", { { "w:val", "Table of Contents" } }), xml.elem("w:docPartUnique"),
+    }) }),
+    content,
+  })
+  if title then -- (the title it had already, right before it: in it now, as Word has it)
+    xml.remove(title)
+    xml.append(content, title)
+  else
+    xml.append(content, xml.elem("w:p", {}, {
+      xml.elem("w:pPr", {}, { title_style and xml.elem("w:pStyle", { { "w:val", title_style } }) or nil }),
+      toc_text_run("Contents"),
+    }))
+  end
+  local list = vim.tbl_filter(function(h) return h.level <= 3 end, headings)
+  local instr = ' TOC \\o "1-3" \\h \\z \\u '
+  if #list == 0 then -- (none yet: the field alone, as Word leaves it)
+    xml.append(content, xml.elem("w:p", {}, { toc_field_char("begin"), toc_instr_run(instr), toc_field_char("separate"), toc_field_char("end") }))
+  end
+  for i, h in ipairs(list) do
+    local style = toc_style(ctx, "toc " .. h.level, "TOC" .. h.level, base,
+      { xml.elem("w:ind", { { "w:left", tostring(220 * (h.level - 1)) } }) })
+    local name = toc_bookmark(ctx, h.node)
+    local p = xml.elem("w:p", {}, { xml.elem("w:pPr", {}, {
+      style and xml.elem("w:pStyle", { { "w:val", style } }) or nil,
+      xml.elem("w:tabs", {}, { xml.elem("w:tab", { { "w:val", "right" }, { "w:leader", "dot" }, { "w:pos", tab } }) }),
+    }) })
+    if i == 1 then
+      xml.append(p, toc_field_char("begin"))
+      xml.append(p, toc_instr_run(instr))
+      xml.append(p, toc_field_char("separate"))
+    end
+    xml.append(p, xml.elem("w:hyperlink", { { "w:anchor", name }, { "w:history", "1" } }, {
+      toc_text_run(h.text), xml.elem("w:r", {}, { xml.elem("w:tab") }),
+      toc_field_char("begin"), toc_instr_run(" PAGEREF " .. name .. " \\h "), toc_field_char("separate"), toc_text_run(""), toc_field_char("end"),
+    }))
+    if i == #list then
+      xml.append(p, toc_field_char("end"))
+    end
+    xml.append(content, p)
+  end
+  ctx.dirty[M.MAIN] = true
+  return sdt
+end
+
+-- Word fills the document's fields (its tables of contents, their page numbers) when it opens it
+-- next (settings: w:updateFields), after neoffice wrote one, or changed the headings one lists.
+local SETTINGS_AFTER = {}
+for _, tag in ipairs(vim.split("hdrShapeDefaults footnotePr endnotePr compat docVars rsids m:mathPr attachedSchema themeFontLang clrSchemeMapping doNotIncludeSubdocsInStats doNotAutoCompressPictures forceUpgrade captions readModeInkLockDown smartTagType sl:schemaLibrary shapeDefaults doNotEmbedSmartTags decimalSymbol listSeparator", " ")) do
+  SETTINGS_AFTER[tag:find(":") and tag or "w:" .. tag] = true
+end
+function M.update_fields_on_open(ctx)
+  local settings = part(ctx, "word/settings.xml")
+  local root = settings and (settings.tag == "w:settings" and settings or xml.find(settings, "w:settings"))
+  if not root or xml.child(root, "w:updateFields") then
+    return
+  end
+  local at = #root.children + 1
+  for k, c in ipairs(root.children) do
+    if SETTINGS_AFTER[c.tag] then
+      at = k
+      break
+    end
+  end
+  xml.append(root, xml.elem("w:updateFields", { { "w:val", "true" } }), at)
+  ctx.dirty["word/settings.xml"] = true
 end
 
 -- The styles as a fresh document's (:Neoffice styles reset): each paragraph and character style

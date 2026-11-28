@@ -300,6 +300,7 @@ M.SNIPPETS = {
     { "section", "a section: a new page with its own settings", "\\\\newpage {${1:orientation = landscape}}\n\n$0" },
     { "newpage", "a page break", "\\\\newpage$0" },
     { "vspace", "vertical space between paragraphs: an empty paragraph of exactly that height", "\\\\vspace{${1:1cm}}$0" },
+    { "toc", "a table of contents: its entries the headings", "\\\\tableofcontents\n\n$0" },
     { "equation", "an equation of its own (LaTeX)", "\\$\\$${1:E = mc^2}\\$\\$\n$0" },
     { "numbered", "a numbered list, with an item under another (the document counts)", "#. ${1:First}\n#. ${2:Second}\n  #. ${3:Under it}\n$0" },
     { "bullets", "a bulleted list", "- ${1:One}\n- ${2:Two}\n$0" },

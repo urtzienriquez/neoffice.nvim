@@ -214,7 +214,7 @@ describe("what is written reads back as it was", function()
     "{a}", "\\", "\\\\", "==x==", "++x++", "~~x~~", "*x*", "x\ny", "x\n- y", "x\n# y", "a ==b=={green} c", "![a](b)",
     "x\\", "[x](y)", "$x$", "^[n]", "⟦f⟧", "C++ and C++", "n = 20", "a_{b}", "x^{2}",
     "J Physiol [B] 173", "[1]", "[1, 2] and [3]", "[a] [b](c)", "a]b[c", "[x]", "![x](y)", "x^[n]", "[[x]](y)", "]",
-    "[", "[x] (y)", "\\[ x \\]", "#. x", "  #. x", "{size = 9pt}+", "<|>+", "{a = 1}+ y", "\\vspace{1cm}", "\\vspace", "1.1. x",
+    "[", "[x] (y)", "\\[ x \\]", "#. x", "  #. x", "{size = 9pt}+", "<|>+", "{a = 1}+ y", "\\vspace{1cm}", "\\vspace", "1.1. x", "\\tableofcontents", "\\listoffigures",
   }
   local BLOCKS = {
     {}, { align = "justify" }, { align = "center" }, { align = "left" }, { align = "justify", para = { first = "1cm" } },

@@ -12,6 +12,7 @@ syntax match neofficeField "\\\@<!⟦.\{-}\\\@<!⟧"
 syntax match neofficeBreak "\\\@<!\\newpage"
 syntax match neofficeBreak "\\\@<!\\$"
 syntax match neofficeBreak "^\\vspace\s*\({[^{}]*}\)\?\s*$"
+syntax match neofficeBreak "^\\\(tableofcontents\|listoffigures\|listoftables\)\s*$"
 highlight default link neofficeUnderline Underlined
 highlight default link neofficeHighlight Search
 highlight default link neofficeSuperscript Special

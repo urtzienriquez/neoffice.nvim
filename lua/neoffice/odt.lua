@@ -10,6 +10,19 @@ local MANIFEST, STYLES = "META-INF/manifest.xml", "styles.xml"
 local LISTS = { ["text:list"] = true, ["text:list-item"] = true, ["text:list-header"] = true }
 
 local PARA = { ["text:p"] = true, ["text:h"] = true }
+-- (a table of contents, a list of figures or of tables: kept as they are, a line each)
+local INDEX = { ["text:table-of-content"] = true, ["text:illustration-index"] = true, ["text:table-index"] = true }
+function M.index_kind(el)
+  if el.tag == "text:table-of-content" then
+    return "contents"
+  elseif el.tag == "text:table-index" then
+    return "tables"
+  end
+  local source = xml.child(el, "text:illustration-index-source")
+  local seq = source and xml.attr(source, "text:caption-sequence-name") or ""
+  local word = require("neoffice.markup").captions().table
+  return (seq:lower() == (word or "table"):lower() or seq:lower():match("^tab")) and "tables" or "figures"
+end
 -- Elements shown as a "￼" placeholder even without text (others without text stay invisible).
 local VISIBLE = { ["draw:frame"] = true, ["draw:a"] = true, ["text:line-break"] = true }
 
@@ -859,7 +872,25 @@ function M.load(path)
   local paras = {}
   local body = assert(xml.find(ctx.root, "office:text"), "no office:text")
   ctx.nested_tables = 0
-  for _, p in ipairs(xml.collect(body, PARA, { ["text:tracked-changes"] = true })) do
+  -- (a table of contents' title, a paragraph in its heading's style right before it: its, with it)
+  local title_of = {}
+  for _, el in ipairs(xml.collect(body, INDEX, { ["text:tracked-changes"] = true })) do
+    local k = xml.index(el)
+    local before = k and k > 1 and el.parent.children[k - 1]
+    if before and before.tag == "text:p" and M.style_name(ctx, M.style_of(ctx, before)):lower() == "contents heading" then
+      title_of[el], title_of[before] = before, true
+    end
+  end
+  for _, p in ipairs(xml.collect(body, vim.tbl_extend("force", {}, PARA, INDEX), { ["text:tracked-changes"] = true })) do
+    if title_of[p] == true then -- (shown with its table of contents, below)
+      goto next_para
+    end
+    if INDEX[p.tag] then -- (a table of contents...: one line, kept as it is; see M.index_kind)
+      local kind = M.index_kind(p)
+      local nodes = title_of[p] and { title_of[p], p } or { p }
+      paras[#paras + 1] = { node = p, block = { toc = kind }, spans = {}, toc = { kind = kind, node = p, nodes = nodes } }
+      goto next_para
+    end
     -- (in a table in a table's cell: not shown, kept as it is, as its cell's other paragraphs are written in place)
     local in_cell, tables = false, 0
     local up = p.parent
@@ -1957,6 +1988,57 @@ local function ensure_para_style(ctx, name, attrs, children)
     ctx.style_attrs[name] = nil
   end
   return name
+end
+
+-- A table of contents (\tableofcontents, see init.lua), as LibreOffice makes one: its source (the
+-- outline's levels 1-3, each entry its text, a dotted tab and its page number) and its body, the
+-- headings ({ level, text }); the page numbers LibreOffice fills when it updates the index (as
+-- neoffice's PDF does).
+-- A paragraph in the Contents Heading style: a table of contents' title (see M.read).
+function M.toc_title(ctx, p)
+  return p and p.tag == "text:p" and M.style_name(ctx, M.style_of(ctx, p)):lower() == "contents heading" or false
+end
+function M.new_toc(ctx, headings, title)
+  local function style(name, shown, parent, indent)
+    return ensure_para_style(ctx, name, { { "style:display-name", shown }, { "style:parent-style-name", parent }, { "style:class", "index" } },
+      indent and { xml.elem("style:paragraph-properties", { { "fo:margin-left", indent } }, {
+        xml.elem("style:tab-stops", {}, { xml.elem("style:tab-stop", { { "style:position", "17cm" }, { "style:type", "right" }, { "style:leader-style", "dotted" }, { "style:leader-text", "." } }) }),
+      }) } or {})
+  end
+  local title_style = style("Contents_20_Heading", "Contents Heading", "Heading", nil)
+  local title_text = title and xml.text(title) or "Contents" -- (the title it had already, right before it: its now)
+  local source = xml.elem("text:table-of-content-source", { { "text:outline-level", "3" } }, {
+    xml.elem("text:index-title-template", { { "text:style-name", title_style } }, { { text = title_text } }),
+  })
+  local levels = {}
+  for level = 1, 3 do
+    levels[level] = style("Contents_20_" .. level, "Contents " .. level, "Index", ("%.2fcm"):format(0.5 * (level - 1)))
+    xml.append(source, xml.elem("text:table-of-content-entry-template", { { "text:outline-level", tostring(level) }, { "text:style-name", levels[level] } }, {
+      xml.elem("text:index-entry-link-start"), xml.elem("text:index-entry-chapter"), xml.elem("text:index-entry-text"),
+      xml.elem("text:index-entry-tab-stop", { { "style:type", "right" }, { "style:leader-char", "." } }),
+      xml.elem("text:index-entry-page-number"), xml.elem("text:index-entry-link-end"),
+    }))
+  end
+  local n = 1
+  for _, el in ipairs(xml.collect(ctx.root, { ["text:table-of-content"] = true })) do -- (a name of its own)
+    local num = tonumber((xml.attr(el, "text:name") or ""):match("(%d+)$") or "")
+    n = num and math.max(n, num + 1) or n
+  end
+  local name = "Table of Contents" .. n
+  local head = xml.elem("text:index-title", { { "text:name", name .. "_Head" } })
+  if title then
+    xml.remove(title)
+    xml.append(head, title)
+  else
+    xml.append(head, xml.elem("text:p", { { "text:style-name", title_style } }, { { text = title_text } }))
+  end
+  local body = xml.elem("text:index-body", {}, { head })
+  for _, h in ipairs(headings) do
+    if h.level <= 3 then
+      xml.append(body, xml.elem("text:p", { { "text:style-name", levels[h.level] } }, { { text = h.text }, xml.elem("text:tab") }))
+    end
+  end
+  return xml.elem("text:table-of-content", { { "text:name", name }, { "text:protected", "true" } }, { source, body })
 end
 
 -- The style of a caption of this kind ("table", "figure"): LibreOffice's "Table" or "Figure"
