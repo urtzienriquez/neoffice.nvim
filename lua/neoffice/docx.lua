@@ -2764,8 +2764,7 @@ end
 
 -- Vertical space (\vspace{1cm}, see markup.lua): an empty paragraph of exactly that height, no space
 -- before or after it. Its height, in cm, or nil if it isn't one (text in it, or another spacing).
-function M.vspace_of(_, p)
-  local ppr = xml.child(p, "w:pPr")
+local function vspace_ppr(ppr) -- (of its properties: see M.vspace_of)
   local spacing = ppr and xml.child(ppr, "w:spacing")
   if not spacing or xml.attr(spacing, "w:lineRule") ~= "exact" or xml.attr(spacing, "w:before") ~= "0" or xml.attr(spacing, "w:after") ~= "0"
     or xml.attr(spacing, "w:beforeAutospacing") == "1" or xml.attr(spacing, "w:afterAutospacing") == "1" then
@@ -2773,6 +2772,9 @@ function M.vspace_of(_, p)
   end
   local line = tonumber(xml.attr(spacing, "w:line") or "")
   return line and line > 0 and line / 1440 * 2.54 or nil
+end
+function M.vspace_of(_, p)
+  return vspace_ppr(xml.child(p, "w:pPr"))
 end
 function M.set_vspace(_, ppr, cm)
   local spacing = xml.child(ppr, "w:spacing") or put(ppr, xml.elem("w:spacing"), PPR_ORDER)
@@ -3417,6 +3419,17 @@ function M.fill(ctx, p, block, pieces)
     local el = xml.elem(tag, attrs)
     xml.set_attr(el, "w:id", id)
     xml.append(mark_rpr, el, 1) -- (first, as the schema wants)
+  end
+  -- (a \vspace typed over, as a heading, text, an item...: nothing of the space left on it, its
+  -- exact height and 0 before and after over what its style gives)
+  if block.was_vspace and vspace_ppr(ppr) then
+    local spacing = xml.child(ppr, "w:spacing")
+    for _, attr in ipairs({ "w:before", "w:after", "w:line", "w:lineRule" }) do
+      xml.set_attr(spacing, attr, nil)
+    end
+    if #(spacing.attrs or {}) == 0 then
+      xml.remove(spacing)
+    end
   end
   if block.style_id then -- (a plain paragraph's style: first, what its alignment and format are against)
     ppr = ppr or xml.elem("w:pPr")

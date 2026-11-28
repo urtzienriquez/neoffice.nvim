@@ -1638,6 +1638,45 @@ function M.set_vspace(ctx, p, cm)
   xml.set_attr(p, "text:style-name", ctx.made[key])
 end
 
+-- A paragraph that was vertical space and isn't now: its automatic style without the space's
+-- height and margins (its style's, the one it is based on, again); a copy, as others may share it.
+function M.unset_vspace(ctx, p)
+  local current = xml.attr(p, "text:style-name")
+  local auto = current and ctx.auto_paras[current]
+  if not auto then
+    return
+  end
+  local key = "unvspace|" .. current
+  if ctx.made[key] == nil then
+    local style = xml.copy(auto)
+    local props = xml.child(style, "style:paragraph-properties")
+    for _, attr in ipairs({ "fo:line-height", "fo:margin-top", "fo:margin-bottom", "style:line-height-at-least" }) do
+      xml.set_attr(props, attr, nil)
+    end
+    if props and #(props.attrs or {}) == 0 and #props.children == 0 then
+      xml.remove(props)
+    end
+    local parent = xml.attr(style, "style:parent-style-name")
+    local own = vim.iter(style.children):any(function(c) return c.tag ~= nil end)
+      or vim.iter(style.attrs):any(function(a) return a[1] ~= "style:name" and a[1] ~= "style:family" and a[1] ~= "style:parent-style-name" end)
+    if not own and parent then -- (nothing of its own left: its style's name)
+      ctx.made[key] = parent
+    else
+      local new, n = nil, 1
+      repeat
+        new, n = "NeoP" .. n, n + 1
+      until ctx.parent_style[new] == nil
+      xml.set_attr(style, "style:name", new)
+      xml.append(automatic(ctx), style)
+      ctx.made[key], ctx.auto_paras[new], ctx.parent_style[new] = new, style, parent or false
+      if ctx.para_style_el then
+        ctx.para_style_el[new] = style
+      end
+    end
+  end
+  xml.set_attr(p, "text:style-name", ctx.made[key])
+end
+
 function M.style_view(ctx, name)
   local paras = require("neoffice.paras")
   local out = vim.deepcopy(style_attrs(ctx, name))
@@ -3030,6 +3069,9 @@ function M.fill(ctx, p, block, pieces)
     xml.set_attr(p, "text:style-name", caption_style(ctx, block.caption))
   elseif not block.caption and in_caption and #xml.collect(p, { ["text:sequence"] = true }) > 0 and not (level or block.title or block.quote) then
     xml.set_attr(p, "text:style-name", nil)
+  end
+  if block.was_vspace and M.vspace_of(ctx, p) then -- (a \vspace typed over: nothing of the space left on it)
+    M.unset_vspace(ctx, p)
   end
   if block.style_id then -- (a plain paragraph's style: first, what its alignment and format are against)
     M.set_para_style(ctx, p, block.style_id)

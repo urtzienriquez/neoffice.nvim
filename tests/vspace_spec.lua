@@ -174,6 +174,87 @@ for _, ext in ipairs({ "docx", "odt" }) do
   end)
 end
 
+-- a \vspace typed over (the line replaced, "cc"): its paragraph, kept, is written as the new kind,
+-- and nothing of the space stays on it (no exact height, no 0 before and after over its style's)
+for _, ext in ipairs({ "docx", "odt" }) do
+  describe(ext .. " a \\vspace typed over", function()
+    local function own(path, text) -- (the paragraph's own spacing, as the file has it)
+      local main = zip.read(path, H.MAIN[ext])
+      if ext == "docx" then
+        local p = vim.iter(H.paragraph_xml(path)):find(function(x) return x:find(text, 1, true) end)
+        return p:match("<w:spacing[^>]*/>") or ""
+      end
+      local name = main:match('<text:[ph] text:style%-name="([^"]+)"[^>]*>' .. vim.pesc(text))
+        or main:match('<text:[ph] [^>]*text:style%-name="([^"]+)"[^>]*>' .. vim.pesc(text))
+      local st = name and main:match('<style:style style:name="' .. vim.pesc(name) .. '".-</style:style>') or ""
+      return (st:match("fo:line%-height=\"[^\"]+cm\"") or "") .. (st:match("fo:margin%-top=\"0cm\"") or "")
+    end
+    for _, case in ipairs({ { "as a heading", "# A new heading", "A new heading" }, { "as text", "Plain text now.", "Plain text now." },
+      { "as a list item", "- An item now", "An item now" }, { "as a quote", "> A quote now.", "A quote now." },
+      { "as a caption", "Figure: A caption now", "A caption now" } }) do
+      it(case[1] .. ": nothing of the space stays on it", function()
+        local path = H.copy("rich." .. ext)
+        H.open(path)
+        local r
+        for i, l in ipairs(H.lines()) do
+          if l:find("^Last paragraph") then
+            r = i
+          end
+        end
+        vim.api.nvim_buf_set_lines(0, r - 1, r - 1, false, { "\\vspace{0.5cm}", "" })
+        H.reopen()
+        for i, l in ipairs(H.lines()) do
+          if l:find("^\\vspace") then
+            r = i
+          end
+        end
+        vim.api.nvim_buf_set_lines(0, r - 1, r, false, { case[2] }) -- (cc: the line typed again)
+        H.reopen()
+        assert.truthy(vim.tbl_contains(H.lines(), case[2]), table.concat(H.lines(), "\n"))
+        assert.same({}, heights(path, ext))
+        assert.equals("", own(path, case[3]))
+      end)
+    end
+  end)
+end
+
+for _, ext in ipairs({ "docx", "odt" }) do
+  describe(ext .. " a paragraph typed right after a \\vspace", function()
+    it("isn't formatted like it (no exact height, no 0 before and after)", function()
+      local path = H.copy("rich." .. ext)
+      H.open(path)
+      local n = vim.api.nvim_buf_line_count(0)
+      vim.api.nvim_buf_set_lines(0, n, n, false, { "", "\\vspace{0.5cm}", "", "# Right after it" })
+      H.reopen()
+      assert.same({ "0.50" }, heights(path, ext))
+      local main = zip.read(path, H.MAIN[ext])
+      if ext == "docx" then
+        local p = vim.iter(H.paragraph_xml(path)):find(function(x) return x:find("Right after it", 1, true) end)
+        assert.is_nil(p:find('w:lineRule="exact"', 1, true), p)
+      else
+        local name = main:match('<text:h [^>]*text:style%-name="([^"]+)"[^>]*>Right after it')
+        assert.truthy(name, main:sub(-1500))
+        local st = main:match('<style:style style:name="' .. vim.pesc(name) .. '".-</style:style>') or ""
+        assert.is_nil(st:find('fo:line%-height="0.500cm"'), st)
+      end
+    end)
+  end)
+end
+
+describe("a heading of exactly a height, nothing before or after it, of its own (as a form has)", function()
+  it("keeps its spacing when its text is edited: it was never vertical space (docx)", function()
+    local tight = '<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:spacing w:before="0" w:after="0" w:line="300" w:lineRule="exact"/></w:pPr><w:r><w:t>A tight line.</w:t></w:r></w:p>'
+    local path = H.copy("rich.docx", function(name, text)
+      return name == "word/document.xml" and (text:gsub("<w:sectPr", tight .. "%0", 1)) or text
+    end)
+    H.open(path)
+    H.replace(vim.fn.index(H.paras(), "# A tight line.") + 1, "tight", "still tight")
+    H.reopen()
+    local p = vim.iter(H.paragraph_xml(path)):find(function(x) return x:find("still tight", 1, true) end)
+    assert.truthy(p:find('w:line="300" w:lineRule="exact"', 1, true), p)
+  end)
+end)
+
 describe("an empty paragraph of exactly a height in a document", function()
   it("opens as \\vspace when nothing is before or after it, else as a blank line", function()
     local path = H.copy("rich.docx", function(name, text)

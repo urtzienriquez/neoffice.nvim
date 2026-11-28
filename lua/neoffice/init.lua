@@ -3871,6 +3871,8 @@ function M.save(buf, target)
         end
       end
       assert(not kind.vspace_bad, kind.vspace_bad and ("line %d: %s"):format(block.first, kind.vspace_bad))
+      -- (one that was \vspace and isn't now, typed over: nothing of the space to stay on it)
+      kind.was_vspace = old_of[k] and not kind.vspace and (markup.block(doc.texts[old_of[k]] or "")).vspace ~= nil or nil
       if kind.vspace then -- (vertical space: an empty paragraph of the usual style, of that height)
         assert(not block.cell and not block.box, ("line %d: \\vspace goes between paragraphs of the text, not in a table cell or a box"):format(block.first))
         kind.style_id = doc.plain_style
@@ -4056,7 +4058,8 @@ function M.save(buf, target)
         node = doc.fmt.new_para(plain or prev or doc.paras[1], ctx)
         xml.append(anchor.parent, node, xml.index(anchor) + (prev and 1 or 0))
       end
-      plain = not plan.cell and not plan.box and node or plain
+      -- (what a new paragraph after it is formatted like: not vertical space, which has a height of its own)
+      plain = not plan.cell and not plan.box and not (markup.block(blocks[k].text)).vspace and node or plain
       outer = not plan.box and node or outer
       seps[k] = plan.old and doc.caption_seps[plan.old] or nil
       written_as[k] = plan.old and doc.caption_as[plan.old] or nil
